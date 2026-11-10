@@ -90,6 +90,7 @@ class EndQueue:
         self.worker = None
         self.backend = None
         self.failures = 0
+        self.cleanup_error = None
 
     def emit(self, event, **details):
         """Input: event and non-token metadata. Output: one auditable record."""
@@ -243,10 +244,13 @@ def install(client_type, writer_type, config, *, retention_enabled, record, end_
         finally:
             try:
                 await ends.close()
-            except BaseException as cleanup:
-                if original_error is None:
-                    raise
-                original_error.add_note(f"Retention END cleanup failed: {type(cleanup).__name__}")
+            except Exception as cleanup:
+                # Keep the replay's results: Trie writes output_json only after run returns.
+                # run_trie.py turns the recorded error into a failing exit status.
+                ends.cleanup_error = cleanup
+                ends.emit("END_CLEANUP_FAILED", error_class=type(cleanup).__name__, error=str(cleanup))
+                if original_error is not None:
+                    original_error.add_note(f"Retention END cleanup failed: {type(cleanup).__name__}")
 
     client_type._create_completion_with_connect_retry = create
     client_type._run_replay_trace = trace

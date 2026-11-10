@@ -87,14 +87,18 @@ def main() -> int:
     def record(value):
         log.write(json.dumps(value, separators=(",", ":")) + "\n")
 
-    session_replay.install(client, writer, config, retention_enabled=retention, record=record,
-                           end_outcomes=outcomes)
+    ends = session_replay.install(client, writer, config, retention_enabled=retention, record=record,
+                                  end_outcomes=outcomes)
     record(dict(event="RETENTION_REPLAY_INSTALLED", tokenizer_url=config.tokenizer_url,
                 retention_enabled=retention, end_outcomes=list(outcomes), wall_ns=time.time_ns()))
     install_routing_key(client)
 
     from trie.cli import main as trie_main
-    return trie_main()
+    status = trie_main()
+    if ends.cleanup_error is not None:
+        print(f"retention END cleanup failed: {ends.cleanup_error!r}", file=sys.stderr)
+        return status or 1
+    return status
 
 
 if __name__ == "__main__":
