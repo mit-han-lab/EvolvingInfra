@@ -9,11 +9,12 @@ Agent-Adaptive LLM Serving at Scale
 </h3>
 
 <p align="center">
-| <a href="https://inference-rsi.com/"><b>Website</b></a> | <b>Wiki</b> (coming soon) | <b>Tech Report</b> (coming soon) |
+| <a href="https://inference-rsi.com/"><b>Website</b></a> | <a href="https://arxiv.org/abs/2611.12304"><b>Paper</b></a> | <b>Wiki</b> (coming soon) |
 </p>
 
 <p align="center">
   <a href="https://inference-rsi.com/"><img src="https://img.shields.io/badge/Website-inference--rsi.com-2A78D6.svg" alt="Website"></a>
+  <a href="https://arxiv.org/abs/2611.12304"><img src="https://img.shields.io/badge/arXiv-2611.12304-b31b1b.svg" alt="Paper on arXiv"></a>
   <a href="docs/README.md"><img src="https://img.shields.io/badge/Docs-evolving--infra-6f42c1.svg" alt="Documentation"></a>
   <a href="https://huggingface.co/datasets/crmsndu/evolving-infra-traces"><img src="https://img.shields.io/badge/Traces-Hugging_Face-FFD21E.svg?logo=huggingface&logoColor=FFD21E" alt="Agent traces on Hugging Face"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green.svg" alt="License"></a>
@@ -73,8 +74,8 @@ traces, 90 concurrent agents.
 Build the image, which has every component:
 
 ```bash
-git clone https://github.com/crmsndu/evolving-infra.git
-cd evolving-infra
+git clone https://github.com/mit-han-lab/EvolvingInfra.git
+cd EvolvingInfra
 docker build -f docker/Dockerfile -t evolving-infra .
 ```
 
@@ -120,7 +121,19 @@ We welcome contributions. Please open an issue or a pull request.
 
 ## Citation
 
-The paper is coming soon; a BibTeX entry will be added here.
+If you use Evolving Infra, please cite the [paper](https://arxiv.org/abs/2611.12304):
+
+```bibtex
+@misc{kang2026evolvinginfraagentadaptivellm,
+  title={Evolving Infra: Agent-Adaptive LLM Serving at Scale},
+  author={Hao Kang and Weili Xu and Ziyang Li and Zheng Du and Hanchen Li and Tian Xia and Song Bian and Tushar Krishna and Huizi Mao and Ion Stoica and Song Han},
+  year={2026},
+  eprint={2611.12304},
+  archivePrefix={arXiv},
+  primaryClass={cs.DC},
+  url={https://arxiv.org/abs/2611.12304},
+}
+```
 
 ## License
 
