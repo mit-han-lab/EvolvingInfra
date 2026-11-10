@@ -61,6 +61,7 @@ RUN git clone --depth 1 --branch "${MOONCAKE_VERSION}" https://github.com/kvcach
  && sed -i 's/^    from mooncake.store import BufferPool$/    raise ImportError("mooncake.store disabled for the patched engine")/' "$MC/buffer_pool.py" \
  && grep -q 'disabled for the patched engine' "$MC/buffer_pool.py" \
  && ! (ldd "$MC/engine.so" | grep 'not found' | grep -v libcuda.so.1) \
+ && cd / \
  && rm -rf /opt/mooncake/src/build
 
 # ---------------------------------------------------------------- router
