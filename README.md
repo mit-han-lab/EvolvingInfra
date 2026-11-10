@@ -23,9 +23,7 @@ Agent-Adaptive LLM Serving at Scale
 
 ## About
 
-<p align="center">
-  <a href="https://github.com/user-attachments/assets/2b72a963-857f-4afe-88b8-765a065a0494"><img src="docs/demo/evolving-infra-vs-dynamo-cc126.gif" width="90%" alt="Dynamo and Evolving Infra each serve 126 Claude Code agents with GLM-5.2 on 36 GB300 GPUs, replayed at 60x speed. Each square is one agent: waiting for the model, generating, or running a tool. Evolving Infra finishes twice as many agents."></a>
-</p>
+https://github.com/user-attachments/assets/2e0dc016-da36-4f72-b33c-9f7122214ebe
 
 Evolving Infra is an LLM serving system for agent workloads. While it runs, it adjusts how the
 GPUs are split between prefill and decode, and which KV cache it keeps, to fit the agents it
