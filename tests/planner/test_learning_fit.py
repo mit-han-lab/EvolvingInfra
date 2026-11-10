@@ -118,10 +118,10 @@ def test_fit_recovers_dsv4_models_through_the_http_trace_path(tmp_path, monkeypa
         save(run / "diagnostics" / f"clock-offsets-{at_ns}.json", dict(at=at_ns / 1e9, nodes=[dict(
             node=0, host="127.0.0.1", roundtrip_s=0.001, controller_before_ns=at_ns, controller_after_ns=at_ns + 10**6,
             worker_minus_controller_s=0.0, lower_s=-0.0005, upper_s=0.0005)]))
-    save(run / "replay-timing.json", dict(start_wall=t0, duration_s=5400))
+    save(run / "learning-start.json", dict(start_wall=t0))
     save(run / "worker-capacities.json", {w["node"]: dict(kv_capacity_tokens=6461440, max_running_requests=256, tp_size=4)
                                              for w in workers})
-    cfg = dict(config.DEFAULTS, mode="benchmark", prefill_shape_prior="dsv4-flash-h200-tp4",
+    cfg = dict(config.DEFAULTS, prefill_shape_prior="dsv4-flash-h200-tp4",
                run_dir=str(run), scratch=str(scratch),
                hosts=[dict(index=0, ip="127.0.0.1")], workers=workers, trace_port=port)
     monkeypatch.setattr(fit_learning, "served_experts", lambda urls: (EXPERTS, TOP_K))

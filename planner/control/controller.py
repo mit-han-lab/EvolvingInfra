@@ -185,7 +185,7 @@ class Controller:
                      assignment=self.assignment))
 
     def adopt(self, snapshot, at, journal):
-        """Service mode: take over an assignment changed outside this controller.
+        """Take over an assignment changed outside this controller after the fit.
 
         Another client changed the roles, a PUT whose reply was lost was applied
         late, or the router restarted (new epoch, counters from zero). The new

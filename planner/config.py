@@ -1,13 +1,7 @@
 """Controller configuration: defaults, loading, and the checks made before a run starts.
 
-Two modes:
-
-- ``service`` (default): learning starts when the controller starts and the controller runs until it is
-  stopped. An error such as an unreachable router or engine skips at most one decision and is journaled; only an
-  error that leaves the controller unable to continue (listed in ``control.loop``) stops it.
-- ``benchmark``: learning starts when the caller writes ``<run_dir>/replay-timing.json`` (``start_wall``,
-  ``duration_s``), no role is changed after ``start_wall + duration_s``, and any error stops the controller with
-  ``<run_dir>/PLANNER_FAILED`` so a measured run never continues on partial data.
+The controller has one way to run: it waits out the cold start (``control.cold_start``), learns for ``learning_s``,
+then decides every ``period_s`` until it is stopped (``control.loop``).
 """
 import json
 from pathlib import Path
@@ -17,12 +11,10 @@ from .common import positive
 from .decide.workload import SLICE_S
 from .priors import resolve_prior
 
-MODES = ("service", "benchmark")
-
 DEFAULTS = dict(
-    mode="service", learning_s=1800, period_s=600, exclusion_s=120., update_onboarding=True,
+    learning_s=1800, period_s=600, exclusion_s=120., update_onboarding=True,
     clock_pad_s=0.5, telemetry_period_s=3., clock_probe_period_s=300., poll_s=3., trace_port=TRACE_PORT,
-    role_script=None, idle_after_cutoff=True,
+    role_script=None,
 )
 # Keys without a default: the deployment (router, token, directories, hosts, workers) and the prefill shape prior.
 REQUIRED = ("router_url", "token_file", "run_dir", "scratch", "hosts", "workers", "prefill_shape_prior")
@@ -33,6 +25,8 @@ REMOVED = dict(
     required_standard_errors="the decision rule always requires two standard errors",
     improvement_rule="the decision rule is always the per-minute standard-error rule",
     restore_counter_replicas="the TP size is read from every engine's /server_info",
+    mode="there is one mode: learning starts once the cold start is over",
+    idle_after_cutoff="there is no cutoff: the controller runs until it is stopped",
 )
 
 
@@ -55,8 +49,6 @@ def load_config(path) -> dict:
 
 def check_control_config(cfg: dict):
     """Reject a configuration before the run starts; returns (decision period, learning, sorted role script)."""
-    if cfg["mode"] not in MODES:
-        raise ValueError(f"mode must be one of {MODES}")
     period, learning = positive(cfg["period_s"], "decision period"), positive(cfg["learning_s"], "learning")
     resolve_prior(cfg)  # fail before the run, not at learning end
     if learning < period:
@@ -70,7 +62,5 @@ def check_control_config(cfg: dict):
 
 
 def learning_start_path(cfg: dict) -> Path:
-    """Where the learning start is recorded: written by the caller (benchmark) or by the controller (service).
-    The learning-end fit reads ``start_wall`` from it."""
-    name = "replay-timing.json" if cfg["mode"] == "benchmark" else "learning-start.json"
-    return Path(cfg["run_dir"]) / name
+    """Where the controller records the learning start; the learning-end fit reads ``start_wall`` from it."""
+    return Path(cfg["run_dir"]) / "learning-start.json"

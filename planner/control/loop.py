@@ -1,10 +1,12 @@
-"""Live P/D role controller: fit each worker once after learning, then move P/D roles through the Router.
+"""Live P/D role controller: wait out the cold start, fit each worker once after learning, then move P/D roles.
 
-A learning interval (default 1800 s) ends in one fit per worker (``fit.learning``); then every decision period
-(600 s) every other P count is a candidate, scored per 60-s workload slice (``decide``), and the controller switches
-only when the mean gain exceeds two standard errors. Prediction samples within 120 s after a confirmed switch are
-skipped, and the P restore ratios and packing are re-observed before each decision (``fit.current_p``). A role
-change is one Router role assignment (``api.RoleClient``). No engine is restarted.
+From the first completed request the controller waits until the share of input tokens served from cache settles
+(``control.cold_start``). A learning interval (default 1800 s) then ends in one fit per worker (``fit.learning``);
+every decision period (600 s) after it, every other P count is a candidate, scored per 60-s workload slice
+(``decide``), and the controller switches only when the mean gain exceeds two standard errors. Prediction samples
+within 120 s after a confirmed switch are skipped, and the P restore ratios and packing are re-observed before each
+decision (``fit.current_p``). A role change is one Router role assignment (``api.RoleClient``). No engine is
+restarted. The controller runs until it is stopped.
 
 Deployment contract (all paths and URLs come from the JSON config; see ``config`` and ``docs/dynamic-pd.md``):
 
@@ -16,22 +18,18 @@ Deployment contract (all paths and URLs come from the JSON config; see ``config`
   starts with these initial roles;
 - restore counters (``sglang:load_back_tokens_total{pool="kv"}``) are scraped from the current P
   workers; every TP rank increments the counter, so values are divided by the engines' TP size;
-- ``mode`` (``config``): in ``service`` mode learning starts when the controller starts and there is no cutoff;
-  in ``benchmark`` mode the caller writes ``<run_dir>/replay-timing.json`` (``start_wall``, ``duration_s``)
-  when the measured workload starts, no role update is made after ``start_wall + duration_s``, and after the
-  cutoff the process stays alive and idle (``idle_after_cutoff``) so a supervisor can tell completion from a
-  crash;
-- a failure that stops the controller writes ``<run_dir>/PLANNER_FAILED``. In benchmark mode every error does.
-  In service mode only these do: the router's worker set differs from the config, the roles before the fit
-  differ from the declared initial roles, or the learning-end fit fails. Every other error (router or engine
-  unreachable, a failed clock probe, the restore-counter scraper stopping, a failed or unconfirmed role update)
-  is journaled and the controller keeps running; a role assignment changed outside the controller is adopted;
-- ``role_script`` (testing only) replaces decisions with timed role changes after the fit.
+- the learning start is written to ``<run_dir>/learning-start.json``, where the learning-end fit reads it;
+- the controller stops, with ``<run_dir>/PLANNER_FAILED``, only when it cannot continue: the router's worker set
+  differs from the config, the roles before the fit differ from the declared initial roles, or the learning-end
+  fit fails. Every other error (router or engine unreachable, a failed clock probe, the restore-counter scraper
+  stopping, a failed or unconfirmed role update) is journaled and skips at most one decision; a role assignment
+  changed outside the controller after the fit is adopted;
+- ``role_script`` (testing only) replaces decisions with role changes at the given seconds after the learning
+  start, all after the fit.
 """
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import subprocess
@@ -45,28 +43,26 @@ from ..collect.trace_server import Mirror
 from ..common import save
 from ..config import check_control_config, learning_start_path
 from ..fit.current_p import observe_onboarding
+from .cold_start import ColdStart
 from .controller import Controller, node_assignment
 from .transition import HoldGuard, adjusted_loads, residual_drains, transition_residual
 
-# What one poll of the loop asks for next.
-SLEEP, AGAIN, STOP = "sleep", "again", "stop"
-
 
 def control(cfg: dict):
-    """Run the live controller (see the module docstring)."""
+    """Run the live controller until it is stopped (see the module docstring)."""
     ControlLoop(cfg).run()
 
 
 class ControlLoop:
-    """One controller run. Every `poll_s` it reads the router's roles and completed workload; during the last
-    decision period of learning and afterwards those observations are the decision samples. When learning ends it
-    runs the fit once (a subprocess); then every `period_s` it re-observes the P workers and decides."""
+    """One controller run. Every `poll_s` it reads the router's roles and completed workload. Once the cold start
+    is over, learning starts; during its last decision period and afterwards the observations are the decision
+    samples. When learning ends it runs the fit once (a subprocess); then every `period_s` it re-observes the P
+    workers and decides."""
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.directory, self.scratch = Path(cfg["run_dir"]), Path(cfg["scratch"])
         self.period, self.learning, self.script = check_control_config(cfg)
-        self.service = cfg["mode"] == "service"
         self.scripted = bool(self.script)  # scripted: timed role changes replace decisions for the whole run
         token = Path(cfg["token_file"]).read_text().strip()
         self.node_urls = {w["node"]: w["url"] for w in cfg["workers"]}
@@ -81,10 +77,10 @@ class ControlLoop:
         self.clock_pool, self.onboarding_pool = ThreadPoolExecutor(1), ThreadPoolExecutor(1)
         self.clock_pool.submit(self.clock.observe).result()
         self.clock_task, self.next_clock = None, time.monotonic() + cfg["clock_probe_period_s"]
-        # Measurement timing, on the monotonic clock.
-        self.timing = self.start_mono = self.learning_end = self.deadline = None
+        # Cold start, then the learning interval on the monotonic clock.
+        self.cold_start, self.start_mono, self.learning_end = ColdStart(), None, None
         # Learning end: one clock probe after the end, then the fit subprocess, then the controller.
-        self.cutoff_probe, self.cutoff_task, self.fit_proc, self.controller = False, None, None, None
+        self.learning_end_probe, self.learning_end_task, self.fit_proc, self.controller = False, None, None, None
         # Decision samples and schedule.
         self.samples, self.prediction_initial, self.first_assignment = [], None, None
         self.next_decision, self.first_decision = None, True
@@ -102,20 +98,10 @@ class ControlLoop:
         self.telemetry.start()
 
     def run(self):
-        cfg = self.cfg
         try:
             while True:
-                step = self.poll()
-                if step == STOP:
-                    break
-                if step == SLEEP:
-                    time.sleep(cfg["poll_s"])
-            if self.clock_task is not None:
-                self.clock_task.result(timeout=25)
-            self.telemetry.halt.set()
-            save(self.directory / "role-controller-complete.json", dict(
-                at=time.time(), cutoff_reached=True, fit_completed=self.controller is not None,
-                scripted_changes_left=len(self.script)))
+                self.poll()
+                time.sleep(self.cfg["poll_s"])
         except BaseException as error:
             (self.directory / "PLANNER_FAILED").write_text(f"planner controller: {error!r}")
             self.journal(dict(event="controller_failed", error=repr(error)))
@@ -123,48 +109,42 @@ class ControlLoop:
         finally:
             if self.fit_proc is not None and self.fit_proc.poll() is None:
                 self.fit_proc.terminate()
+            self.telemetry.halt.set()
             self.clock_pool.shutdown(wait=False, cancel_futures=True)
             self.onboarding_pool.shutdown(wait=False, cancel_futures=True)
             self.log.close()
             self.observations.close()
-        while cfg["idle_after_cutoff"]:  # alive and idle (no role updates) until the caller stops it
-            time.sleep(60)
 
     def poll(self):
         """One observation of the router, and whatever is due after it."""
         now = time.monotonic()
         self.check_background(now)
-        self.read_timing()
-        if self.timing and now >= self.deadline:
-            self.journal(dict(event="measurement_cutoff_no_further_role_updates"))
-            return STOP
         s = self.read_router()
         if s is None:
-            return SLEEP
+            return
         node_assignment(s, self.node_urls)
         self.telemetry.roles = dict(s["assignment"]["roles"])
         self.check_initial_assignment(s)
         row = dict(at=time.monotonic(), wall=time.time(), snapshot=s)
         self.observations.write(json.dumps(row) + "\n")
-        if self.timing and row["at"] >= self.learning_end - self.period and not self.scripted:
+        if self.start_mono is None:
+            self.watch_cold_start(row)
+        if self.start_mono is not None and row["at"] >= self.learning_end - self.period and not self.scripted:
             self.add_sample(s, row)
-        if self.timing and now >= self.learning_end and self.controller is None:
+        if self.start_mono is not None and now >= self.learning_end and self.controller is None:
             self.finish_learning(s)
         if self.controller is not None and self.script and now >= self.start_mono + self.script[0][0]:
             at_s, change = self.script.pop(0)
             apply_script(s, {self.node_urls[n]: r for n, r in change.items()}, self.client, self.journal, at_s)
         elif (self.controller is not None and not self.scripted and now >= self.next_decision
               and len(self.samples) >= 2):
-            return self.decide(s, row)
-        return SLEEP
+            self.decide(s, row)
 
     def read_router(self):
-        """The router's roles and completed workload; in service mode None while the router is unreachable."""
+        """The router's roles and completed workload; None while the router is unreachable."""
         try:
             s = self.client.request()
         except (OSError, ValueError) as error:  # unreachable, an HTTP error, or a reply that is not JSON
-            if not self.service:
-                raise
             if not self.router_down:
                 self.journal(dict(event="router_unavailable", error=repr(error)))
             self.router_down = True
@@ -175,10 +155,8 @@ class ControlLoop:
         return s
 
     def check_background(self, now):
-        """Handle a stopped restore-counter scraper; collect the periodic clock probe and start the next one."""
+        """Restart a stopped restore-counter scraper; collect the periodic clock probe and start the next one."""
         if self.telemetry.error is not None:
-            if not self.service:
-                raise RuntimeError(f"telemetry sampler failed: {self.telemetry.error!r}")
             self.journal(dict(event="telemetry_restarted", error=repr(self.telemetry.error)))
             self.start_telemetry(self.telemetry.roles)
         if self.clock_task is not None and self.clock_task.done():
@@ -188,43 +166,32 @@ class ControlLoop:
                                                 now + self.cfg["clock_probe_period_s"])
 
     def collect_clock_probe(self):
-        """Wait for the pending clock probe. In service mode a failed probe is journaled, and a failed probe after
-        learning is repeated before the fit, whose snapshot needs a probe after the learning interval."""
+        """Wait for the pending clock probe. A failed probe is journaled; a failed probe after learning is repeated
+        before the fit, whose snapshot needs a probe after the learning interval."""
         task, self.clock_task = self.clock_task, None
         try:
             task.result()
-        except Exception as error:  # noqa: BLE001 - any probe failure; benchmark mode re-raises it
-            if not self.service:
-                raise
-            self.journal(dict(event="clock_probe_failed", error=repr(error), after_learning=task is self.cutoff_task))
-            if task is self.cutoff_task:
-                self.cutoff_probe = False
+        except Exception as error:  # noqa: BLE001 - any probe failure
+            self.journal(dict(event="clock_probe_failed", error=repr(error), after_learning=task is self.learning_end_task))
+            if task is self.learning_end_task:
+                self.learning_end_probe = False
 
-    def read_timing(self):
-        """Place the learning start on the monotonic clock once: the controller start (service), or when the
-        caller writes replay-timing.json (benchmark)."""
-        if self.timing is not None:
+    def watch_cold_start(self, row):
+        """Journal each closed one-minute slice of the cold start; start learning when it is over."""
+        slice_ = self.cold_start.observe(row["at"], row["snapshot"]["completed_workload"])
+        if slice_ is not None:
+            self.journal(dict(event="cold_start_slice", **slice_))
+        done = self.cold_start.done
+        if done is None:
             return
-        if self.service:
-            self.timing = dict(start_wall=time.time())
-            save(learning_start_path(self.cfg), self.timing)  # the learning-end fit reads the start here
-            self.start_mono = time.monotonic()
-            self.learning_end, self.deadline = self.start_mono + self.learning, math.inf
-            self.journal(dict(event="learning_started", mode="service", **self.timing,
-                              learning_end_monotonic=self.learning_end))
-            return
-        path = learning_start_path(self.cfg)
-        if path.exists():
-            self.timing = json.loads(path.read_text())
-            self.start_mono = time.monotonic() - (time.time() - self.timing["start_wall"])
-            self.learning_end = self.start_mono + self.learning
-            self.deadline = self.start_mono + self.timing["duration_s"]
-            self.journal(dict(event="replay_timing", **self.timing, learning_end_monotonic=self.learning_end,
-                              deadline_monotonic=self.deadline))
+        self.start_mono, self.learning_end = row["at"], row["at"] + self.learning
+        save(learning_start_path(self.cfg), dict(start_wall=row["wall"], cold_start=done))
+        self.journal(dict(event="learning_started", start_wall=row["wall"], cold_start=done,
+                          learning_end_monotonic=self.learning_end))
 
     def check_initial_assignment(self, s):
         """The router starts with the declared roles, and nothing changes them before the fit (each worker is
-        measured in its initial role). In service mode a router restart that keeps those roles is accepted."""
+        measured in its initial role). A router restart that keeps those roles is accepted."""
         if self.first_assignment is None:
             if s["assignment"]["roles"] != self.initial_roles:
                 raise RuntimeError("Initial roles do not match the declared configuration")
@@ -232,7 +199,7 @@ class ControlLoop:
             save(self.directory / "role-controller-ready.json", dict(
                 at=time.time(), initial_assignment=self.first_assignment, first_clock_probe_complete=True))
         if self.controller is None and s["assignment"] != self.first_assignment:
-            if not (self.service and s["assignment"]["roles"] == self.initial_roles):
+            if s["assignment"]["roles"] != self.initial_roles:
                 raise RuntimeError("Initial roles/incarnation changed before learning")
             self.journal(dict(event="router_restarted_before_fit", before=self.first_assignment,
                               after=s["assignment"]))
@@ -240,7 +207,7 @@ class ControlLoop:
 
     def add_sample(self, s, row):
         """Raw observations stay complete; only prediction samples skip the post-switch exclusion."""
-        if self.service and self.controller is not None and s["assignment"] != self.controller.assignment:
+        if self.controller is not None and s["assignment"] != self.controller.assignment:
             self.controller.adopt(s, row["at"], self.journal)
             self.next_decision = max(self.next_decision, row["at"] + self.period)
         disposition = (self.controller.prediction_observation(s, row["at"], self.journal) if self.controller
@@ -260,11 +227,11 @@ class ControlLoop:
     def finish_learning(self, s):
         """After learning: one clock probe that brackets its end, then the fit subprocess, then the controller."""
         cfg, directory = self.cfg, self.directory
-        if not self.cutoff_probe:
+        if not self.learning_end_probe:
             if self.clock_task is not None:
                 self.collect_clock_probe()
-            self.clock_task = self.cutoff_task = self.clock_pool.submit(self.clock.observe)
-            self.cutoff_probe = True
+            self.clock_task = self.learning_end_task = self.clock_pool.submit(self.clock.observe)
+            self.learning_end_probe = True
         elif self.fit_proc is None and self.clock_task is None:
             (directory / "calibration").mkdir(exist_ok=True)
             self.fit_proc = subprocess.Popen(
@@ -287,10 +254,9 @@ class ControlLoop:
                               model_ready_monotonic=time.monotonic()))
 
     def decide(self, s, row):
-        """A periodic decision: re-observe the P workers, check the transition holds, then propose and apply."""
+        """A periodic decision: re-observe the P workers, check the transition holds, then propose and apply.
+        An unreachable endpoint or a failed update skips this decision instead of stopping the controller."""
         cfg = self.cfg
-        # Service mode: an unreachable endpoint skips this decision instead of stopping the controller.
-        skippable = (ValueError, OSError) if self.service else ValueError
         decision_samples = self.samples
         if cfg["update_onboarding"]:
             if self.onboarding_task is None:
@@ -299,10 +265,10 @@ class ControlLoop:
                     observe_onboarding, cfg, s["assignment"], start=self.samples[0]["wall"],
                     end=self.samples[-1]["wall"], mirror=self.mirror)
             if not self.onboarding_task.done():
-                return SLEEP
+                return
             try:
                 self.controller.update_onboarding(s, self.onboarding_task.result(), self.journal)
-            except (Exception if self.service else (OSError, ValueError, KeyError)) as error:
+            except Exception as error:  # noqa: BLE001 - the decision keeps the last valid observations
                 self.journal(dict(event="onboarding_update_unavailable", reason=str(error)))
             self.onboarding_task, decision_samples, self.onboarding_samples = None, self.onboarding_samples, None
         try:
@@ -314,27 +280,20 @@ class ControlLoop:
                                overridable=not residual_drains(residual)):
                 raise ValueError("Old role still active: " + repr(residual))
             decision = self.controller.propose(decision_samples)
-        except skippable as error:
+        except (ValueError, OSError) as error:
             self.controller.skip(s, str(error), self.journal)
         else:
-            if time.monotonic() + self.client.timeout + 1 >= self.deadline:
-                self.journal(dict(event="near_cutoff_hold_no_role_apply"))
-                self.next_decision = self.deadline + 1
-                return AGAIN
             self.apply(s, decision)
         self.first_decision = False
         self.samples = [row]
         self.next_decision = time.monotonic() + self.period
-        return SLEEP
 
     def apply(self, s, decision):
-        """Apply a decision. In service mode a failed or unconfirmed update is journaled and the next poll reads
-        whatever the router holds: an update that did arrive is then adopted as an external change."""
+        """Apply a decision. A failed or unconfirmed update is journaled and the next poll reads whatever the
+        router holds: an update that did arrive is then adopted as an external change."""
         try:
             assignment = self.controller.apply(s, decision, self.client, self.journal)
         except (OSError, ValueError, RuntimeError) as error:
-            if not self.service:
-                raise
             self.controller.skip(s, f"role update failed: {error!r}", self.journal)
             return
         save(self.directory / "role-state.json", dict(assignment=assignment))

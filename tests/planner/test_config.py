@@ -1,5 +1,6 @@
 """Controller configuration, prefill shape priors and the command line."""
 import json
+from pathlib import Path
 import subprocess
 import sys
 
@@ -59,7 +60,7 @@ def test_load_config_fills_defaults_and_records_its_path(tmp_path):
     path.write_text(json.dumps(dict(DEPLOYMENT, period_s=300)))
     cfg = config.load_config(path)
     assert cfg["period_s"] == 300 and cfg["learning_s"] == config.DEFAULTS["learning_s"]
-    assert cfg["mode"] == "service" and cfg["config_path"] == str(path.resolve())
+    assert cfg["config_path"] == str(path.resolve())
 
 
 def test_load_config_rejects_missing_unknown_and_removed_keys(tmp_path):
@@ -68,19 +69,20 @@ def test_load_config_rejects_missing_unknown_and_removed_keys(tmp_path):
                          ({k: v for k, v in DEPLOYMENT.items() if k != "prefill_shape_prior"},
                           "Missing.*prefill_shape_prior"),
                          (dict(DEPLOYMENT, slice_s=60.), "slice_s"),
-                         (dict(DEPLOYMENT, restore_counter_replicas=4), "TP size")):
+                         (dict(DEPLOYMENT, restore_counter_replicas=4), "TP size"),
+                         (dict(DEPLOYMENT, mode="benchmark"), "one mode"),
+                         (dict(DEPLOYMENT, idle_after_cutoff=True), "no cutoff")):
         path.write_text(json.dumps(given))
         with pytest.raises(ValueError, match=match):
             config.load_config(path)
 
 
-def test_control_checks_mode_and_learning_start_file():
+def test_control_checks_and_learning_start_file():
     cfg = dict(config.DEFAULTS, **DEPLOYMENT)
     assert config.check_control_config(cfg)[:2] == (600, 1800)
-    assert config.learning_start_path(cfg).name == "learning-start.json"
-    assert config.learning_start_path(dict(cfg, mode="benchmark")).name == "replay-timing.json"
-    with pytest.raises(ValueError, match="mode"):
-        config.check_control_config(dict(cfg, mode="replay"))
+    assert config.learning_start_path(cfg) == Path("/run/learning-start.json")
+    with pytest.raises(ValueError, match="follow the learning-end fit"):
+        config.check_control_config(dict(cfg, role_script=[[1800, {"node0": "decode"}]]))
     with pytest.raises(ValueError, match="two workload slices"):
         config.check_control_config(dict(cfg, period_s=200, exclusion_s=120.))
 
