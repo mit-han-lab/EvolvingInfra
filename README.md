@@ -22,16 +22,24 @@ Agent-Adaptive LLM Serving at Scale
 
 ---
 
-## About
-
 https://github.com/user-attachments/assets/2e0dc016-da36-4f72-b33c-9f7122214ebe
+
+Evolving Infra serves LLM agents and adapts to them while it runs. It needs no offline
+profiling: it learns how long prefill and decode take from live traffic. Serving coding, math and
+computer-use agents with GLM-5.2 and Kimi K2.6 on up to 256 GB300 GPUs, it reduces mean
+end-to-end latency by up to **4.1×** and P95 time to first token by up to **14×** compared with
+[NVIDIA Dynamo](https://github.com/ai-dynamo/dynamo), with up to **2.7×** its throughput.
+
+<p align="center">
+  <img alt="Lost KV reuse, mean end-to-end latency and P95 time to first token of Dynamo and Evolving Infra on Putnam (GLM-5.2), Claude Code (GLM-5.2) and OSWorld (Kimi K2.6), at three concurrency levels each" src="docs/assets/main-results.png" width=90%>
+  <br><sub>Math (Putnam), coding (Claude Code) and computer-use (OSWorld) agents, three concurrency levels each. Lower is better.</sub>
+</p>
+
+## About
 
 Evolving Infra is an LLM serving system for agent workloads. While it runs, it adjusts how the
 GPUs are split between prefill and decode, and which KV cache it keeps, to fit the agents it
-serves. Serving coding, math and computer-use agents with GLM-5.2 and Kimi K2.6 on up to 256
-GB300 GPUs, it reduces mean end-to-end latency by up to **4.1×** and P95 time to first token by
-up to **14×** compared with [NVIDIA Dynamo](https://github.com/ai-dynamo/dynamo), with up to
-**2.7×** its throughput.
+serves.
 
 - **Every node runs prefill and decode.** A node switches between the two in seconds, without a
   restart. KV stays in a host-memory pool that every node can read, so a node keeps its cache
@@ -59,15 +67,6 @@ H200, B300 and GB300 ([models and hardware](docs/README.md#models-and-hardware))
 The router sends each request to a prefill node and a decode node. The planner moves nodes
 between the two groups (dashed arrow). KV stays in shared host memory while an agent branch still
 uses it. [Architecture](docs/architecture.md) describes the request path.
-
-### Results
-
-Evolving Infra lowers latency against Dynamo on every workload in the paper. Below: Claude Code
-traces, 90 concurrent agents.
-
-<p align="center">
-  <img alt="Mean end-to-end latency and P95 time to first token versus Dynamo, Claude Code, 90 concurrent agents" src="docs/assets/teaser-gains.png" width=40%>
-</p>
 
 ## Getting Started
 
