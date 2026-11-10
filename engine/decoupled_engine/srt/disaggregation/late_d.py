@@ -53,6 +53,7 @@ or the lead trigger with need mode.
 
 from __future__ import annotations
 
+
 import abc
 import asyncio
 import bisect
@@ -177,6 +178,13 @@ LATE_D_OUTCOME_LOCAL = "local"
 # the route answers LateDLegEnded with the leg's HTTP status. In v1 choose
 # mode serves only this route; /generate and chat keep in-band errors.
 LATE_D_STATUS_ROUTE_ATTR = "_late_d_status_route"
+
+
+def _resolved(server_args, field):
+    """The resolved value of ``field`` (declarations included), not the raw input."""
+    from decoupled_engine.srt.arg_groups.overrides import resolution_result
+
+    return resolution_result(server_args, field)
 
 
 @dataclass(frozen=True)
@@ -533,7 +541,7 @@ def describe_late_d(server_args: Any) -> Optional[dict]:
     off; else the mode and the KV IP (the address the KV connector puts in
     its bootstrap messages), and on a prefill the router link port. The
     router opens its link to tcp://<worker host>:<control_port>."""
-    mode = getattr(server_args, "disaggregation_late_d", LATE_D_OFF)
+    mode = _resolved(server_args, "disaggregation_late_d") or LATE_D_OFF
     if mode in (None, LATE_D_OFF):
         return None
     from decoupled_engine.srt.utils.network import get_local_ip_auto
@@ -543,9 +551,9 @@ def describe_late_d(server_args: Any) -> Optional[dict]:
     except Exception:  # detection failed; the block still names the mode
         kv_ip = None
     block = {"mode": mode, "kv_ip": kv_ip}
-    if getattr(server_args, "disaggregation_late_d_allocation_trigger", "lead") != "lead":
-        block["allocation_trigger"] = server_args.disaggregation_late_d_allocation_trigger
-    port = getattr(server_args, "disaggregation_late_d_control_port", None)
+    if (_resolved(server_args, "disaggregation_late_d_allocation_trigger") or "lead") != "lead":
+        block["allocation_trigger"] = _resolved(server_args, "disaggregation_late_d_allocation_trigger")
+    port = _resolved(server_args, "disaggregation_late_d_control_port")
     if server_args.disaggregation_mode == "prefill" and port is not None:
         block["control_port"] = port
     return block

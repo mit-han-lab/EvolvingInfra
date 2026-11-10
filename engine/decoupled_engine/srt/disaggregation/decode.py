@@ -21,6 +21,7 @@ Life cycle of a request in the decode server
 
 from __future__ import annotations
 
+
 import logging
 import math
 import time
@@ -140,6 +141,13 @@ if TYPE_CHECKING:
     from decoupled_engine.srt.managers.scheduler import Scheduler
 
 CLIP_MAX_NEW_TOKEN = envs.SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION.get()
+
+
+def _resolved(server_args, field):
+    """The resolved value of ``field`` (declarations included), not the raw input."""
+    from decoupled_engine.srt.arg_groups.overrides import resolution_result
+
+    return resolution_result(server_args, field)
 
 
 def _decode_growth_reserve(req: Req, ratio: float, floor_tokens: int) -> int:
@@ -453,7 +461,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                     tree_cache,
                     self.token_to_kv_pool,
                     draft_token_to_kv_pool,
-                    host_enabled=scheduler.server_args.enable_hierarchical_cache,
+                    host_enabled=_resolved(scheduler.server_args, "enable_hierarchical_cache"),
                 )
             elif not (
                 isinstance(self.token_to_kv_pool, DSATokenToKVPool)

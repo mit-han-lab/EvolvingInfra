@@ -92,6 +92,9 @@ def maybe_build_mla_host_dedup(params, kvcache, storage_backend, extra_config):
         )
     if envs.SGLANG_DSA_HOST_DEDUP_CE_LOAD.get():
         raise ValueError("SGLANG_DSA_HOST_DEDUP_CE_LOAD requires the IPC fan-out")
+    from decoupled_engine.srt.arg_groups.symmetric_defaults import apply_gb300_dedup_tuning
+
+    apply_gb300_dedup_tuning("SGLANG_MLA_HOST_DEDUP_FANOUT")
     return build_host_dedup(
         params,
         kvcache,

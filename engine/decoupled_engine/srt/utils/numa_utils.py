@@ -24,6 +24,13 @@ _is_cuda = is_cuda()
 logger = logging.getLogger(__name__)
 
 
+def _resolved(server_args, field):
+    """The resolved value of ``field`` (declarations included), not the raw input."""
+    from decoupled_engine.srt.arg_groups.overrides import resolution_result
+
+    return resolution_result(server_args, field)
+
+
 @contextmanager
 def configure_subprocess(server_args: ServerArgs, gpu_id: int):
     if envs.SGLANG_NUMA_BIND_V2.get():
@@ -33,8 +40,8 @@ def configure_subprocess(server_args: ServerArgs, gpu_id: int):
             numactl_args = _numactl_cpu_mem_args(numa_node, gpu_id)
             if numactl_args is not None:
                 if (
-                    server_args.enable_dsv4_hicache_host_dedup
-                    or server_args.enable_dsa_hicache_host_dedup
+                    _resolved(server_args, "enable_dsv4_hicache_host_dedup")
+                    or _resolved(server_args, "enable_dsa_hicache_host_dedup")
                 ) and gpu_id == server_args.base_gpu_id:
                     # One rank now owns the whole node's host KV budget. A hard
                     # bind to its GPU-local NUMA node can OOM with abundant RAM

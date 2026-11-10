@@ -24,6 +24,7 @@ LATE_D_CHOOSE = {
     "SGLANG_SYMMETRIC_ADMIT_AFTER_LAUNCH": "1",
     "SGLANG_HICACHE_DECODE_CLEAR_CONSUMER": "1",
     "SGLANG_KV_SESSION_ADMIT_TAG": "1",
+    "SGLANG_DECODE_SELECTION_METRICS": "1",
 }
 HOST = {
     "SGLANG_PREBUILT_NONBLOCKING_H2D": "1",
@@ -157,3 +158,87 @@ def test_host_switches_follow_the_servicer_and_plain_tp():
     assert "SGLANG_PEER_KV_PUSH_FAST" not in env
     env, _ = sd.plan(cfg(disaggregation_mode="prefill"), {})
     assert "SGLANG_PREBUILT_NONBLOCKING_H2D" not in env
+
+
+NICS = '{"0": "mlx5_0,mlx5_1", "1": "mlx5_0,mlx5_1", "2": "mlx5_2,mlx5_3", "3": "mlx5_2,mlx5_3"}'
+DSA = {"dedup": "enable_dsa_hicache_host_dedup", "full_only": True}
+
+
+def bare(**kw):
+    """A symmetric engine with only the required flags."""
+    base = dict(
+        disaggregation_mode="symmetric",
+        symmetric_preset="paper",
+        enable_hierarchical_cache=False,
+        enable_prefill_work_snapshot=False,
+        disaggregation_late_d="off",
+        disaggregation_late_d_control_port=None,
+        disaggregation_late_d_lead_mode="count",
+        disaggregation_late_d_allocation_trigger="lead",
+        disaggregation_ib_device=NICS,
+        enable_peer_kv_servicer=False,
+        hicache_storage_backend=None,
+        peer_kv_servicer_max_leased_gb=16.0,
+        enable_kv_session_retention=False,
+        enable_dsa_hicache_host_dedup=False,
+        enable_mla_hicache_host_dedup=False,
+        enable_dsv4_hicache_host_dedup=False,
+        pp_size=1, dp_size=1, attn_cp_size=1, nnodes=1,
+        enable_dp_attention=False, disable_overlap_schedule=False,
+        disable_radix_cache=False, radix_eviction_policy="lru",
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_paper_features_turn_on_for_a_bare_symmetric_engine():
+    f = sd.plan_features(bare(), DSA, free_port=lambda: 21776, ratio_unset=True)
+    extra = f.pop("hicache_storage_backend_extra_config")
+    assert f == {
+        "enable_hierarchical_cache": True,
+        "enable_prefill_work_snapshot": True,
+        "disaggregation_late_d": "choose",
+        "disaggregation_late_d_control_port": 21776,
+        "disaggregation_late_d_lead_mode": "need",
+        "disaggregation_late_d_allocation_trigger": "first_chunk",
+        "enable_peer_kv_servicer": True,
+        "hicache_storage_backend": "dynamic",
+        "peer_kv_servicer_max_leased_gb": 64.0,
+        "enable_dsa_hicache_host_dedup": True,
+        "hicache_ratio": 4.445,
+        "enable_kv_session_retention": True,
+    }
+    assert sd.json.loads(extra)["ib_device"] == "mlx5_0,mlx5_1,mlx5_2,mlx5_3"
+    # The environment plan then sees the features as set.
+    env, fields = sd.plan(sd._Overlay(bare(hicache_io_backend="kernel", hicache_mem_layout="page_first"), f), {})
+    assert env["SGLANG_DSA_HOST_DEDUP_FANOUT"] == "ce_peer"
+    assert env["SGLANG_KV_SESSION_ADMIT_TAG"] == "1"
+    assert env["SGLANG_PEER_KV_PUSH_FAST"] == "1"
+    assert fields["hicache_mem_layout"] == "page_first_direct"
+
+
+def test_paper_features_keep_what_the_user_set_and_skip_what_cannot_run():
+    assert sd.plan_features(bare(symmetric_preset="none"), DSA) == {}
+    assert sd.plan_features(bare(disaggregation_mode="prefill"), DSA) == {}
+    f = sd.plan_features(
+        bare(disaggregation_late_d="alloc", enable_mla_hicache_host_dedup=True,
+             hicache_storage_backend="mooncake", disaggregation_ib_device=None),
+        DSA, free_port=lambda: 1, ratio_unset=False,
+    )
+    assert "disaggregation_late_d" not in f
+    assert "enable_dsa_hicache_host_dedup" not in f and "hicache_ratio" not in f
+    assert "enable_peer_kv_servicer" not in f
+    f = sd.plan_features(bare(enable_dp_attention=True), DSA, free_port=lambda: 1)
+    assert "disaggregation_late_d" not in f and "enable_dsa_hicache_host_dedup" not in f
+    f = sd.plan_features(bare(), {"dedup": "enable_dsv4_hicache_host_dedup", "full_only": False},
+                         free_port=lambda: 1, ratio_unset=True)
+    assert f["enable_dsv4_hicache_host_dedup"] and "enable_kv_session_retention" not in f
+    f = sd.plan_features(bare(), None, free_port=lambda: 1)
+    assert "enable_kv_session_retention" not in f and "hicache_ratio" not in f
+
+
+def test_ib_devices():
+    assert sd.ib_devices(None) == ""
+    assert sd.ib_devices("mlx5_0") == "mlx5_0"
+    assert sd.ib_devices("mlx5_0, mlx5_1,mlx5_0") == "mlx5_0,mlx5_1"
+    assert sd.ib_devices(NICS) == "mlx5_0,mlx5_1,mlx5_2,mlx5_3"

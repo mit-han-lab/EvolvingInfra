@@ -157,6 +157,10 @@ def _merge_lora_update_results(results: List[LoRAUpdateOutput]) -> LoRAUpdateOut
     )
 
 
+
+# Boot id of the control replies of an engine without KV session retention.
+_NO_RETENTION_BOOT_ID = "no-retention-" + __import__("uuid").uuid4().hex
+
 class TokenizerControlMixin:
     """Mixin for TokenizerManager's control-plane operations (weights, cache, lora,
     profile, internal state, etc.) -- everything that talks to the scheduler via
@@ -189,9 +193,18 @@ class TokenizerControlMixin:
             validate_kv_session_operations,
         )
 
-        if not get_memory().enable_kv_session_retention:
-            raise ValueError("KV session retention is not enabled")
         validate_kv_session_operations(obj.operations)
+        if not get_memory().enable_kv_session_retention:
+            # No retention (for example a FULL+SWA model): nothing is held for
+            # any session, so every operation is final. A router with
+            # retention on then closes the session instead of retrying.
+            return KvSessionControlReqOutput(
+                boot_id=_NO_RETENTION_BOOT_ID,
+                results=[
+                    dict(session_id=op.get("session_id"), version=op.get("version"), status="ended")
+                    for op in obj.operations
+                ],
+            )
         self.auto_create_handle_loop()
         results = await self.kv_session_control_communicator(obj)
         if len(results) != 1:

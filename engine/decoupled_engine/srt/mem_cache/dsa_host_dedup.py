@@ -413,6 +413,9 @@ def maybe_build_dsa_host_dedup(params, kvcache, storage_backend, extra_config):
             params, kvcache, storage_backend, extra_config, DSAHostDedup
         )
     if fanout == "ce_peer":
+        from decoupled_engine.srt.arg_groups.symmetric_defaults import apply_gb300_dedup_tuning
+
+        apply_gb300_dedup_tuning("SGLANG_DSA_HOST_DEDUP_FANOUT")
         if envs.SGLANG_DSA_HOST_DEDUP_SYMMETRIC_BROADCAST.get():
             raise ValueError(
                 "SGLANG_DSA_HOST_DEDUP_FANOUT=ce_peer has no broadcast to replace"

@@ -3581,6 +3581,17 @@ class ServerArgs:
         "SGLANG_SYMMETRIC_PD_IMPORT_BUDGET_FRACTION > 0.",
         NS("disagg"),
     ] = "off"
+    symmetric_preset: A[
+        Literal["paper", "none"],
+        "--disaggregation-mode symmetric only. 'paper' (default): turn on the "
+        "features of the paper's configuration that the other flags leave off: "
+        "the host KV tier, the prefill work snapshot, late decode choice "
+        "(need, first_chunk), the peer KV servicer and pulls when "
+        "--disaggregation-ib-device is set, KV session retention on FULL-only "
+        "models, and host dedup for the model's attention kind on single-node "
+        "TP. 'none': the flags as given.",
+        NS("disagg"),
+    ] = "paper"
     disaggregation_late_d_lead_min_reqs: A[
         int,
         "Late D: minimum lead window (bound but not started requests per prefill). Below it the token cap does not apply.",

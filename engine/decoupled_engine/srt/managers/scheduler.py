@@ -400,6 +400,13 @@ else:
 logger = logging.getLogger(__name__)
 
 
+def _resolved(server_args, field):
+    """The resolved value of ``field`` (declarations included), not the raw input."""
+    from decoupled_engine.srt.arg_groups.overrides import resolution_result
+
+    return resolution_result(server_args, field)
+
+
 def _prewarm_hccl_group(device, group, device_module):
     warmup_tensor = torch.zeros(1, dtype=torch.int32, device=device)
     torch.distributed.all_reduce(warmup_tensor, group=group)
@@ -2762,7 +2769,7 @@ class Scheduler(
         # kv-p2p owner-side lease servicer (R4: own thread per TP rank, never
         # rides the scheduler tick). Unified radix path only.
         self.peer_kv_servicer = None
-        if not self.server_args.enable_peer_kv_servicer:
+        if not _resolved(self.server_args, "enable_peer_kv_servicer"):
             if self.server_args.enable_peer_kv_gpu_export:
                 raise ValueError("GPU export requires --enable-peer-kv-servicer")
             return
@@ -2887,7 +2894,7 @@ class Scheduler(
             page_size=self.tree_cache.page_size,
             bind_port=self.server_args.peer_kv_servicer_port + self.ps.attn_tp_rank,
             max_leased_bytes=int(
-                self.server_args.peer_kv_servicer_max_leased_gb * (1 << 30)
+                _resolved(self.server_args, "peer_kv_servicer_max_leased_gb") * (1 << 30)
             ),
             trace_dir=self.server_args.peer_kv_servicer_trace_dir,
             dp_rank=self.ps.dp_rank or 0,
@@ -3013,7 +3020,7 @@ class Scheduler(
         if (
             self.disaggregation_mode
             in (DisaggregationMode.PREFILL, DisaggregationMode.SYMMETRIC)
-            and self.server_args.enable_prefill_work_snapshot
+            and _resolved(self.server_args, "enable_prefill_work_snapshot")
         ):
             from decoupled_engine.srt.managers.scheduler_components.prefill_work import (
                 PrefillWorkTracker,
@@ -3804,10 +3811,14 @@ class Scheduler(
                 self._add_request_to_queue(req)
                 return
 
-        if recv_req.kv_session is not None:
+        if recv_req.kv_session is not None and not get_memory().enable_kv_session_retention:
+            # A router with retention on tags every request; without retention
+            # (for example a FULL+SWA model) the tag has nothing to act on.
+            if not getattr(self, "_kv_session_tag_ignored", False):
+                self._kv_session_tag_ignored = True
+                logger.info("KV session tags ignored: retention is off on this engine")
+        elif recv_req.kv_session is not None:
             try:
-                if not get_memory().enable_kv_session_retention:
-                    raise ValueError("KV session retention is not enabled")
                 req.kv_session = recv_req.kv_session
                 self.tree_cache.note_kv_session_arrival(req)
             except ValueError as exc:

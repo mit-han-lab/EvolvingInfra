@@ -46,6 +46,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolved(server_args, field):
+    """The resolved value of ``field`` (declarations included), not the raw input."""
+    from decoupled_engine.srt.arg_groups.overrides import resolution_result
+
+    return resolution_result(server_args, field)
+
+
 def _get_allocator_type() -> str:
     return get_allocator_type()
 
@@ -192,9 +199,7 @@ def _peer_kv_reserve_pages(num_pages: int, which: str) -> int:
         server_args = get_global_server_args()
     except Exception:
         return 0
-    if server_args is None or not getattr(
-        server_args, "enable_peer_kv_servicer", False
-    ):
+    if server_args is None or not _resolved(server_args, "enable_peer_kv_servicer"):
         return 0
     from decoupled_engine.srt.arg_groups.overrides import resolution_result
 
@@ -2216,7 +2221,7 @@ class _DsaStrategy(StackStrategy):
             model_name=model_name,
             storage_backend_extra_config=storage_backend_extra_config,
             enable_storage_metrics=enable_storage_metrics,
-            enable_peer_serving=server_args.enable_peer_kv_servicer,
+            enable_peer_serving=_resolved(server_args, "enable_peer_kv_servicer"),
         )
         return StackBuildResult(
             host_pool_group=host_pool_group,

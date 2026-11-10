@@ -89,6 +89,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolved(server_args, field):
+    """The resolved value of ``field`` (declarations included), not the raw input."""
+    from decoupled_engine.srt.arg_groups.overrides import resolution_result
+
+    return resolution_result(server_args, field)
+
+
 def _is_swa_window(tree_cache) -> bool:
     """DSv4 uniform lifecycle with window SWA residency."""
     return getattr(tree_cache, "dsv4_uniform_swa_residency", "full") == "window"
@@ -576,7 +583,7 @@ class SchedulerSymmetricMixin:
         # servicer (FinalMeta.owner_peer_kv_addr). Only uniform-lifecycle
         # owners hold every SWA page on the host; others advertise nothing.
         owner_peer_kv_addr = None
-        if getattr(self.server_args, "enable_peer_kv_servicer", False) and getattr(
+        if _resolved(self.server_args, "enable_peer_kv_servicer") and getattr(
             self.tree_cache, "dsv4_uniform_cache_lifecycle", False
         ):
             from decoupled_engine.srt.disaggregation.symmetric.planes import advertised_host

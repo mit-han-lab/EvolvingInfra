@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+
 import asyncio
 import copy
 import dataclasses
@@ -183,6 +184,13 @@ _REQUEST_STATE_WAIT_TIMEOUT = envs.SGLANG_REQUEST_STATE_WAIT_TIMEOUT.get()
 _STRICT_REPLAY_DISCONNECT_POLL_TIMEOUT = 0.1
 
 logger = logging.getLogger(__name__)
+
+
+def _resolved(server_args, field):
+    """The resolved value of ``field`` (declarations included), not the raw input."""
+    from decoupled_engine.srt.arg_groups.overrides import resolution_result
+
+    return resolution_result(server_args, field)
 
 
 def _reject_missing_dispatched_encoder_embedding(request_obj, mm_inputs):
@@ -2160,8 +2168,8 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
     async def pause_generation(self, obj: PauseGenerationReqInput):
         if (
             self.server_args.disaggregation_mode == "symmetric"
-            and self.server_args.disaggregation_late_d == "alloc"
-            and self.server_args.disaggregation_late_d_lead_mode == "need"
+            and _resolved(self.server_args, "disaggregation_late_d") == "alloc"
+            and _resolved(self.server_args, "disaggregation_late_d_lead_mode") == "need"
             and obj.mode != "abort"
         ):
             raise ValueError(
@@ -2426,7 +2434,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             loop.create_task(print_exception_wrapper(self.sigterm_watchdog))
         )
 
-        if self.enable_metrics and self.server_args.disaggregation_late_d != "off":
+        if self.enable_metrics and _resolved(self.server_args, "disaggregation_late_d") != "off":
             # Late D overhead readout: event-loop lag of this process.
             from decoupled_engine.srt.disaggregation.late_d import (
                 make_tm_loop_lag_histogram,
