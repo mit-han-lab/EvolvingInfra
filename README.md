@@ -24,11 +24,11 @@ Agent-Adaptive LLM Serving at Scale
 
 https://github.com/user-attachments/assets/2e0dc016-da36-4f72-b33c-9f7122214ebe
 
-Evolving Infra serves LLM agents and adapts to them while it runs. It needs no offline
-profiling: it learns how long prefill and decode take from live traffic. Serving coding, math and
-computer-use agents with GLM-5.2 and Kimi K2.6 on up to 256 GB300 GPUs, it reduces mean
-end-to-end latency by up to **4.1×** and P95 time to first token by up to **14×** compared with
-[NVIDIA Dynamo](https://github.com/ai-dynamo/dynamo), with up to **2.7×** its throughput.
+Evolving Infra is an LLM serving system that adapts itself to the agent workload **purely online**,
+with **no offline profiling**. Serving coding, math and computer-use agents with GLM-5.2 and Kimi K2.6
+on up to 256 GB300 GPUs, it reduces mean end-to-end latency by up to **4.1×** and P95 time to
+first token by up to **14×** compared with [NVIDIA Dynamo](https://github.com/ai-dynamo/dynamo),
+with up to **2.7×** its throughput.
 
 <p align="center">
   <img alt="Lost KV reuse, mean end-to-end latency and P95 time to first token of Dynamo and Evolving Infra on Putnam (GLM-5.2), Claude Code (GLM-5.2) and OSWorld (Kimi K2.6), at three concurrency levels each" src="docs/assets/main-results.png" width=90%>
@@ -37,26 +37,18 @@ end-to-end latency by up to **4.1×** and P95 time to first token by up to **14�
 
 ## About
 
-Evolving Infra is an LLM serving system for agent workloads. While it runs, it adjusts how the
-GPUs are split between prefill and decode, and which KV cache it keeps, to fit the agents it
-serves.
+Evolving Infra adapts online through three designs:
 
-- **Every node runs prefill and decode.** A node switches between the two in seconds, without a
-  restart. KV stays in a host-memory pool that every node can read, so a node keeps its cache
-  when it switches.
-- **The planner follows the workload.** It learns how long prefill and decode steps take while
-  serving, and changes the prefill/decode split only when the gain lasts.
-- **The KV cache follows the agents.** The router counts how many agent branches (an agent or one
-  of its sub-agents) still use each KV block. Blocks that no branch uses, such as histories
-  replaced by compaction and the context of finished sub-agents, are evicted first.
-- **The router places requests by predicted wait.** It sends each prefill to the node with the
-  shortest predicted time to first token, and fetches cached KV from other nodes while the
-  request waits.
-
-Agents connect through an OpenAI-compatible API with one extra header. The engine (derived from
-[SGLang](https://github.com/sgl-project/sglang)), the Rust router, the planner and a replay client
-for agent traces build into one image, and run DeepSeek-V4-Flash, GLM-5.2 and Kimi-K2.6 on NVIDIA
-H200, B300 and GB300 ([models and hardware](docs/README.md#models-and-hardware)).
+1. **Decouple** compute allocation from KV cache management, so online adaptation is cheap: a node
+   switches between prefill and decode **in seconds, without a restart**, and its KV cache stays in
+   a host-memory pool that every node can read.
+2. **Predict** the prefill and decode load of agents with a **cost model** that covers
+   **sub-agents and context management**. The planner uses it to match the prefill/decode split to
+   the workload, and the router to place each request.
+3. **Manage KV** with an **agent-aware distributed KV manager**: signals from agent context
+   management drive KV transfer and eviction, so it **evicts** the KV that no agent branch needs,
+   such as histories replaced by compaction and the context of finished sub-agents, and **keeps**
+   the KV that agents will reuse.
 
 ### Overview
 
@@ -70,7 +62,9 @@ uses it. [Architecture](docs/architecture.md) describes the request path.
 
 ## Getting Started
 
-Build the image, which has every component:
+Evolving Infra runs DeepSeek-V4-Flash, GLM-5.2 and Kimi-K2.6 on NVIDIA H200, B300 and GB300
+([models and hardware](docs/README.md#models-and-hardware)). Build the image, which has every
+component:
 
 ```bash
 git clone https://github.com/mit-han-lab/EvolvingInfra.git
