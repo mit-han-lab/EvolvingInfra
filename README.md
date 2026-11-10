@@ -9,7 +9,10 @@ Agent-Adaptive LLM Serving at Scale
 </h3>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Paper-coming_soon-a83234.svg" alt="Paper: coming soon">
+| <a href="https://inference-rsi.com/"><b>Website</b></a> | <b>Wiki</b> (coming soon) | <b>Tech Report</b> (coming soon) |
+</p>
+
+<p align="center">
   <a href="https://inference-rsi.com/"><img src="https://img.shields.io/badge/Website-inference--rsi.com-2A78D6.svg" alt="Website"></a>
   <a href="docs/README.md"><img src="https://img.shields.io/badge/Docs-evolving--infra-6f42c1.svg" alt="Documentation"></a>
   <a href="https://huggingface.co/datasets/crmsndu/evolving-infra-traces"><img src="https://img.shields.io/badge/Traces-Hugging_Face-FFD21E.svg?logo=huggingface&logoColor=FFD21E" alt="Agent traces on Hugging Face"></a>
