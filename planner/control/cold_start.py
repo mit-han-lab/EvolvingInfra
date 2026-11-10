@@ -3,15 +3,15 @@
 From the first observation with completed requests on, the router's completed-usage counters are cut into one-minute
 slices at the controller's observations. A slice's cached share is 1 - uncached / input tokens of the requests that
 completed in it. The cold start is over at the end of the first slice whose share differs from the previous slice's by
-at most STABLE_CHANGE (one percentage point). A slice without a completed request, or without any cached token, does
+at most STABLE_CHANGE (0.3 percentage points). A slice without a completed request, or without any cached token, does
 not count and breaks the comparison: a share that stays at 0 % is the cold start itself (in a GLM-5.2 Claude Code run
-on nine GB300 nodes the first two minutes both served 0 % from cache, and the share settled at the end of minute 9).
-Learning starts anyway MAX_WAIT_S after the first completed request, so a workload whose share never settles is
-still planned for. A router restart (the counters start again from zero) restarts the detection.
+on nine GB300 nodes the first two minutes both served 0 % from cache, and the share settled at the end of minute 12,
+0.19 points from minute 11). Learning starts anyway MAX_WAIT_S after the first completed request, so a workload whose
+share never settles is still planned for. A router restart (the counters start again from zero) restarts the detection.
 """
 
 SLICE_S = 60.
-STABLE_CHANGE = .01
+STABLE_CHANGE = .003
 MAX_WAIT_S = 1800.
 
 

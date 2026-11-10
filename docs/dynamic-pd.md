@@ -27,7 +27,7 @@ request is dropped.
 The planner (`python -m evolving_infra.planner control`) runs in three phases:
 
 - **Cold start.** From the first completed request it computes, every minute, the share of input
-  tokens served from cache. When two consecutive minutes differ by at most one percentage point, the
+  tokens served from cache. When two consecutive minutes differ by at most 0.3 percentage points, the
   cold start is over. A minute with no cache hit at all does not count, and learning starts anyway
   30 minutes after the first completed request.
 - **Learning** (default 30 minutes). It reads each engine's scheduler step traces and, at the

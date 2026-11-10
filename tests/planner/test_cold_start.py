@@ -23,14 +23,16 @@ def feed(cold, minutes, start=1000., per_minute_tokens=1_000_000):
     return slices
 
 
-def test_cluster_run_settles_at_the_end_of_minute_9():
+def test_cluster_run_settles_at_the_end_of_minute_12():
     cold = ColdStart()
     slices = feed(cold, CLUSTER_MINUTES)
-    assert cold.done["reason"] == "cache_share_stable" and cold.done["waited_s"] == 9 * 60
-    assert cold.done["cached_share"] == pytest.approx(0.9656) and abs(cold.done["change"]) <= 0.01
+    assert cold.done["reason"] == "cache_share_stable" and cold.done["waited_s"] == 12 * 60
+    assert cold.done["cached_share"] == pytest.approx(0.9449) and abs(cold.done["change"]) <= 0.003
+    # Minute 9 (0.73 points from minute 8) and minute 10 (0.76) are not stable at 0.3 points.
+    assert [round(s["change"] * 100, 2) for s in slices[8:11]] == [0.74, -0.76, -1.12]
     # Minutes 1 and 2 served nothing from cache: an unchanged 0 % is the cold start, not its end.
     assert [s["cached_share"] for s in slices[:2]] == [None, None]
-    assert len(slices) == 9
+    assert len(slices) == 12
 
 
 def test_minute_without_completions_breaks_the_comparison():
