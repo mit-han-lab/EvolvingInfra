@@ -9,6 +9,14 @@ Agent-Adaptive LLM Serving at Scale
 </h3>
 
 <p align="center">
+Hao Kang<sup>1*</sup>, Weili Xu<sup>2*</sup>, Ziyang Li<sup>*</sup>, Zheng Du<sup>1*</sup>, Hanchen Li<sup>3</sup>, Tian Xia<sup>3</sup>, Song Bian<sup>4</sup>, Tushar Krishna<sup>1</sup>, Huizi Mao<sup>5</sup>, Ion Stoica<sup>3</sup>, Song Han<sup>6</sup>
+<br>
+<sup>1</sup>Georgia Tech &nbsp; <sup>2</sup>UIUC &nbsp; <sup>3</sup>UC Berkeley &nbsp; <sup>4</sup>NVIDIA &nbsp; <sup>5</sup>OpenAI &nbsp; <sup>6</sup>MIT
+<br>
+<sub><sup>*</sup>Equal contribution</sub>
+</p>
+
+<p align="center">
 | <a href="https://inference-rsi.com/"><b>Website</b></a> | <a href="https://arxiv.org/abs/2611.12304"><b>Paper</b></a> | <b>Wiki</b> (coming soon) |
 </p>
 
