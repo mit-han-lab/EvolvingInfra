@@ -116,7 +116,20 @@ client.completions.create(
 
 ## Contributing
 
-We welcome contributions. Please open an issue or a pull request.
+<p align="center"><img src="docs/assets/community-meme.jpg" alt="inferenceRSI" width="720"></p>
+
+We welcome contributions, and we recommend making them with a coding agent:
+
+- Use Claude Opus 5.5, GPT-6 Astra or a stronger model.
+- Attach the agent's session transcript to your pull request (remove any credentials first), so
+  reviewers can see how the change was made and checked.
+- For a larger change, open an issue first.
+
+### Community
+
+Join the InferenceRSI WeChat group to discuss the project:
+
+<p align="center"><img src="docs/assets/wechat-group.png" alt="InferenceRSI WeChat group QR code" width="240"></p>
 
 ## Citation
 
