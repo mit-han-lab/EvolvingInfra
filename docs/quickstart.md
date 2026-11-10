@@ -10,7 +10,7 @@ router. Worker `w0` (GPUs 0–3) starts as prefill (P), `w1` (GPUs 4–7) as dec
 - The runtime image, which has every component installed:
 
   ```bash
-  git clone https://github.com/crmsndu/evolving-infra.git && cd evolving-infra
+  git clone https://github.com/mit-han-lab/EvolvingInfra.git && cd EvolvingInfra
   docker build -f docker/Dockerfile -t evolving-infra .
   docker run --gpus all --network host --ipc host --device /dev/infiniband \
     -v /models:/models -it evolving-infra bash

@@ -12,7 +12,7 @@ context of live agent branches.
 - The runtime image on both nodes, built from this repository:
 
   ```bash
-  git clone https://github.com/crmsndu/evolving-infra.git && cd evolving-infra
+  git clone https://github.com/mit-han-lab/EvolvingInfra.git && cd EvolvingInfra
   docker build -f docker/Dockerfile -t evolving-infra .
   docker run --gpus all --network host --ipc host --device /dev/infiniband --ulimit memlock=-1 \
     -v /models:/models -it evolving-infra bash
