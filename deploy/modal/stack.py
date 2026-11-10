@@ -288,8 +288,8 @@ def conformance_command(outdir: str, worker_url_: str, name: str) -> list[str]:
 
 # ------------------------------------------------------------------------------------------- configs
 
-CONTROLLER = dict(  # planner loop.DEFAULTS overrides of the dynamic run, plus the router's drain timeout
-    learning_s=1800, period_s=600, exclusion_s=120., role_drain_timeout_s=5, role_script=None,
+CONTROLLER = dict(  # planner config.DEFAULTS overrides of the dynamic run, plus the router's drain timeout
+    mode="benchmark", learning_s=1800, period_s=600, exclusion_s=120., role_drain_timeout_s=5, role_script=None,
     prefill_shape_prior="dsv4-flash-h200-tp4",
 )
 

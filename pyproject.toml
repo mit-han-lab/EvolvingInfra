@@ -46,7 +46,10 @@ packages = [
     "evolving_infra.router.frontend",
     "evolving_infra.router.indexer",
     "evolving_infra.planner",
-    "evolving_infra.planner.calibration",
+    "evolving_infra.planner.collect",
+    "evolving_infra.planner.control",
+    "evolving_infra.planner.decide",
+    "evolving_infra.planner.fit",
 ]
 
 [tool.setuptools.package-dir]

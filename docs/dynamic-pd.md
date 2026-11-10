@@ -62,11 +62,17 @@ A rejected or failed update is logged and not retried.
    python -m evolving_infra.planner control controller.json
    ```
 
-   Learning starts when the caller writes `<run_dir>/replay-timing.json` with `start_wall`
-   (epoch seconds) and `duration_s`.
+   In the default `service` mode learning starts when the planner starts, and the planner runs until it
+   is stopped. For a measured replay set `"mode": "benchmark"`: learning then starts when the caller
+   writes `<run_dir>/replay-timing.json` with `start_wall` (epoch seconds) and `duration_s`, and no role
+   changes after `start_wall + duration_s`.
 
-The planner writes its decisions to `<run_dir>/role-decisions.jsonl` and, on failure,
-`<run_dir>/PLANNER_FAILED`.
+The planner writes its decisions to `<run_dir>/role-decisions.jsonl`. In benchmark mode any error stops
+it with `<run_dir>/PLANNER_FAILED`, so a measured run never continues on partial data. In service mode it
+stops (with the same file) only when the router's workers differ from the configuration, the roles change
+before the learning-end fit, or that fit fails. Any other error, such as an unreachable router or engine, a
+failed clock probe or a failed role update, skips at most one decision and is logged; roles changed by
+another client are adopted.
 
 ## Configuration
 
@@ -76,6 +82,7 @@ The planner writes its decisions to `<run_dir>/role-decisions.jsonl` and, on fai
   "token_file": "/secure/role-token",
   "run_dir": "/path/to/run",
   "scratch": "/path/to/scratch",
+  "prefill_shape_prior": "glm52-gb300-tp4",
   "hosts": [{"index": 0, "ip": "192.0.2.1"}],
   "workers": [
     {"node": "node0", "idx": 0, "name": "w0", "host": 0, "ip": "192.0.2.1",
@@ -90,13 +97,14 @@ The planner writes its decisions to `<run_dir>/role-decisions.jsonl` and, on fai
 |---|---|
 | `workers[].node` | Must be `node<idx>`. |
 | `workers[].name` | The worker's trace subdirectory under `--root`. |
-| `learning_s`, `period_s` | Learning window and decision period (defaults 1800 and 600 seconds). |
-| `restore_counter_replicas` | The engine's TP size. |
-| `prefill_shape_prior` | Fallback prefill model shape when a worker's own fit is not identifiable. The built-in `dsv4-flash-h200-tp4` was measured on DeepSeek-V4-Flash TP4 on H200; build one for another setup with `python -m evolving_infra.planner prior <report.json>`. |
+| `mode` | `service` (default) or `benchmark`, as described above. |
+| `learning_s`, `period_s` | Learning window and decision period (defaults 1800 and 600 seconds). The workload slices (60 s) and the switch rule (two standard errors) are fixed. |
+| `prefill_shape_prior` | Required. Fallback prefill model shape for a worker whose own fit is not identifiable. Built in: `dsv4-flash-h200-tp4` (DeepSeek-V4-Flash, TP4, H200), `glm52-gb300-tp4` (GLM-5.2, TP4, GB300) and `kimi-k26-gb300-tp4` (Kimi-K2.6, TP4, GB300). Build one for another setup with `python -m evolving_infra.planner prior <report.json>`, or give `{"coefficients": [...]}`. |
 | `role_script` | Testing only: timed role changes instead of decisions, e.g. `[[2400, {"node0": "decode"}]]`. |
 
-Every other tunable has a default in `evolving_infra.planner.loop.DEFAULTS`; any key in the
-file overrides it. Keep the token file outside `run_dir`.
+Every other tunable has a default in `evolving_infra.planner.config.DEFAULTS`; any key in the
+file overrides it, and an unknown key is an error. The engines' TP size, which scales the restore
+counters, is read from each engine's `/server_info`. Keep the token file outside `run_dir`.
 
 ## Limits
 
