@@ -136,9 +136,10 @@ pub const DEFAULT_TRADE_PULL_MS_PER_100K: f64 = 100.0;
 /// best source match minus the target's own match is below 512). The
 /// effective floor is max(--kv-pull-hint-min-incremental-tokens, this).
 pub const TRADE_MIN_PULL_TOKENS: u64 = 512;
-/// Default copy price, in uncached-token equivalents per pulled token:
-/// 6.8e-4 s per pulled token (simulator S6) x 13,500 tokens/s = 9.18.
-pub const DEFAULT_TRADE_COPY_LAMBDA: f64 = 9.2;
+/// Default copy price, in uncached-token equivalents per pulled token: the
+/// value of the paper's runs (half of the simulator estimate, 6.8e-4 s per
+/// pulled token x 13,500 tokens/s = 9.18).
+pub const DEFAULT_TRADE_COPY_LAMBDA: f64 = 4.6;
 
 /// Where TRADE takes a P's wait and the request's own service time from
 /// (`--co-schedule-trade-wait`).
@@ -2385,7 +2386,7 @@ mod trade_tests {
         assert_eq!(p.rate_tokens_per_s, 13_500.0);
         assert_eq!(p.pull_fixed_ms, 450.0);
         assert_eq!(p.pull_ms_per_100k, 100.0);
-        assert_eq!(p.copy_lambda, 9.2);
+        assert_eq!(p.copy_lambda, 4.6);
         assert!(!p.exclude_unlaunched);
         // 0.45 s + 0.10 s per 100k tokens; no pull takes no time.
         assert!(close(p.pull_seconds(100_000), 0.55));

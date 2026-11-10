@@ -730,6 +730,19 @@ impl SymmetricPdWorkerSpec {
     }
 }
 
+/// `--symmetric-pd-preset`: the configuration that `--policy symmetric_pd`
+/// fills in for the flags left unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum SymmetricPdPreset {
+    /// The configuration of the paper's runs (see `Cli::apply_symmetric_pd_preset`).
+    #[default]
+    #[value(name = "paper")]
+    Paper,
+    /// The flags as given.
+    #[value(name = "none")]
+    None,
+}
+
 /// `--symmetric-pd-p-select`: how the symmetric P/D P-leg is chosen (see
 /// `symmetric_pd::placement` module docs, "selection modes").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -786,7 +799,8 @@ pub struct SymmetricPdCostFunctionConfig {
     pub trade: crate::scheduler::co_schedule::TradeParams,
     /// `--co-schedule-cost-trace`: a new JSONL file (an existing file stops
     /// the start). Every row has `"policy": "symmetric_pd_cost_function"`.
-    pub cost_trace: std::path::PathBuf,
+    /// None: no trace.
+    pub cost_trace: Option<std::path::PathBuf>,
     /// `--co-schedule-load-poll-ms` (default 100): the period of the
     /// per-RID progress poll of each P-role worker.
     pub load_poll_ms: u64,

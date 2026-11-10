@@ -3756,7 +3756,7 @@ mod tests {
         cfg.pull_hint = true;
         cfg.cost_function = Some(crate::config::SymmetricPdCostFunctionConfig {
             trade,
-            cost_trace: dir.join("cost.jsonl"),
+            cost_trace: Some(dir.join("cost.jsonl")),
             load_poll_ms: 100,
             unknown_expire_secs: 60,
             loads_host_room: false,
@@ -4007,7 +4007,7 @@ mod tests {
         cfg.role_drain_timeout = Some(Duration::from_secs(5));
         cfg.cost_function = Some(crate::config::SymmetricPdCostFunctionConfig {
             trade: crate::scheduler::co_schedule::TradeParams::default(),
-            cost_trace: dir.join("cost.jsonl"),
+            cost_trace: Some(dir.join("cost.jsonl")),
             load_poll_ms: 100,
             unknown_expire_secs: 60,
             loads_host_room: false,
@@ -4077,7 +4077,7 @@ mod tests {
                 gate_m: 0.0,
                 ..TradeParams::default()
             },
-            cost_trace: dir.join("cost.jsonl"),
+            cost_trace: Some(dir.join("cost.jsonl")),
             load_poll_ms: 100,
             unknown_expire_secs: 60,
             loads_host_room: false,

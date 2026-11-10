@@ -506,7 +506,7 @@ async fn fixture(opts: Opts) -> Fixture {
                 copy_lambda: 0.0,
                 ..TradeParams::default()
             },
-            cost_trace: path.clone(),
+            cost_trace: Some(path.clone()),
             load_poll_ms: 10,
             unknown_expire_secs: 60,
             loads_host_room: false,

@@ -131,12 +131,12 @@ impl CostFunction {
     ///
     /// # Outputs
     /// The cost function without background tasks (see [`Self::start`]).
-    /// Panics when the trace file exists or cannot be created: a run must not
-    /// serve requests without its cost trace.
+    /// Panics when a configured trace file exists or cannot be created: a run
+    /// that asked for its cost trace must not serve requests without it.
     pub fn new(cfg: SymmetricPdCostFunctionConfig, kv: &KvHintConfig) -> Arc<Self> {
-        let (trace, secs) = (cfg.cost_trace.as_path(), cfg.unknown_expire_secs);
+        let (trace, secs) = (cfg.cost_trace.as_deref(), cfg.unknown_expire_secs);
         let expire = (secs > 0).then_some(Duration::from_secs(secs));
-        let book = CostBook::new_uncached_with_policy(Some(trace), TRACE_POLICY, expire)
+        let book = CostBook::new_uncached_with_policy(trace, TRACE_POLICY, expire)
             .expect("create new cost trace before serving requests");
         if let Some(olp) = &cfg.olp {
             book.enable_olp(olp.clone());
@@ -981,7 +981,11 @@ fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_
              after a P->D switch); the targets stay the P-role pool"
         );
     }
-    let (poll_ms, trace) = (cfg.load_poll_ms, cfg.cost_trace.display());
+    let trace = cfg
+        .cost_trace
+        .as_ref()
+        .map_or_else(|| "off".to_string(), |p| p.display().to_string());
+    let poll_ms = cfg.load_poll_ms;
     tracing::info!(
         target: "symmetric_pd",
         load_poll_ms = poll_ms,
@@ -1232,7 +1236,7 @@ mod tests {
         CostFunction::new(
             SymmetricPdCostFunctionConfig {
                 trade,
-                cost_trace: dir.path().join("cost.jsonl"),
+                cost_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
                 loads_host_room: false,
@@ -1628,7 +1632,7 @@ mod tests {
         let on = CostFunction::new(
             SymmetricPdCostFunctionConfig {
                 trade: TradeParams::default(),
-                cost_trace: dir_on.path().join("cost.jsonl"),
+                cost_trace: Some(dir_on.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
                 loads_host_room: false,
@@ -1731,8 +1735,8 @@ mod tests {
         let kv = kv(512, urls);
         let cf = CostFunction::new(
             SymmetricPdCostFunctionConfig {
-                trade: TradeParams::default(),
-                cost_trace: dir.path().join("cost.jsonl"),
+                trade: TradeParams { copy_lambda: 9.2, ..TradeParams::default() },
+                cost_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
                 loads_host_room: false,
@@ -2032,7 +2036,7 @@ mod tests {
         let cf = CostFunction::new(
             SymmetricPdCostFunctionConfig {
                 trade: TradeParams::default(),
-                cost_trace: dir.path().join("cost.jsonl"),
+                cost_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
                 loads_host_room: false,
@@ -2154,7 +2158,7 @@ mod tests {
         CostFunction::new(
             SymmetricPdCostFunctionConfig {
                 trade: TradeParams::default(),
-                cost_trace: dir.path().join("cost.jsonl"),
+                cost_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
                 loads_host_room: false,
@@ -2333,7 +2337,7 @@ mod tests {
         CostFunction::new(
             SymmetricPdCostFunctionConfig {
                 trade,
-                cost_trace: dir.path().join("cost.jsonl"),
+                cost_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
                 loads_host_room: false,
@@ -2446,7 +2450,7 @@ mod tests {
             let cf = CostFunction::new(
                 SymmetricPdCostFunctionConfig {
                     trade,
-                    cost_trace: dir.path().join("cost.jsonl"),
+                    cost_trace: Some(dir.path().join("cost.jsonl")),
                     load_poll_ms: 100,
                     unknown_expire_secs: 60,
                     loads_host_room: false,
@@ -2584,7 +2588,7 @@ mod tests {
             let cf = CostFunction::new(
                 SymmetricPdCostFunctionConfig {
                     trade,
-                    cost_trace: dir.path().join("cost.jsonl"),
+                    cost_trace: Some(dir.path().join("cost.jsonl")),
                     load_poll_ms: 100,
                     unknown_expire_secs: 60,
                     loads_host_room: true,

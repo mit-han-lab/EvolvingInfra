@@ -15,6 +15,7 @@ use crate::config::{
     default_stale_request_timeout_secs, resolve_mode, ActiveLoadConfig, CacheAwareConfig,
     CircuitBreakerConfig, CoScheduleConfig, Config, DiscoveryBackend, SymmetricPdConfig,
     SymmetricPdCostFunctionConfig, SymmetricPdDSelect, SymmetricPdImportCachePolicy, SymmetricPdPSelect,
+    SymmetricPdPreset,
     SymmetricPdWorkerSpec, GatewayCacheAwareConfig, K8sDiscoveryConfig, KvIndexerEndpointConfig,
     KvPullScope, LogFormat, ModelConfig, ObservabilityConfig, PdDecisionReplayConfig,
     PdDecodePolicy, PdDecodeTokensConfig, PolicyKind, ProxyConfig, ServerConfig,
@@ -279,7 +280,7 @@ pub struct Cli {
     pub co_schedule_trade_pull_ms_per_100k: Option<f64>,
     /// TRADE: copy price lambda, in uncached-token equivalents per pulled
     /// token (the second copy a pull leaves in the target host pool).
-    /// Default 9.2 = 6.8e-4 s per token x 13500 tokens/s. 0 = transfer time only.
+    /// Default 4.6, the value of the paper's runs. 0 = transfer time only.
     /// `auto`: at each decision lambda = clamp(mu * q * R / R_hat, min, max)
     /// from the router's own measurements (see the
     /// --co-schedule-trade-copy-lambda-* and --co-schedule-trade-auto-* flags).
@@ -526,7 +527,7 @@ pub struct Cli {
     pub co_schedule_trade_copy_lambda_max: Option<f64>,
     /// TRADE copy price auto: the fixed lambda for the first tau seconds and
     /// when an input is missing (no session, no P history, no R_hat).
-    /// Default 9.2 (the fixed default). Needs --co-schedule-trade-copy-lambda auto.
+    /// Default 4.6 (the fixed default). Needs --co-schedule-trade-copy-lambda auto.
     #[arg(long, requires = "co_schedule_trade")]
     pub co_schedule_trade_copy_lambda_fallback: Option<f64>,
     /// TRADE auto (copy price or rate): the time constant tau in seconds of
@@ -734,6 +735,15 @@ pub struct Cli {
     /// servicer for each P-role worker.
     #[arg(long, value_enum)]
     pub symmetric_pd_p_select: Option<SymmetricPdPSelect>,
+    /// `--policy symmetric_pd` only: what fills the flags left unset.
+    /// `paper` (default) is the configuration of the paper's runs: force
+    /// split, round-robin D selection, 100 ms load polls, late decode choice
+    /// by `fit_req` over every decode on observed capacity, KV session
+    /// retention, and, with `--kv-indexer-url` and a `--kv-worker-map` that
+    /// names servicers, the cost-function P selection (TRADE, uncached
+    /// balance) with peer pulls from any holder. `none`: the flags as given.
+    #[arg(long, value_enum, default_value = "paper")]
+    pub symmetric_pd_preset: SymmetricPdPreset,
     /// `--symmetric-pd-p-select cost-function` only: an unknown P-leg reservation
     /// (a transport error such as `upstream timed out`, or a drop after
     /// dispatch) leaves the cost ledger when its P answers a progress poll
@@ -1228,7 +1238,43 @@ impl Cli {
     /// [`resolve_mode`]), assembles the single [`ModelConfig`], then runs
     /// [`Config::validate`] for the remaining value-level invariants
     /// (model id, static worker URLs).
-    pub fn into_config(self) -> Result<Config> {
+    /// `--symmetric-pd-preset paper`: set every flag of the paper's
+    /// configuration that is still unset. Features whose inputs are missing
+    /// stay off: the cost function needs the KV directory and the servicers.
+    fn apply_symmetric_pd_preset(&mut self) {
+        use crate::config::{LateDecodeMode, LateDecodeRule};
+        if self.policy != PolicyKind::SymmetricPd || self.symmetric_pd_preset != SymmetricPdPreset::Paper {
+            return;
+        }
+        self.symmetric_pd_force_split = true;
+        self.symmetric_pd_d_select.get_or_insert(SymmetricPdDSelect::RoundRobin);
+        self.symmetric_pd_load_poll_ms.get_or_insert(100);
+        if self.pd_late_decode.is_none() && self.symmetric_pd_decision_replay.is_none() {
+            self.pd_late_decode = Some(LateDecodeMode::Choose);
+            let rule = *self.pd_late_decode_rule.get_or_insert(LateDecodeRule::FitReq);
+            self.pd_late_decode_candidates.get_or_insert_with(|| "all".into());
+            self.pd_late_decode_local.get_or_insert_with(|| "off".into());
+            if rule == LateDecodeRule::FitReq && self.pd_late_decode_fit_capacity_tokens.is_none() {
+                self.pd_late_decode_fit_native = true;
+                self.pd_native_decode_state = true;
+            }
+        }
+        self.symmetric_pd_kv_session_retention = true;
+        let servicers = self.kv_worker_map.as_deref().is_some_and(|map| map.contains("servicer"));
+        if self.kv_indexer_url.is_some() && servicers && self.symmetric_pd_p_select.is_none() {
+            self.symmetric_pd_p_select = Some(SymmetricPdPSelect::CostFunction);
+            self.symmetric_pd_pull_hint = true;
+            self.symmetric_pd_pull_from_any_holder = true;
+            self.kv_pull_scope.get_or_insert(KvPullScope::Any);
+            self.co_schedule_trade = true;
+            self.co_schedule_uncached_balance = true;
+            self.co_schedule_load_poll_ms.get_or_insert(100);
+            self.kv_pull_hint_min_incremental_tokens.get_or_insert(512);
+        }
+    }
+
+    pub fn into_config(mut self) -> Result<Config> {
+        self.apply_symmetric_pd_preset();
         let mut symmetric_pd = self.build_symmetric_pd()?;
         // `--symmetric-pd-p-select cost-function`: the TRADE flags of the
         // co-schedule policy configure the symmetric_pd P selection.
@@ -2096,7 +2142,10 @@ impl Cli {
                 "uncached balance has no admission cap, HOLD queue or dispatch timer"
             ));
         }
-        if reserved_mode != self.co_schedule_cost_trace.is_some() {
+        // The uncached balance writes the cost trace only when one is given;
+        // the other reserved modes need it.
+        let trace = self.co_schedule_cost_trace.is_some();
+        if (reserved_mode && !trace && !self.co_schedule_uncached_balance) || (trace && !reserved_mode) {
             return Err(anyhow!(
                 "reserved placement requires --co-schedule-cost-trace, and vice versa"
             ));
@@ -2122,11 +2171,7 @@ impl Cli {
             if load_poll_ms == 0 {
                 return Err(anyhow!("--co-schedule-load-poll-ms must be greater than 0"));
             }
-            // TRADE needs the uncached balance, so the reserved-mode check
-            // above already required the trace.
-            let cost_trace = self.co_schedule_cost_trace.clone().ok_or_else(|| {
-                anyhow!("reserved placement requires --co-schedule-cost-trace, and vice versa")
-            })?;
+            let cost_trace = self.co_schedule_cost_trace.clone();
             let unknown_expire_secs = self
                 .symmetric_pd_unknown_expire_secs
                 .unwrap_or_else(crate::config::types::default_symmetric_pd_unknown_expire_secs);
@@ -2965,8 +3010,17 @@ mod tests {
     use crate::config::{DiscoveryBackend, K8sDiscoveryMode};
 
     /// Parse argv (without the leading binary name) into a `Config`.
+    /// Without `--symmetric-pd-preset` in `args` the flags are taken as given
+    /// (`none`); the preset has its own tests.
     fn into_config(args: &[&str]) -> Result<Config> {
-        let argv = std::iter::once("sgl-router").chain(args.iter().copied());
+        let preset: &[&str] = if args.contains(&"--symmetric-pd-preset") {
+            &[]
+        } else {
+            &["--symmetric-pd-preset", "none"]
+        };
+        let argv = std::iter::once("sgl-router")
+            .chain(args.iter().copied())
+            .chain(preset.iter().copied());
         let cli = Cli::try_parse_from(argv).map_err(|e| anyhow!("{e}"))?;
         cli.into_config()
     }
@@ -2984,6 +3038,67 @@ mod tests {
             .chain(extra.iter())
             .map(|s| s.to_string())
             .collect()
+    }
+
+    /// `--policy symmetric_pd` defaults to the paper's configuration: late
+    /// decode choice by fit_req over every decode, retention, force split and
+    /// round-robin D; with the KV directory and servicers also the cost
+    /// function with peer pulls, the copy price 4.6 and no cost trace. Flags
+    /// that are given win, and `none` takes the flags as given.
+    #[test]
+    fn symmetric_pd_preset_paper_is_the_default() {
+        use crate::config::{LateDecodeMode, LateDecodeRule};
+        let workers = [
+            "--policy",
+            "symmetric_pd",
+            "--symmetric-pd-worker",
+            "http://10.0.0.1:30000,8998,1,0",
+            "--symmetric-pd-worker",
+            "http://10.0.0.2:30000,8998,0,1",
+            "--symmetric-pd-preset",
+            "paper",
+        ];
+        let c = into_config_owned(with_model(&workers)).unwrap();
+        let flex = c.model.symmetric_pd.as_ref().unwrap();
+        assert!(flex.placement.force_split);
+        assert!(flex.kv_session_retention);
+        assert_eq!(format!("{:?}", flex.placement.d_select), "RoundRobin");
+        assert_eq!(format!("{:?}", flex.placement.p_select), "CacheFirst", "no KV directory");
+        assert!(flex.cost_function.is_none());
+        let late = &c.proxy.late_decode;
+        assert_eq!(late.mode, LateDecodeMode::Choose);
+        assert_eq!(late.rule, Some(LateDecodeRule::FitReq));
+        assert!(late.fit_native && late.native_state_poll);
+
+        let mut with_kv = workers.to_vec();
+        with_kv.extend([
+            "--kv-indexer-url",
+            "http://indexer:8091",
+            "--kv-worker-map",
+            r#"[{"id":1,"url":"http://10.0.0.1:30000","servicer":"10.0.0.1:18100"},{"id":2,"url":"http://10.0.0.2:30000","servicer":"10.0.0.2:18100"}]"#,
+        ]);
+        let c = into_config_owned(with_model(&with_kv)).unwrap();
+        let flex = c.model.symmetric_pd.as_ref().unwrap();
+        assert_eq!(format!("{:?}", flex.placement.p_select), "CostFunction");
+        assert!(flex.pull_hint);
+        let cost = flex.cost_function.as_ref().unwrap();
+        assert_eq!(cost.trade.copy_lambda, 4.6);
+        assert!(cost.cost_trace.is_none());
+
+        let mut given = with_kv.clone();
+        given.extend(["--symmetric-pd-p-select", "cache-first", "--pd-late-decode-rule", "d1"]);
+        let c = into_config_owned(with_model(&given)).unwrap();
+        let flex = c.model.symmetric_pd.as_ref().unwrap();
+        assert_eq!(format!("{:?}", flex.placement.p_select), "CacheFirst");
+        assert_eq!(c.proxy.late_decode.rule, Some(LateDecodeRule::D1));
+
+        let mut none = with_kv.clone();
+        let at = none.iter().position(|a| *a == "paper").unwrap();
+        none[at] = "none";
+        let c = into_config_owned(with_model(&none)).unwrap();
+        let flex = c.model.symmetric_pd.as_ref().unwrap();
+        assert!(!flex.kv_session_retention && !flex.pull_hint);
+        assert_eq!(c.proxy.late_decode.mode, LateDecodeMode::Off);
     }
 
     fn into_config_owned(args: Vec<String>) -> Result<Config> {
@@ -4456,7 +4571,7 @@ mod tests {
         assert_eq!(trade.rate_tokens_per_s, 13_500.0);
         assert_eq!(trade.pull_fixed_ms, 450.0);
         assert_eq!(trade.pull_ms_per_100k, 100.0);
-        assert_eq!(trade.copy_lambda, 9.2);
+        assert_eq!(trade.copy_lambda, 4.6);
         assert!(!trade.exclude_unlaunched, "the backlog is the full ledger by default");
 
         let mut tuned = on.clone();
@@ -5060,7 +5175,7 @@ mod tests {
         assert!(!trade.is_original());
         // The other options keep their defaults.
         assert_eq!(trade.margin_noise_k, 0.0);
-        assert_eq!(trade.copy_lambda, 9.2);
+        assert_eq!(trade.copy_lambda, 4.6);
         // mu = 0 is the original behavior; the window alone changes nothing.
         let trade = build(&[
             "--co-schedule-trade",
@@ -5113,7 +5228,7 @@ mod tests {
 
     /// The TRADE copy price and rate `auto`: `auto` (any case) or a number
     /// for both flags; the auto defaults (q sat, mu 1, min 4.6, max 1000,
-    /// fallback 9.2, tau 120 s, idle 300 s); the fallback lambda in
+    /// fallback 4.6, tau 120 s, idle 300 s); the fallback lambda in
     /// `copy_lambda`; validation (finite, at least 0, min <= max, tau and
     /// idle above 0; the auto-only flags need an auto mode).
     #[test]
@@ -5194,7 +5309,7 @@ mod tests {
                 max: 1000.0,
             }
         );
-        assert_eq!(trade.copy_lambda, 9.2);
+        assert_eq!(trade.copy_lambda, 4.6);
         assert_eq!(
             (trade.rate_mode, trade.rate_tokens_per_s),
             (TradeRateMode::Fixed, 13_500.0)
@@ -6825,7 +6940,7 @@ mod tests {
             !cost.loads_host_room,
             "the host_room poll is off by default"
         );
-        assert_eq!(cost.cost_trace.to_str(), Some("/tmp/flex-cost.jsonl"));
+        assert_eq!(cost.cost_trace.as_deref().and_then(|p| p.to_str()), Some("/tmp/flex-cost.jsonl"));
         let trade = cost.trade;
         assert_eq!(
             trade.copy_lambda_mode,
@@ -7721,12 +7836,6 @@ mod tests {
                 &["--co-schedule-uncached-balance"],
                 &[],
                 "--co-schedule-trade requires --co-schedule-uncached-balance",
-            ),
-            (
-                "E2",
-                &["--co-schedule-cost-trace"],
-                &[],
-                "reserved placement requires --co-schedule-cost-trace, and vice versa",
             ),
             (
                 "E3",

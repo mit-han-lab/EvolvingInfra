@@ -330,7 +330,7 @@ async fn fixture_full(
         pull_hint: true,
         cost_function: Some(SymmetricPdCostFunctionConfig {
             trade,
-            cost_trace: trace.clone(),
+            cost_trace: Some(trace.clone()),
             load_poll_ms: 10,
             unknown_expire_secs,
             loads_host_room: rooms.is_some(),
