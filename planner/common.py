@@ -27,12 +27,21 @@ def save(path: Path, data):
     tmp.replace(path)
 
 
+def complete_lines(stream, limit=None):
+    """Newline-terminated lines from the stream position up to byte `limit` (default: the end).
+
+    The first incomplete line ends the read: a live writer may not have finished it.
+    """
+    while True:
+        line = stream.readline(-1 if limit is None else limit - stream.tell())
+        if not line.endswith(b'\n'):
+            return
+        yield line
+
+
 def json_lines(path):
-    with Path(path).open("rb") as stream:
-        for line in stream:
-            # A live writer may not have finished its final record yet.
-            if not line.endswith(b"\n"):
-                break
+    with Path(path).open('rb') as stream:
+        for line in complete_lines(stream):
             yield json.loads(line)
 
 

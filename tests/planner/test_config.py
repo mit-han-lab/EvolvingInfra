@@ -90,3 +90,14 @@ def test_cli_help_lists_every_command():
                          capture_output=True, text=True).stdout
     for command in ("control", "fit", "serve-traces", "prior"):
         assert command in out
+
+
+def test_cli_parser_and_trace_server_load_no_numerical_library():
+    """The command-line parser and the per-host trace server import no NumPy/SciPy."""
+    subprocess.run([sys.executable, "-c", "\n".join([
+        "import sys",
+        "from evolving_infra.planner.__main__ import build_parser",
+        "from evolving_infra.planner.collect.trace_server import serve_traces",
+        "build_parser()",
+        "assert not {'numpy', 'scipy'} & sys.modules.keys()",
+    ])], check=True, capture_output=True)

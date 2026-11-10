@@ -14,6 +14,7 @@ def free_port():
         return s.getsockname()[1]
 
 
+
 def test_mirror_appends_only_new_bytes(tmp_path):
     root = tmp_path / "host"
     (root / "w00").mkdir(parents=True)

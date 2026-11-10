@@ -19,14 +19,14 @@ import time
 from ..common import open_url
 
 BACKUP_HELP = "# HELP sglang:hicache_backup_bytes_total "
-RESTORE_SERIES = "sglang:load_back_tokens_total{"
+RESTORE_COUNTER = "sglang:load_back_tokens_total{"
 
 
 class Telemetry(threading.Thread):
     """Restore counters of the current P workers every period (restore-observations.jsonl, one record per
     worker scrape with its own collection interval)."""
 
-    KEEP = (BACKUP_HELP, RESTORE_SERIES)
+    KEEP = (BACKUP_HELP, RESTORE_COUNTER)
 
     def __init__(self, workers: list[dict], path: Path, period_s: float):
         super().__init__(daemon=True)
@@ -66,35 +66,38 @@ def counter_replicas(capacities):
     return sizes.pop()
 
 
-def kv_restore_values(node, replicas):
-    """The kv-pool restore counter values of one worker scrape record, divided by `replicas`.
+def restore_counter_rows(path, replicas):
+    """(scrape, record, kv-pool restore counter values / replicas) per usable P scrape of a
+    restore-observations .jsonl.gz file.
 
-    None when the record is not a usable P scrape: another role, a scrape error, or a collector whose backup series
-    is not exported yet (a labeled Counter child first appears when inc() is called, so the collector is verified
-    through its already-active backup series).
+    Every TP rank exports the counter, so `replicas` must be audited, never inferred from values.
+    Each caller reads the scrape's node and times and applies its own checks, in its own order.
     """
-    if node["role"] != "prefill" or node.get("errors"):
-        return None
-    metrics = node.get("metrics", "")
-    if BACKUP_HELP not in metrics:
-        return None
-    return [float(s.split()[-1])/replicas for s in metrics.splitlines()
-            if s.startswith(RESTORE_SERIES) and 'pool="kv"' in s]
+    if not isinstance(replicas, int) or replicas < 1:
+        raise ValueError("Require audited restore-counter replica count")
+    with gzip.open(path, "rt") as stream:
+        for line in stream:
+            record = json.loads(line)
+            for node in record["nodes"]:
+                if node["role"] != "prefill" or node.get("errors"):
+                    continue
+                metrics = node.get("metrics", "")
+                # A labeled Counter child first appears when inc() is called.
+                # Verify this collector through its already-active backup series.
+                if BACKUP_HELP not in metrics:
+                    continue
+                values = [float(s.split()[-1])/replicas for s in metrics.splitlines()
+                          if s.startswith(RESTORE_COUNTER) and 'pool="kv"' in s]
+                yield node, record, values
 
 
 def read_restore_counters(path, replicas):
-    if not isinstance(replicas, int) or replicas < 1:
-        raise ValueError("Require audited restore-counter replica count")
+    """(scrape start, restore counter) samples per P node of a restore-observations file."""
     meters = defaultdict(list)
-    with gzip.open(path, "rt") as stream:
-        for line in stream:
-            for node in json.loads(line)["nodes"]:
-                values = kv_restore_values(node, replicas)
-                if values is None:
-                    continue
-                if len(values) > 1:
-                    raise ValueError("Ambiguous restore counter series")
-                meters[f"node{node['node']}"].append((node["at"], sum(values)))
+    for node, _, values in restore_counter_rows(path, replicas):
+        if len(values) > 1:
+            raise ValueError("Ambiguous restore counter series")
+        meters[f"node{node['node']}"].append((node["at"], sum(values)))
     for values in meters.values():
         if any(b[0] <= a[0] or b[1] < a[1] for a, b in zip(values, values[1:])):
             raise ValueError("Restore counter reset or unordered scrapes")
@@ -134,24 +137,18 @@ def include_scrape_collection_time(windows, telemetry, replicas, clock_pad_s, *,
     if type(exclude_unbracketed) is not bool:
         raise ValueError("Require an explicit window exclusion policy")
     observations = defaultdict(list)
-    with gzip.open(telemetry, "rt") as stream:
-        for line in stream:
-            record = json.loads(line)
-            for node in record["nodes"]:
-                values = kv_restore_values(node, replicas)
-                if values is None:
-                    continue
-                a, b, value = node["at"], record["at"], sum(values)
-                if (len(values) > 1 or not all(math.isfinite(x) for x in (a, b, value))
-                        or b < a or value < 0):
-                    raise ValueError("Invalid counter collection interval or value")
-                entries = observations[f"node{node['node']}"]
-                current = (a-clock_pad_s, b+clock_pad_s, value)
-                if entries and (current[0] <= entries[-1][0]
-                                or current[1] <= entries[-1][1]
-                                or value < entries[-1][2]):
-                    raise ValueError("Restore counter reset or unordered collection intervals")
-                entries.append(current)
+    for node, record, values in restore_counter_rows(telemetry, replicas):
+        a, b, value = node["at"], record["at"], sum(values)
+        if (len(values) > 1 or not all(math.isfinite(x) for x in (a, b, value))
+                or b < a or value < 0):
+            raise ValueError("Invalid counter collection interval or value")
+        entries = observations[f"node{node['node']}"]
+        current = (a-clock_pad_s, b+clock_pad_s, value)
+        if entries and (current[0] <= entries[-1][0]
+                        or current[1] <= entries[-1][1]
+                        or value < entries[-1][2]):
+            raise ValueError("Restore counter reset or unordered collection intervals")
+        entries.append(current)
 
     changes, accepted, excluded = [], [], []
     for window in windows:

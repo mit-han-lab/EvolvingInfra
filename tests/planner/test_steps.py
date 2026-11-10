@@ -23,6 +23,7 @@ def test_fit_recovers_coefficients_and_rejects_changed_regime():
         fit_steps(np.ones((100, 3)), np.ones(100))
 
 
+
 def test_interlaunch_interval_belongs_to_previous_step_and_excludes_idle(tmp_path):
     rows = [
         dict(ts=100 + i, forward_iter=i, launch_mono=t, mode="extend", after_idle=idle)
@@ -37,6 +38,7 @@ def test_interlaunch_interval_belongs_to_previous_step_and_excludes_idle(tmp_pat
     path.write_text("".join(json.dumps(r) + "\n" for r in rows) + '{"partial":')
     loaded = load_steps([path], 100, 110)
     assert [r["busy_interval_s"] for r in loaded] == [0.5, None, None, None]
+
 
 
 def test_window_split_uses_launch_intervals_not_emission_time():

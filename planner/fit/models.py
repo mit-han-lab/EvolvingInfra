@@ -3,7 +3,7 @@ import math
 
 import numpy as np
 
-from .steps import consecutive_step_windows, decode_features, fit_steps, prefill_feature_schema
+from .steps import chronological, consecutive_step_windows, decode_features, fit_steps, prefill_feature_schema, split_time
 
 
 def fit_prefill_scale(windows, *, split_time, reference_coefficients):
@@ -26,8 +26,7 @@ def fit_prefill_scale(windows, *, split_time, reference_coefficients):
         raise ValueError('Scale calibration requires 60s windows')
     if any(a['end'] > b['start'] for a, b in zip(rows, rows[1:])):
         raise ValueError('Overlapping calibration windows')
-    rows = [r for r in rows if r['end'] <= split_time or r['start'] >= split_time]
-    train = sum(r['end'] <= split_time for r in rows)
+    rows, train = chronological(rows, split_time, 'start', 'end')
     if train < 4 or len(rows)-train < 2:
         raise ValueError('Need four training and two validation windows for one scale')
     x = np.asarray([r['features'] for r in rows], dtype=float)
@@ -64,9 +63,7 @@ def fit_prefill(windows, *, split_time):
     observations, not an acceptance threshold or a prediction interval. Refitting
     all data only produces the coefficients used for the subsequent fixed plan.
     """
-    rows = sorted(windows, key=lambda r: r['end'])
-    rows = [r for r in rows if r['end'] <= split_time or r['start'] >= split_time]
-    train = sum(r['end'] <= split_time for r in rows)
+    rows, train = chronological(sorted(windows, key=lambda r: r['end']), split_time, 'start', 'end')
     if train < 16 or len(rows) - train < 6:
         raise ValueError('Need at least 16 training and 6 validation P windows per node')
     fit = fit_steps([r['features'] for r in rows], [r['seconds'] for r in rows],
@@ -97,13 +94,10 @@ def fit_decode(rows, *, start, end, experts, top_k):
     windows = consecutive_step_windows(usable, [decode_features(r, experts, top_k) for r in usable])
     if any(w['interval_start_ts'] is None or w['interval_end_ts'] is None for w in windows):
         raise ValueError('Per-node wall-time split requires measured launch interval endpoints')
-    split = start + .7 * (end - start)
-    # Eight-step groups get an explicit beginning; discard groups that cross split.
-    windows = sorted((w for w in windows if w['interval_start_ts'] >= start
-                      and w['interval_end_ts'] <= end
-                      and (w['interval_end_ts'] <= split or w['interval_start_ts'] >= split)),
+    # Eight-step groups get an explicit beginning; discard groups that cross the split.
+    windows = sorted((w for w in windows if w['interval_start_ts'] >= start and w['interval_end_ts'] <= end),
                      key=lambda w: w['interval_start_ts'])
-    train = sum(w['interval_end_ts'] <= split for w in windows)
+    windows, train = chronological(windows, split_time(start, end), 'interval_start_ts', 'interval_end_ts')
     if train < 40 or len(windows) - train < 20:
         raise ValueError('Insufficient chronological D windows')
     fit = fit_steps([w['features'] for w in windows],

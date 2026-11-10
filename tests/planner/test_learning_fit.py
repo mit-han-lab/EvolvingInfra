@@ -14,6 +14,8 @@ from evolving_infra.planner.common import save
 from evolving_infra.planner.control.controller import Controller
 from evolving_infra.planner.fit import learning as fit_learning
 
+from planner_support import restore_record, router_snapshot
+
 
 def free_port():
     import socket
@@ -22,14 +24,23 @@ def free_port():
         return s.getsockname()[1]
 
 
+
 TRUE_P = [0.09, 4.3e-5, 1.5e-10, 4.0e-7]  # s/step, s/new token, s/pair, s/restored token
+
+
+
 TRUE_D = [0.009, 7.0e-4, 0.011]  # s, s/request, s * expert fraction
+
+
+
 EXPERTS, TOP_K, DRAFT = 256, 6, 6
+
 
 
 def write_jsonl(path: Path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
 
 
 def synth_prefill(rng, t0, t1, replicas=4):
@@ -55,6 +66,7 @@ def synth_prefill(rng, t0, t1, replicas=4):
     return steps, reqs, restores
 
 
+
 def synth_decode(rng, t0, t1):
     steps, t, it = [], t0, 0
     while t < t1:
@@ -71,6 +83,7 @@ def synth_decode(rng, t0, t1):
             t, first = t + dur, False
         t += rng.uniform(1, 5)
     return steps
+
 
 
 def test_fit_recovers_dsv4_models_through_the_http_trace_path(tmp_path, monkeypatch):
@@ -91,14 +104,11 @@ def test_fit_recovers_dsv4_models_through_the_http_trace_path(tmp_path, monkeypa
             steps, reqs = synth_decode(rng, t0 - 20, t0 + learning + 30), []
         write_jsonl(folder / "iter_trace.dp0_pp0.pid100.jsonl", steps)
         write_jsonl(folder / "req_trace.dp0_pp0.pid100.jsonl", reqs)
-    # Controller-side restore telemetry every 3 s (Telemetry's record format), P workers only.
+    # Controller-side restore telemetry every 3 s, P workers only.
     rows, t = [], t0 - 15
     while t < t0 + learning + 25:
         for idx, restores in counters.items():
-            value = sum(v for at, v in restores if at <= t)
-            rows.append(dict(at=t + 0.01, nodes=[dict(node=idx, role="prefill", at=t, errors={}, metrics=(
-                "# HELP sglang:hicache_backup_bytes_total Bytes.\n"
-                f'sglang:load_back_tokens_total{{model_name="m",pool="kv"}} {value}\n'))]))
+            rows.append(restore_record(t, sum(v for at, v in restores if at <= t), node=idx))
         t += 3
     write_jsonl(run / "restore-observations.jsonl", rows)
     # Clock: fixed reference offset 0, exchanges every 300 s bracketing the learning interval.
@@ -143,9 +153,8 @@ def test_fit_recovers_dsv4_models_through_the_http_trace_path(tmp_path, monkeypa
         work = dict(requests=n, input_tokens=n * 40000, uncached_tokens=n * 4000,
                     causal_attention_pairs=n * (4000 * 36000 + 4000 * 4001 / 2), output_tokens=n * 600,
                     verified_output_tokens=n * 600, verify_steps=n * 170)
-        return dict(assignment=dict(epoch="e", revision=0, roles=roles), completed_workload=work,
-                    decode_population=dict(fields=["p_completed", "p_pending", "unknown"],
-                                           workers={w["url"]: [pop, 0, 0] for w in workers if w["initial_role"] == "decode"}))
+        return router_snapshot(roles, {w["url"]: [pop, 0, 0] for w in workers if w["initial_role"] == "decode"},
+                               completed=work)
     samples = [dict(at=float(3 * k), snapshot=snap(k * 2, 40)) for k in range(0, 201)]
     controller = Controller(report, urls, samples[0]["snapshot"], experts=EXPERTS, top_k=TOP_K)
     decision = controller.propose(samples)

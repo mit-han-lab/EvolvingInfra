@@ -38,7 +38,7 @@ import subprocess
 import sys
 import time
 
-from ..api import JournaledRoleClient, RoleClient, backend_loads, worker_capacities
+from ..api import RoleClient, backend_loads, cas_update, worker_capacities
 from ..collect.clock import Clock
 from ..collect.restore_counters import Telemetry
 from ..collect.trace_server import Mirror
@@ -68,7 +68,7 @@ class ControlLoop:
         self.period, self.learning, self.script = check_control_config(cfg)
         self.service = cfg["mode"] == "service"
         self.scripted = bool(self.script)  # scripted: timed role changes replace decisions for the whole run
-        client = RoleClient(cfg["router_url"], Path(cfg["token_file"]).read_text().strip())
+        token = Path(cfg["token_file"]).read_text().strip()
         self.node_urls = {w["node"]: w["url"] for w in cfg["workers"]}
         self.initial_roles = {w["url"]: w["initial_role"] for w in cfg["workers"]}
         save(self.directory / "worker-capacities.json", worker_capacities(cfg["workers"]))
@@ -77,7 +77,7 @@ class ControlLoop:
         self.mirror = Mirror(self.scratch / "mirror", cfg["workers"])
         self.log = (self.directory / "role-decisions.jsonl").open("x", buffering=1)
         self.observations = (self.directory / "role-observations.jsonl").open("x", buffering=1)
-        self.client = JournaledRoleClient(client, self.journal)
+        self.client = RoleClient(cfg["router_url"], token, self.journal)
         self.clock_pool, self.onboarding_pool = ThreadPoolExecutor(1), ThreadPoolExecutor(1)
         self.clock_pool.submit(self.clock.observe).result()
         self.clock_task, self.next_clock = None, time.monotonic() + cfg["clock_probe_period_s"]
@@ -345,17 +345,9 @@ def apply_script(snapshot: dict, change: dict, client, journal, at_s):
     a = snapshot["assignment"]
     if snapshot.get("draining"):
         raise RuntimeError("Scripted role change while a drain is in progress")
-    desired = {**a["roles"], **change}
-    body = dict(epoch=a["epoch"], revision=a["revision"], expected=a["roles"], desired=desired)
-    journal(dict(event="role_update_intent", scripted=True, at_s=at_s, body=body))
-    expected = dict(epoch=a["epoch"], revision=a["revision"] + 1, roles=desired)
-    try:
-        response = client.request(body)
-    except Exception as error:  # noqa: BLE001 - read back, never retry the mutation
-        journal(dict(event="role_update_response_unknown", error=type(error).__name__))
-        response = client.request()
-    if response["assignment"] != expected:
-        raise RuntimeError("Scripted role update unconfirmed or changed concurrently")
+    response = cas_update(client, a, {**a["roles"], **change}, journal,
+                          lambda body: dict(scripted=True, at_s=at_s, body=body),
+                          "Scripted role update unconfirmed or changed concurrently")
     journal(dict(event="role_update_confirmed", scripted=True, assignment=response["assignment"],
                  draining=response.get("draining")))
     return response["assignment"]

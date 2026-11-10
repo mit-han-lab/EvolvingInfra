@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from evolving_infra.planner.fit.windows import prefill_windows
+from planner_support import restore_record, write_telemetry
 
 class LiveWindowsTests(unittest.TestCase):
     def setUp(self):
@@ -17,10 +18,7 @@ class LiveWindowsTests(unittest.TestCase):
                 ts=t+1.,dur_ms=1000.,forward_iter=i,after_idle=True,
                 new_prefill_tokens=10,prefill_attention_pairs=55))
             self.requests.append(dict(rid=str(i),prefill_iters=[i],cached_tokens=0))
-        with gzip.open(self.telemetry,'wt') as f:
-            for t in range(-4,313,2):
-                metrics='# HELP sglang:hicache_backup_bytes_total backup\n'+f'sglang:load_back_tokens_total{{pool="kv"}} {4*(t+4)}\n'
-                f.write(json.dumps(dict(at=t+.01,nodes=[dict(node=0,role='prefill',at=t,metrics=metrics)]))+'\n')
+        write_telemetry(self.telemetry,[restore_record(t,4*(t+4)) for t in range(-4,313,2)])
     def tearDown(self):self.tmp.cleanup()
     def run_windows(self,rows=None,requests=None):
         return prefill_windows(self.rows if rows is None else rows,
@@ -68,8 +66,7 @@ class LiveWindowsTests(unittest.TestCase):
         for record in records:
             if record['nodes'][0]['at']==114:record['at']=118.9
             if record['nodes'][0]['at']==122:record['at']=125.1
-        with gzip.open(self.telemetry,'wt') as stream:
-            for record in records:stream.write(json.dumps(record)+'\n')
+        write_telemetry(self.telemetry,records)
 
     def test_full_collection_gap_excludes_only_affected_minutes(self):
         self.delayed_counter_observations()
@@ -93,9 +90,8 @@ class LiveWindowsTests(unittest.TestCase):
 
     def test_counter_reset_still_fails_instead_of_excluding_windows(self):
         with gzip.open(self.telemetry,'rt') as stream:records=[json.loads(line) for line in stream]
-        records[30]['nodes'][0]['metrics']='# HELP sglang:hicache_backup_bytes_total backup\nsglang:load_back_tokens_total{pool="kv"} 0\n'
-        with gzip.open(self.telemetry,'wt') as stream:
-            for record in records:stream.write(json.dumps(record)+'\n')
+        records[30]=restore_record(records[30]['nodes'][0]['at'],0)  # the counter falls to 0
+        write_telemetry(self.telemetry,records)
         with self.assertRaisesRegex(ValueError,'counter reset'):
             self.run_windows()
 

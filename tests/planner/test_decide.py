@@ -6,11 +6,11 @@ from unittest.mock import patch
 from evolving_infra.planner.decide.capacity import capacities, prefill_seconds
 from evolving_infra.planner.decide.rule import decide
 from evolving_infra.planner.decide.workload import workload_delta
+from planner_support import DECODE_MODEL, MINUTES, PREFILL_MODEL, WORK, measured_workers
 
 class DynamicCapacityTests(unittest.TestCase):
     def test_images_require_a_measured_vision_term_and_increase_only_prefill_demand(self):
-        profile = dict(coefficients=[.01, .0001, 1e-9, .00001], tokens_per_step=4096.,
-                       restored_per_cached_token=.5)
+        profile = copy.deepcopy(PREFILL_MODEL)
         text = dict(uncached=8192., cached=40000., pairs=8192*44096.)
         image = dict(text, vision_matmul_flops=1e12)
         with self.assertRaisesRegex(ValueError, 'measured vision coefficient'):
@@ -18,14 +18,9 @@ class DynamicCapacityTests(unittest.TestCase):
         profile['coefficients'].append(2e-14)
         self.assertAlmostEqual(prefill_seconds(profile, image)-prefill_seconds(profile, text), .02)
     def setUp(self):
-        p=dict(coefficients=[.01,.0001,1e-9,.00001],tokens_per_step=4096.,restored_per_cached_token=.5)
-        d=dict(coefficients=[.02,.001,.01],draft_tokens=6,batch_support=list(range(1,129)))
-        self.workers={str(i):dict(prefill=dict(origin='measured',models=[p]),
-            decode=dict(origin='measured',models=[d]),max_running_requests=128,kv_capacity_tokens=2000000) for i in range(4)}
+        self.workers=measured_workers()
         self.roles={'0':'prefill','1':'decode','2':'decode','3':'decode'}
-        self.work=dict(uncached=8192.,cached=40000.,pairs=8192*44096.,output=800.,context=50000.,acceptance=3.)
-        self.minutes=[dict(work=self.work,decode_population=30),
-                      dict(work=dict(self.work,output=900.),decode_population=30)]
+        self.work,self.minutes=WORK,MINUTES
     def test_heterogeneous_rr_uses_slowest_not_mean(self):
         equal=capacities(self.workers,self.roles,self.work,experts=256,top_k=8)
         self.workers['1']=copy.deepcopy(self.workers['1'])
@@ -192,5 +187,26 @@ class DynamicCapacityTests(unittest.TestCase):
         with self.assertRaises(ValueError):capacities(self.workers,{'0':'prefill'},self.work,experts=256,top_k=8)
         self.workers['1']['kv_capacity_tokens']=1
         with self.assertRaises(ValueError):capacities(self.workers,self.roles,self.work,experts=256,top_k=8)
+
+    def test_shared_worker_terms_equal_direct_estimates(self):
+        # decide evaluates a worker once per slice, role, D count and P observation, for every role map; each recorded
+        # estimate equals a direct capacities() call.
+        fit = measured_workers()
+        for i, worker in enumerate(fit.values()):
+            worker['prefill'] = dict(origin='measured', models=[dict(PREFILL_MODEL, coefficients=[.01*(1+i/8), .0001, 1e-9, 1e-5])])
+            worker['decode'] = dict(origin='measured', models=[dict(DECODE_MODEL, coefficients=[.02, .001*(1+i/4), .01])])
+        onboarding = {'0': dict(restored_per_cached_token=.1, cached_tokens=100.),
+                      '1': dict(restored_per_cached_token=.9, cached_tokens=900.)}
+        roles = {'0': 'prefill', '1': 'prefill', '2': 'decode', '3': 'decode'}
+        result = decide(fit, roles, WORK, minutes=MINUTES, experts=256, top_k=8, decode_population=30,
+                        onboarding=onboarding)
+
+        def direct(roles, work, population):
+            return capacities(fit, roles, work, experts=256, top_k=8, decode_population=population, onboarding=onboarding)
+        for option in result['candidates']:
+            self.assertEqual(option['estimate'], direct(option['roles'], WORK, 30))
+            self.assertEqual(option['minute_rps'],
+                             [direct(option['roles'], m['work'], m['decode_population'])['system_rps'] for m in MINUTES])
+
 
 if __name__=='__main__':unittest.main()

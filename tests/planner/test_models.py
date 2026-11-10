@@ -2,8 +2,9 @@ import copy
 
 import pytest
 
-from evolving_infra.planner.fit.learning import fit_bundle
+"""Per-worker P and D models: the one-multiplier prior-shape fit, the fit bundle and P validation errors."""
 from evolving_infra.planner.fit.models import fit_prefill_scale, prediction_errors
+from evolving_infra.planner.fit.learning import fit_bundle
 
 
 def windows():

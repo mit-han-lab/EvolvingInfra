@@ -32,13 +32,14 @@ def workload_delta(previous, current):
                             if delta['verify_steps'] else 1.))
 
 
-def population_mean(samples, start, end, *, max_gap_s=15):
-    """Time-weighted potential D population, keeping not-yet-ready P separate.
+def population_mean(samples, *, max_gap_s=15):
+    """Time-weighted potential D population over the samples' interval, keeping not-yet-ready P separate.
 
-    Each sample applies until the next, bounded by the next observation. Missing
-    or unknown records disable a decision; they are not zero-load evidence.
-    Pending P supply is included as potential work, never called a GPU batch.
+    Each sample applies until the next observation. Missing or unknown records
+    disable a decision; they are not zero-load evidence. Pending P supply is
+    included as potential work, never called a GPU batch.
     """
+    start, end = samples[0]['at'], samples[-1]['at']
     if end <= start or len(samples) < 2:
         raise ValueError('Insufficient population interval')
     counts_by_sample=[]
@@ -62,15 +63,12 @@ def population_mean(samples, start, end, *, max_gap_s=15):
         a, b = left['at'], right['at']
         if not all(math.isfinite(t) for t in (a, b)) or b <= a:
             raise ValueError('Population observation clock is not increasing')
-        duration = max(0., min(b, end)-max(a, start))
-        if not duration:
+        if a >= end:  # after the last sample's time: a later pair goes back in time and raises above
             continue
         if b-a > max_gap_s:
             raise ValueError('Population observation gap')
-        result = [x+duration*y for x,y in zip(result, values)]
-        covered += duration
-    if not math.isclose(covered, end-start, rel_tol=1e-9, abs_tol=1e-6):
-        raise ValueError('Population observations do not cover interval')
+        result = [x+(b-a)*y for x,y in zip(result, values)]
+        covered += b-a
     return dict(p_completed=result[0]/covered, p_pending=result[1]/covered,
                 potential=(result[0]+result[1])/covered, covered_s=covered)
 

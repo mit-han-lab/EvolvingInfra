@@ -1,35 +1,24 @@
+import contextlib
 import copy
 import http.server
+import io
 import json
 from pathlib import Path
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
-from evolving_infra.planner.api import served_experts
 from evolving_infra.planner.control.controller import Controller, node_assignment
-from evolving_infra.planner.control.transition import transition_residual
 from evolving_infra.planner.decide.workload import minute_slices, population_mean
+from evolving_infra.planner.api import RoleClient, cas_update
+from evolving_infra.planner.control.transition import transition_residual
+from evolving_infra.planner.api import served_experts
+from planner_support import WINDOW_WORKLOAD, measured_workers, router_samples, router_snapshot
 
 
 def snapshot(revision=0):
-    return dict(assignment=dict(epoch='one-router-process',revision=revision,
-        roles={'http://a':'prefill','http://b':'decode','http://c':'decode'}),
-        completed_workload=dict(requests=0,input_tokens=0,uncached_tokens=0,
-            causal_attention_pairs=0,output_tokens=0,verified_output_tokens=0,verify_steps=0),
-        decode_population=dict(fields=['p_completed','p_pending','unknown'],
-            workers={'http://b':[3,5,0]}))
-
-
-def rows(first, last, start=100., seconds=600, step=3):
-    """Router observations every `step` seconds; completed counters grow linearly."""
-    a,b=first['completed_workload'],last['completed_workload']
-    out=[]
-    for i in range(seconds//step+1):
-        s=copy.deepcopy(last)
-        s['completed_workload']={k:a[k]+(b[k]-a[k])*i*step//seconds for k in b}
-        out.append(dict(at=start+i*step,snapshot=s))
-    return out
+    return router_snapshot({'http://a':'prefill','http://b':'decode','http://c':'decode'},{'http://b':[3,5,0]},
+                           epoch='one-router-process',revision=revision)
 
 
 class Client:
@@ -52,21 +41,10 @@ class ControllerTests(unittest.TestCase):
         self.after=copy.deepcopy(self.initial['assignment']);self.after['revision']=1
         self.after['roles']['http://b']='prefill'
     def test_live_controller_decides_from_minute_slices(self):
-        p = dict(coefficients=[.01, .0001, 1e-9, .00001],
-                 tokens_per_step=4096., restored_per_cached_token=.5)
-        d = dict(coefficients=[.02, .001, .01], draft_tokens=6,
-                 batch_support=list(range(1, 129)))
-        workers = {node: dict(prefill=dict(origin='measured', models=[p]),
-                              decode=dict(origin='measured', models=[d]),
-                              max_running_requests=128, kv_capacity_tokens=2000000)
-                   for node in self.urls}
-        controller = Controller(dict(workers=workers), self.urls, self.initial,
+        controller = Controller(dict(workers=measured_workers(self.urls)), self.urls, self.initial,
                                 experts=256, top_k=8)
-        end = snapshot()
-        end['completed_workload'] = dict(requests=100, input_tokens=1200,
-            uncached_tokens=500, causal_attention_pairs=5000, output_tokens=400,
-            verified_output_tokens=400, verify_steps=100)
-        decision = controller.propose(rows(self.initial, end))
+        end = dict(snapshot(), completed_workload=WINDOW_WORKLOAD)
+        decision = controller.propose(router_samples(self.initial, end))
         self.assertEqual((decision['rule'], decision['required_standard_errors']),
                          ('minute_standard_error', 2))
         self.assertEqual(decision['slices'], 10)
@@ -75,8 +53,8 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual({m['decode_population'] for m in decision['minutes']}, {8.})
         later = snapshot(); later['completed_workload']['requests'] = 1
         with self.assertRaisesRegex(ValueError, 'counter boundary'):
-            controller.propose(rows(later, end))
-        samples = rows(self.initial, end)
+            controller.propose(router_samples(later, end))
+        samples = router_samples(self.initial, end)
         for row in samples[21:41]:  # Nothing completes during the second minute.
             row['snapshot']['completed_workload'] = dict(samples[20]['snapshot']['completed_workload'])
         with self.assertRaisesRegex(ValueError, 'Workload slice 1'):
@@ -107,7 +85,7 @@ class ControllerTests(unittest.TestCase):
             uncached_tokens=5, causal_attention_pairs=50, output_tokens=4)
         with patch('evolving_infra.planner.control.controller.decide', return_value=dict(candidates=[])):
             with self.assertRaisesRegex(ValueError, 'prediction'):
-                self.controller.propose(rows(current, current))
+                self.controller.propose(router_samples(current, current))
 
     def test_transition_interval_resets_both_counters_and_population_boundary(self):
         current = self._confirmed_switch()
@@ -123,7 +101,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.prediction_observation(end, 223., self.log.append),
                          'included')
         with patch('evolving_infra.planner.control.controller.decide', return_value=dict(candidates=[])):
-            decision = self.controller.propose(rows(current, end, start=220., seconds=120))
+            decision = self.controller.propose(router_samples(current, end, start=220., seconds=120))
         self.assertEqual(decision['workload']['requests'], 10)
         self.assertEqual((decision['workload']['uncached']+decision['workload']['cached']), 20.)
         self.assertEqual(decision['workload']['output'], 3.)
@@ -168,7 +146,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.prediction_resume_at, 420.)
 
     def test_unobserved_drain_cannot_enter_a_decision_window(self):
-        samples = rows(self.initial, self.initial)
+        samples = router_samples(self.initial, self.initial)
         samples[10]['snapshot']['draining'] = {'http://b': 20.}
         with self.assertRaisesRegex(ValueError, 'prediction'):
             self.controller.propose(samples)
@@ -254,22 +232,21 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.assignment,self.initial['assignment'])
     def test_router_restart_or_membership_change_is_not_accepted(self):
         changed=snapshot();changed['assignment']['epoch']='other-process'
-        with self.assertRaises(ValueError):self.controller.propose(rows(changed,changed))
+        with self.assertRaises(ValueError):self.controller.propose(router_samples(changed,changed))
         changed=snapshot();changed['assignment']['roles']['http://new']='decode'
         with self.assertRaises(ValueError):node_assignment(changed,self.urls)
     def test_population_includes_pending_and_weights_time(self):
         a=snapshot();b=snapshot();b['decode_population']['workers']['http://b']=[0,20,0]
         rows=[dict(at=0,snapshot=a),dict(at=2,snapshot=b),dict(at=5,snapshot=b)]
-        result=population_mean(rows,0,5)
+        result=population_mean(rows)
         self.assertAlmostEqual(result['potential'],15.2)
         self.assertAlmostEqual(result['p_completed'],1.2)
-    def test_unknown_gap_or_incomplete_coverage_cannot_be_zero_load(self):
+    def test_unknown_or_gap_cannot_be_zero_load(self):
         a=snapshot();a['decode_population']['workers']['http://b'][2]=1
-        with self.assertRaises(ValueError):population_mean([dict(at=0,snapshot=a),dict(at=3,snapshot=a)],0,3)
-        with self.assertRaises(ValueError):population_mean([dict(at=0,snapshot=snapshot()),dict(at=3,snapshot=a)],0,3)
+        with self.assertRaises(ValueError):population_mean([dict(at=0,snapshot=a),dict(at=3,snapshot=a)])
+        with self.assertRaises(ValueError):population_mean([dict(at=0,snapshot=snapshot()),dict(at=3,snapshot=a)])
         a=snapshot()
-        with self.assertRaises(ValueError):population_mean([dict(at=0,snapshot=a),dict(at=20,snapshot=a)],0,20)
-        with self.assertRaises(ValueError):population_mean([dict(at=1,snapshot=a),dict(at=3,snapshot=a)],0,3)
+        with self.assertRaises(ValueError):population_mean([dict(at=0,snapshot=a),dict(at=20,snapshot=a)])
     def test_role_change_does_not_move_existing_requests(self):
         s=snapshot();s['assignment']['roles']['http://b']='prefill'
         loads={'workers':{u:dict(active_prefill_reqs=0) for u in self.urls.values()}}
@@ -310,6 +287,34 @@ class ServedExpertsTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'one expert configuration'):
                     served_experts([url+'a',url+'c'])
             finally:server.shutdown()
+
+
+class RoleClientTests(unittest.TestCase):
+    def test_lost_put_reply_is_journaled_and_confirmed_by_one_get(self):
+        state=dict(assignment=snapshot()['assignment'],puts=0)
+        class Router(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):self.reply(200,json.dumps(dict(assignment=state['assignment'])))
+            def do_PUT(self):  # applied, but the reply is an error
+                body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                state['puts']+=1;state['assignment']=dict(epoch=body['epoch'],revision=1,roles=body['desired'])
+                self.reply(500,'lost reply')
+            def reply(self,code,text):
+                self.send_response(code);self.send_header('Content-Length',str(len(text)));self.end_headers()
+                self.wfile.write(text.encode())
+            def log_message(self,*args):pass
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Router)
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        log=[];desired={'http://a':'prefill','http://b':'prefill','http://c':'decode'}
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                response=cas_update(RoleClient(f'http://127.0.0.1:{server.server_port}','t',log.append),
+                    snapshot()['assignment'],desired,log.append,lambda body:dict(body=body),'unconfirmed')
+        finally:server.shutdown()
+        self.assertEqual((response['assignment']['roles'],state['puts']),(desired,1))
+        self.assertEqual([e['event'] for e in log],
+            ['role_update_intent','role_request_http_error','role_update_response_unknown'])
+        self.assertEqual({k:log[1][k] for k in ('method','status','response_body')},
+            dict(method='PUT',status=500,response_body='lost reply'))
 
 
 if __name__=='__main__':unittest.main()

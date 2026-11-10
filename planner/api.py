@@ -6,47 +6,63 @@ must run with ``--symmetric-pd-external-role-control``); a PUT is never retried.
 import json
 from pathlib import Path
 import sys
-import urllib.error
+from urllib.error import HTTPError
 from urllib.request import Request
 
 from .common import http_json, open_url
 
 
 class RoleClient:
-    def __init__(self, url, credential, timeout=5):
+    """The Router's role registry. An HTTP error is journaled, and printed to stderr (controller.log),
+    with the router's status and response body before it propagates. Requests never use a proxy."""
+
+    def __init__(self, url, credential, journal, timeout=5):
         self.url = url.rstrip('/') + '/symmetric_pd/roles'
-        self.credential, self.timeout = credential, timeout
+        self.credential, self.journal, self.timeout = credential, journal, timeout
 
     def request(self, body=None):
+        method = 'GET' if body is None else 'PUT'
         req = Request(self.url,
             data=None if body is None else json.dumps(body).encode(),
-            method='GET' if body is None else 'PUT',
+            method=method,
             headers={'Authorization': 'Bearer ' + self.credential,
                      'Content-Type': 'application/json'})
-        with open_url(req, self.timeout) as response:
-            return json.load(response)
-
-
-class JournaledRoleClient:
-    """RoleClient whose HTTP errors are journaled (and printed to controller.log) with the
-    router's status and response body before they propagate; Controller.apply records only the type."""
-
-    def __init__(self, client, journal):
-        self.client, self.journal, self.timeout = client, journal, client.timeout
-
-    def request(self, body=None):
         try:
-            return self.client.request(body)
-        except urllib.error.HTTPError as error:
+            with open_url(req, self.timeout) as response:
+                return json.load(response)
+        except HTTPError as error:
             try:
-                text = error.read().decode(errors="replace")[:2000]
+                text = error.read().decode(errors='replace')[:2000]
             except Exception as read_error:  # noqa: BLE001 - the status alone still helps
-                text = f"<unreadable: {read_error!r}>"
-            event = dict(event="role_request_http_error", method="GET" if body is None else "PUT",
-                         status=error.code, reason=str(error.reason), response_body=text)
+                text = f'<unreadable: {read_error!r}>'
+            event = dict(event='role_request_http_error', method=method, status=error.code,
+                         reason=str(error.reason), response_body=text)
             self.journal(event)
-            print(f"planner controller: {json.dumps(event)}", file=sys.stderr, flush=True)
+            print(f'planner controller: {json.dumps(event)}', file=sys.stderr, flush=True)
             raise
+
+
+def cas_update(client, assignment, desired, journal, intent, failure):
+    """One epoch/revision compare-and-set role update from `assignment` to the `desired` roles.
+
+    The intent is journaled before the PUT; ``intent(body)`` gives its fields. An
+    old assignment after an ambiguous PUT cannot prove the PUT will never arrive,
+    so only a GET follows, never a second PUT, and only the exact next revision
+    with the desired roles confirms the update; anything else raises
+    ``RuntimeError(failure)``. Returns the router's confirming response.
+    """
+    body = dict(epoch=assignment['epoch'], revision=assignment['revision'],
+                expected=assignment['roles'], desired=desired)
+    journal(dict(event='role_update_intent', **intent(body)))
+    try:
+        response = client.request(body)
+    except Exception as error:  # noqa: BLE001 - read back, never retry the mutation
+        journal(dict(event='role_update_response_unknown', error=type(error).__name__))
+        response = client.request()
+    if response['assignment'] != dict(epoch=assignment['epoch'], revision=assignment['revision']+1,
+                                      roles=desired):
+        raise RuntimeError(failure)
+    return response
 
 
 def served_experts(urls, timeout=5):

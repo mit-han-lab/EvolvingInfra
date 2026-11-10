@@ -7,6 +7,7 @@ epoch/revision CAS and are never retried after an ambiguous response.
 import math
 import time
 
+from ..api import cas_update
 from ..common import positive
 from ..decide.capacity import capacities
 from ..decide.rule import decide
@@ -125,7 +126,7 @@ class Controller:
             raise ValueError('Router incarnation/revision/roles changed externally')
         if samples[0]['snapshot']['completed_workload'] != self.previous:
             raise ValueError('Observations do not start at the counter boundary')
-        population = population_mean(samples, samples[0]['at'], samples[-1]['at'])
+        population = population_mean(samples)
         work = workload_delta(self.previous, snapshot['completed_workload'])
         minutes = []
         for number, part in enumerate(minute_slices(samples)):
@@ -133,7 +134,7 @@ class Controller:
                 minutes.append(dict(
                     work=workload_delta(part[0]['snapshot']['completed_workload'],
                                         part[-1]['snapshot']['completed_workload']),
-                    decode_population=population_mean(part, part[0]['at'], part[-1]['at'])['potential']))
+                    decode_population=population_mean(part)['potential']))
             except ValueError as error:
                 raise ValueError(f'Workload slice {number}: {error}') from error
         kwargs = dict(experts=self.experts, top_k=self.top_k, onboarding=self.onboarding)
@@ -148,11 +149,7 @@ class Controller:
         return decision
 
     def apply(self, snapshot, decision, client, journal):
-        """Journal before PUT. Only an exact new revision proves application.
-
-        An old assignment after a timeout cannot prove the original PUT will
-        never arrive. Stop on that ambiguity rather than issue a second PUT.
-        """
+        """Hold, or switch with one compare-and-set role update (`cas_update`)."""
         if snapshot['assignment'] != self.assignment or decision['before'] != self.assignment:
             raise ValueError('Stale decision')
         if decision['action'] == 'switch':
@@ -160,17 +157,9 @@ class Controller:
                 raise ValueError('Previous role change is still draining')
             selected = decision['selected']['roles']
             desired = {url: selected[node] for node,url in self.urls.items()}
-            body = dict(epoch=self.assignment['epoch'], revision=self.assignment['revision'],
-                        expected=self.assignment['roles'], desired=desired)
-            journal(dict(event='role_update_intent', body=body, decision=decision))
-            expected = dict(epoch=body['epoch'], revision=body['revision']+1, roles=desired)
-            try:
-                response = client.request(body)
-            except Exception as error:
-                journal(dict(event='role_update_response_unknown', error=type(error).__name__))
-                response = client.request()  # Read only, never retry the mutation.
-            if response['assignment'] != expected:
-                raise RuntimeError('Role update unconfirmed or changed concurrently')
+            response = cas_update(client, self.assignment, desired, journal,
+                                  lambda body: dict(body=body, decision=decision),
+                                  'Role update unconfirmed or changed concurrently')
             self.assignment = response['assignment']
             self.onboarding = {}
             self.prediction_excluded_from = self.clock()

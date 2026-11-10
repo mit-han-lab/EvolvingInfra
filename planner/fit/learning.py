@@ -3,7 +3,6 @@
 ``python -m evolving_infra.planner fit CONFIG`` runs ``learning_fit``; the control loop starts it as a subprocess
 when learning ends and reads ``<run_dir>/calibration/report.json``.
 """
-import hashlib
 import json
 from pathlib import Path
 
@@ -12,11 +11,11 @@ from ..collect.clock import Clock
 from ..collect.snapshot import capture
 from ..collect.restore_counters import counter_replicas
 from ..collect.trace_server import Mirror
-from ..common import json_lines, save
+from ..common import save
 from ..config import learning_start_path
 from ..priors import prior_sha256, resolve_prior
 from .models import fit_decode, fit_prefill, fit_prefill_scale
-from .steps import load_steps
+from .steps import chronological, launch_wall, load_steps, split_time
 from .windows import prefill_windows
 
 
@@ -39,7 +38,7 @@ def fit_bundle(*, windows, decode_rows, workers, start, end, experts, top_k,
         # fits the five-term shape (the vision term is absent from its features).
         windows=[dict(w,features=list(w['features'])+[0.]) if len(w['features'])==4 else w
                  for w in windows]
-    split=start+.7*(end-start)
+    split=split_time(start,end)
     profiles={};failures={}
     for node,worker in workers.items():
         own={}
@@ -54,7 +53,7 @@ def fit_bundle(*, windows, decode_rows, workers, start, end, experts, top_k,
                     model=fit_prefill_scale(rows,split_time=split,
                         reference_coefficients=predeclared_prefill_shape)
                     model['full_fit_unavailable']=str(exc)
-                selected=[w for w in rows if w['end']<=split or w['start']>=split]
+                selected,_=chronological(rows,split,'start','end')
                 sums=[sum(w['features'][i] for w in selected) for i in range(4)]
                 cached=sum(w['started_cached_tokens'] for w in selected)
                 if sums[0]<=0 or sums[1]<=0 or (cached<=0 and sums[3]>0):
@@ -95,27 +94,27 @@ def fit_bundle(*, windows, decode_rows, workers, start, end, experts, top_k,
         ])
 
 
-def snapshot_measurements(manifest, *, replicas):
-    """Reuse the same checked, closed windows for calibration and later updates."""
-    root=Path(manifest['telemetry']).parent
-    for name,digest in manifest['files'].items():
-        if hashlib.sha256((root/name).read_bytes()).hexdigest()!=digest:
-            raise ValueError('Calibration snapshot changed: '+name)
+def snapshot_measurements(manifest, records, *, replicas):
+    """Reuse the same checked, closed windows for calibration and later updates.
+
+    `records` are the rows the capture of `manifest` kept (snapshot.capture), so
+    its files are not read back.
+    """
     start,end,pad=(manifest[k] for k in ('start','end','clock_pad_s'))
     p_rows=[];requests={};source_nodes={};d_rows={}
     for node,worker in manifest['workers'].items():
-        rows=load_steps([worker['steps']],start+pad,end-pad)
+        rows=load_steps([worker['steps']],start+pad,end-pad,records)
         if worker['role']=='prefill':
             p_rows.extend(rows)
-            requests[node]=list(json_lines(worker['requests']))
+            requests[node]=records[worker['requests']]
             source_nodes[worker['steps']]=node
         elif worker['role']=='decode':
             # Completion inside the trimmed interval is insufficient: a first
             # launch can precede it. Trim whole launch intervals while keeping
             # the original chronological70/30 split used by fit_bundle.
             d_rows[node]=[r for r in rows
-                if start+pad <= r['ts']-r['dur_ms']/1000
-                and r['ts']-r['dur_ms']/1000+(r.get('busy_interval_s') or 0) <= end-pad]
+                if start+pad <= launch_wall(r)
+                and launch_wall(r)+(r.get('busy_interval_s') or 0) <= end-pad]
         else:
             raise ValueError('Warmup must have an exclusive declared initial role')
     windows,coverage=prefill_windows(p_rows,requests,source_nodes,manifest['telemetry'],
@@ -123,11 +122,11 @@ def snapshot_measurements(manifest, *, replicas):
     return windows, d_rows, coverage
 
 
-def fit_snapshot(manifest, *, capacities, replicas, experts, top_k, predeclared_prefill_shape):
+def fit_snapshot(manifest, records, *, capacities, replicas, experts, top_k, predeclared_prefill_shape):
     """Connect the immutable snapshot to fits with nodeN identities throughout."""
     if set(manifest['workers'])!=set(capacities):
         raise ValueError('Snapshot/capacity worker membership differs')
-    windows,d_rows,coverage=snapshot_measurements(manifest,replicas=replicas)
+    windows,d_rows,coverage=snapshot_measurements(manifest,records,replicas=replicas)
     start,end=manifest['start'],manifest['end']
     fitted=fit_bundle(windows=windows,decode_rows=d_rows,workers=capacities,
         start=start,end=end,experts=experts,top_k=top_k,
@@ -137,7 +136,8 @@ def fit_snapshot(manifest, *, capacities, replicas, experts, top_k, predeclared_
 
 
 def capture_interval(cfg: dict, directory: Path, destination: Path, *, start, end, roles: dict, mirror: Mirror):
-    """Mirror the traces of `roles` workers, audit clocks around [start, end], freeze the snapshot."""
+    """Mirror the traces of `roles` workers, audit clocks around [start, end], freeze the snapshot.
+    Returns the snapshot manifest, its kept rows (snapshot.capture) and the clock audit."""
     clock = Clock(cfg, directory)
     audit = clock.verify(start, end)
     offsets = clock.offsets()
@@ -145,10 +145,11 @@ def capture_interval(cfg: dict, directory: Path, destination: Path, *, start, en
     paths = mirror.sync(sorted(roles))
     inputs = [dict(node=node, host=by_node[node]["ip"], generation=0, role=role, **paths[node])
               for node, role in sorted(roles.items())]
-    snapshot = capture(destination, inputs, directory / "restore-observations.jsonl", start=start, end=end,
-                       clock_pad_s=cfg["clock_pad_s"],
-                       worker_clock_offsets_s={node: offsets[by_node[node]["host"]] for node in roles})
-    return snapshot, audit
+    snapshot, records = capture(destination, inputs, directory / "restore-observations.jsonl", start=start, end=end,
+                                clock_pad_s=cfg["clock_pad_s"],
+                                worker_clock_offsets_s={node: offsets[by_node[node]["host"]] for node in roles},
+                                cursors=mirror.cursors)
+    return snapshot, records, audit
 
 
 def learning_fit(cfg: dict):
@@ -158,11 +159,11 @@ def learning_fit(cfg: dict):
     end = start + cfg["learning_s"]
     prior = resolve_prior(cfg)
     roles = {w["node"]: w["initial_role"] for w in cfg["workers"]}
-    snapshot, audit = capture_interval(cfg, directory, scratch / "calibration" / "snapshot", start=start, end=end,
+    snapshot, records, audit = capture_interval(cfg, directory, scratch / "calibration" / "snapshot", start=start, end=end,
                                        roles=roles, mirror=Mirror(scratch / "mirror", cfg["workers"]))
     capacities = json.loads((directory / "worker-capacities.json").read_text())
     experts, top_k = served_experts([w["url"] for w in cfg["workers"]])
-    result = fit_snapshot(snapshot, capacities=capacities, replicas=counter_replicas(capacities),
+    result = fit_snapshot(snapshot, records, capacities=capacities, replicas=counter_replicas(capacities),
                           experts=experts, top_k=top_k,
                           predeclared_prefill_shape=prior["coefficients"])
     result.update(clock_audit=audit, experts=experts, top_k=top_k, prefill_shape_prior=prior,

@@ -175,7 +175,7 @@ class Env:
 
         for module in (loop_module, controller_module):
             monkeypatch.setattr(module, "time", fake_time)
-        monkeypatch.setattr(loop_module, "RoleClient", lambda url, token, timeout=5: types.SimpleNamespace(
+        monkeypatch.setattr(loop_module, "RoleClient", lambda url, token, journal, timeout=5: types.SimpleNamespace(
             request=router.request, timeout=timeout))
         monkeypatch.setattr(loop_module, "worker_capacities", lambda workers: {
             w["node"]: dict(kv_capacity_tokens=6461440, max_running_requests=256, tp_size=4) for w in workers})

@@ -99,11 +99,11 @@ def observe_onboarding(cfg: dict, assignment: dict, *, start, end, mirror: Mirro
     roles = {url_node[u]: r for u, r in assignment["roles"].items() if r == "prefill"}
     Clock(cfg, directory).observe()  # complete the clock bracket after `end`
     name = f"r{assignment['revision']}-{int(end * 1e9)}"
-    snapshot, audit = capture_interval(cfg, directory, scratch / "onboarding" / name / "snapshot", start=start,
+    snapshot, records, audit = capture_interval(cfg, directory, scratch / "onboarding" / name / "snapshot", start=start,
                                        end=end, roles=roles, mirror=mirror)
     raw = (directory / "calibration" / "report.json").read_bytes()
     replicas = counter_replicas(json.loads((directory / "worker-capacities.json").read_text()))
-    windows, _, coverage = snapshot_measurements(snapshot, replicas=replicas)
+    windows, _, coverage = snapshot_measurements(snapshot, records, replicas=replicas)
     report = update_workers(json.loads(raw)["workers"], windows)
     for node in roles:
         if node not in report["workers"]:

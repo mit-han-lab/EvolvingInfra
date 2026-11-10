@@ -1,22 +1,17 @@
 """Restored-token counters: what the scraper records and how the fit reads them back."""
-import gzip
 import http.server
-import json
 import threading
 
 import pytest
 
 from evolving_infra.planner.collect.restore_counters import Telemetry, counter_bracket, read_restore_counters
 
+from planner_support import restore_record, write_telemetry
+
 
 def write_scrapes(path, points):
-    with gzip.open(path, "wt") as stream:
-        for timestamp, counter in points:
-            metrics = "# HELP sglang:hicache_backup_bytes_total Backup bytes\n"
-            if counter:
-                metrics += f'sglang:load_back_tokens_total{{cache_type="UnifiedRadixCache",pool="kv"}} {counter}\n'
-            stream.write(json.dumps(dict(nodes=[dict(node=0, role="prefill", errors=[],
-                                                    at=timestamp, metrics=metrics)]))+"\n")
+    """(scrape time, counter) of P node 0; a zero counter is not exported yet."""
+    write_telemetry(path, [restore_record(at, counter or None) for at, counter in points])
 
 
 def test_actual_restore_counter_normalizes_rank_replicas_and_brackets(tmp_path):
@@ -55,7 +50,6 @@ def test_telemetry_rows_parse_as_restore_counters(tmp_path):
         rows = [t.scrape(t.workers[0]) for _ in range(2)]
     finally:
         server.shutdown()
-    with gzip.open(tmp_path / "r.jsonl.gz", "wt") as f:
-        f.writelines(json.dumps(r) + "\n" for r in rows)
+    write_telemetry(tmp_path / "r.jsonl.gz", rows)
     meters = read_restore_counters(tmp_path / "r.jsonl.gz", 4)
     assert [v for _, v in meters["node3"]] == [100.0, 100.0]  # kv pool only, / 4 TP ranks

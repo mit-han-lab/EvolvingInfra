@@ -6,6 +6,7 @@ correction and physical identity must be explicit, rather than inferred from a g
 from collections import defaultdict
 import math
 
+from .steps import launch_wall
 from ..collect.restore_counters import counter_bracket, include_scrape_collection_time, read_restore_counters
 
 
@@ -52,8 +53,7 @@ def prefill_windows(rows, requests, source_nodes, telemetry, *, replicas,
                    and bool(finished) and len(finished)==row.get('launch_bs')
                    and sum(finished)==row.get('launch_seq_lens_sum'))
         if (row['mode']=='extend' or auxiliary) and row.get('launch_bs'):
-            r=dict(row,node=node,launch_wall=row['ts']-row['dur_ms']/1000,
-                   auxiliary_prefill_step=auxiliary)
+            r=dict(row,node=node,launch_wall=launch_wall(row),auxiliary_prefill_step=auxiliary)
             if start <= r['launch_wall'] and row['ts'] <= end:
                 by_node[r['node']].append(r)
     meters=read_restore_counters(telemetry,replicas)
@@ -133,15 +133,16 @@ def prefill_windows(rows, requests, source_nodes, telemetry, *, replicas,
                 audit['excluded_windows']+=1
                 continue
             try:
-                ca,alo,ahi,agap=counter_bracket(meters[node],a)
-                cb,blo,bhi,bgap=counter_bracket(meters[node],b)
+                ca,_,_,agap=counter_bracket(meters[node],a)
+                cb,_,_,bgap=counter_bracket(meters[node],b)
                 sample=dict(node=node,start=a,end=b,seconds=seconds,steps=len(steps),
                     requests=sum(identity[node,r['forward_iter']]['started'] for r in steps),
                     started_cached_tokens=sum(identity[node,r['forward_iter']]['cached'] for r in steps),
                     features=[len(steps),sum(r['new_prefill_tokens'] for r in steps),
                               sum(r['prefill_attention_pairs'] for r in steps
                                   if not r['auxiliary_prefill_step']),cb-ca],
-                    restore_lo=max(0,blo-ahi),restore_hi=bhi-alo,
+                    # Bounds from the full HTTP collection brackets, set below.
+                    restore_lo=None,restore_hi=None,
                     max_scrape_gap_s=max(agap,bgap))
                 if any(not math.isfinite(v) or v<0 for v in sample['features']):
                     raise ValueError('Invalid window features')
@@ -153,9 +154,6 @@ def prefill_windows(rows, requests, source_nodes, telemetry, *, replicas,
                 windows.append(sample)
             except ValueError:
                 audit['excluded_windows']+=1
-        selected=[w for w in windows if w['node']==node]
-        audit['windows']=len(selected)
-        audit['eligible_steps']=sum(w['steps'] for w in selected)
     # Full HTTP observation brackets, not request-completion timestamps alone.
     excluded=include_scrape_collection_time(windows,telemetry,replicas,clock_pad_s,
                                            exclude_unbracketed=True)

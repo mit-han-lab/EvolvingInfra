@@ -55,23 +55,26 @@ def decide(workers, roles, work, *, minutes, experts, top_k, decode_population=N
 
     Current assignment is always a candidate; same-count permutations and
     data-dependent model selection are deliberately outside this controller.
+    Each worker's capacity term is computed once for the whole interval and once
+    per slice (`capacities` terms), whatever the number of candidates.
     """
     if len(workers) < 2:
         raise ValueError('P/D role control requires at least two model nodes')
     if len(minutes) < 2:
         raise ValueError('At least two workload slices are required')
     kwargs = dict(experts=experts, top_k=top_k, onboarding=onboarding)
+    interval, by_minute = {}, [{} for _ in minutes]
     options=[dict(changed=[], roles=dict(roles)),
-             *_role_maps(workers, roles, work, decode_population=decode_population, **kwargs)]
+             *_role_maps(workers, roles, work, decode_population=decode_population, terms=interval, **kwargs)]
     for option in options:
         if 'error' in option:
             continue
         try:
             option['estimate']=capacities(workers,option['roles'],work,
-                                          decode_population=decode_population,**kwargs)
-            option['minute_rps']=[capacities(workers,option['roles'],m['work'],
-                                             decode_population=m['decode_population'],**kwargs)['system_rps']
-                                  for m in minutes]
+                                          decode_population=decode_population,terms=interval,**kwargs)
+            option['minute_rps']=[capacities(workers,option['roles'],m['work'],decode_population=m['decode_population'],
+                                             terms=t,numbers_only=True,**kwargs)['system_rps']
+                                  for m,t in zip(minutes,by_minute)]
         except ValueError as exc:
             if not option['changed']:
                 raise
@@ -99,5 +102,5 @@ def decide(workers, roles, work, *, minutes, experts, top_k, decode_population=N
 
 
 def _preference(option):
-    """The standard order of `_decide`: largest mean minute gain, then fewest changes."""
+    """The order of `decide`: largest mean minute gain, then fewest changes."""
     return option['minute_gain']['mean_rps'], -len(option['changed'])

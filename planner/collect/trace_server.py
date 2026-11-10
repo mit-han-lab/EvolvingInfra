@@ -61,10 +61,12 @@ def serve_traces(root: str, port: int = TRACE_PORT, host: str = "0.0.0.0"):
 
 class Mirror:
     """Append-only local copies of each worker's iter/req trace stream (one stream per worker: a second
-    pid file means the engine restarted, which the fit must not mix)."""
+    pid file means the engine restarted, which the fit must not mix). `cursors` keeps, per captured file,
+    what earlier captures already read (snapshot.records_before), so a capture reads only new bytes."""
 
     def __init__(self, root: Path, workers: list[dict]):
         self.root, self.workers = Path(root), {w["node"]: w for w in workers}
+        self.cursors: dict = {}
 
     def sync(self, nodes) -> dict:
         out = {}
