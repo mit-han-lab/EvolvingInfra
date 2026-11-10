@@ -313,3 +313,21 @@ class ServedExpertsTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+def test_worker_capacities_use_the_launch_cap_else_the_engine_computed_one():
+    from evolving_infra.planner import api
+    replies = {
+        'http://flag': dict(max_total_num_tokens=1000, max_running_requests=256, tp_size=4,
+                            internal_states=[dict(effective_max_running_requests_per_dp=200)]),
+        'http://auto': dict(max_total_num_tokens=2000, max_running_requests=None, tp_size=4,
+                            internal_states=[dict(effective_max_running_requests_per_dp=1024)] * 2),
+    }
+    original = api.http_json
+    api.http_json = lambda url, timeout=10, headers=None: replies[url.removesuffix('/server_info')]
+    try:
+        caps = api.worker_capacities([dict(node='node0', url='http://flag'), dict(node='node1', url='http://auto')])
+    finally:
+        api.http_json = original
+    assert caps == {'node0': dict(kv_capacity_tokens=1000, max_running_requests=256, tp_size=4),
+                    'node1': dict(kv_capacity_tokens=2000, max_running_requests=2048, tp_size=4)}

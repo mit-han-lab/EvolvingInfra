@@ -67,13 +67,19 @@ def served_experts(urls, timeout=5):
 
 
 def worker_capacities(workers):
-    """{node: kv_capacity_tokens, max_running_requests, tp_size} from every engine's ``/server_info``."""
+    """{node: kv_capacity_tokens, max_running_requests, tp_size} from every engine's ``/server_info``.
+
+    The request cap is the launch flag when the engine was given one; otherwise the engine computed it at
+    startup, and it is the sum of the value each data-parallel scheduler reports.
+    """
     capacities = {}
     for w in workers:
         info = http_json(w["url"] + "/server_info", timeout=30)
+        cap = info.get("max_running_requests")
+        if cap is None:
+            cap = sum(int(s["effective_max_running_requests_per_dp"]) for s in info["internal_states"])
         capacities[w["node"]] = dict(kv_capacity_tokens=int(info["max_total_num_tokens"]),
-                                     max_running_requests=int(info["max_running_requests"]),
-                                     tp_size=int(info["tp_size"]))
+                                     max_running_requests=int(cap), tp_size=int(info["tp_size"]))
     return capacities
 
 
