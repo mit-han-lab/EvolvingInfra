@@ -7,14 +7,16 @@ still need, so the engines evict unreferenced KV first.
 
 Retention runs on models with a FULL-only cache tree, such as GLM-5.2 and Kimi-K2.6.
 
-## Enable it
+## Use it
 
-- Engines: `--enable-kv-session-retention`, with the host tier in write-through mode
-  (`--enable-hierarchical-cache --hicache-write-policy write_through`). Under late D the
-  engine also turns on `SGLANG_KV_SESSION_ADMIT_TAG`, so the chosen D counts the branch.
-- Router: `--symmetric-pd-kv-session-retention`.
-- Clients: tag every request with `x-agent-context` and end each branch with
-  `POST /kv_sessions/end` (below).
+Retention is on by default: engines in symmetric mode turn on `--enable-kv-session-retention` with
+a write-through host tier, and `--policy symmetric_pd` turns on
+`--symmetric-pd-kv-session-retention`. Under late D the engine also turns on
+`SGLANG_KV_SESSION_ADMIT_TAG`, so the chosen D counts the branch. On a model without a FULL-only
+cache tree the engine keeps retention off and ignores the router's session tags.
+
+Clients tag every request with `x-agent-context` and end each branch with
+`POST /kv_sessions/end` (below).
 
 ## How it works
 

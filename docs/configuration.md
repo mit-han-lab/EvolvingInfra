@@ -1,54 +1,47 @@
 # Configuration
 
-The flags you need to run Evolving Infra, grouped by component. The [quickstart](quickstart.md)
-uses the minimal set; the reference benchmarks add the ones marked **bench**. The complete
-benchmark configuration is in [`deploy/modal/stack.py`](../deploy/modal/stack.py). Run
-`sgl-router --help` or `python -m decoupled_engine.launch_server --help` for every flag.
+Evolving Infra runs the paper's configuration by default. With `--disaggregation-mode symmetric`
+on the engines and `--policy symmetric_pd` on the router, every feature below is on unless a flag
+says otherwise; set `--symmetric-preset none` (engine) and `--symmetric-pd-preset none` (router)
+to take the flags as given, and use the same preset on both sides. Run `sgl-router --help` or
+`python -m decoupled_engine.launch_server --help` for every flag.
 
 ## Engine (`decoupled_engine.launch_server`)
 
 The engine takes SGLang's server arguments. These are the ones Evolving Infra adds or depends on.
 
-### P/D and KV transfer
+### Required
 
 | Flag | Description |
 |---|---|
-| `--disaggregation-mode symmetric` | Any worker can run the prefill or the decode leg. Required. |
+| `--disaggregation-mode symmetric` | Any worker can run the prefill or the decode leg. |
 | `--disaggregation-transfer-backend mooncake` | Move KV between workers with Mooncake over RDMA. |
-| `--disaggregation-ib-device JSON` | RDMA device of every GPU, e.g. `{"0": "mlx5_0", ...}`. List all GPUs the worker uses. |
+| `--disaggregation-ib-device JSON` | RDMA device of every GPU, e.g. `{"0": "mlx5_0", ...}`. List all GPUs the worker uses. Peer KV pulls use the same devices. |
 | `--disaggregation-bootstrap-port N` | Base port of the worker's KV transfer side channel. Must match the router's `--symmetric-pd-worker`. |
-| `--incremental-streaming-output` | Required by the frontend. |
-
-### Cache and KV directory
-
-| Flag | Description |
-|---|---|
-| `--enable-hierarchical-cache` | Host-memory KV tier behind the GPU cache. |
-| `--hicache-ratio R`, `--hicache-write-policy write_through` | **bench** Host tier size (as a multiple of the GPU cache) and write-through, so every GPU page has a host copy. |
-| `--enable-dsv4-hicache-host-dedup`, `--enable-dsa-hicache-host-dedup`, `--enable-mla-hicache-host-dedup` | **bench** Store host pages once per node instead of once per TP rank, for DeepSeek-V4, GLM-5.2 (DSA) and Kimi-K2.6 (MLA). Without it every rank allocates its own host pool. For GLM-5.2 and Kimi-K2.6 in symmetric mode the GPUs of a node share the loaded pages through copy engines, with `--hicache-io-backend direct --hicache-mem-layout page_first_direct` (set automatically). |
 | `--kv-events-config JSON` | Publish KV store and remove events over ZMQ for the KV directory. |
 | `--enable-metrics`, `--enable-cache-report` | Prometheus metrics and per-request cached-token counts. The router and planner read both. |
+| `--incremental-streaming-output` | Required by the frontend. |
 
-### Peer KV pulls
+### On by default in symmetric mode
 
-A prefill worker can fetch a prefix that another worker holds in host memory instead of
-recomputing it. Enable this on every worker and give the router the servicer addresses
-(`--kv-worker-map`, below).
+`--symmetric-preset paper` (the default) turns these on when the flags leave them off, and logs
+them in one `Symmetric features:` line at startup.
+
+| Feature | Flags it sets | Default |
+|---|---|---|
+| Host KV tier | `--enable-hierarchical-cache`, `--hicache-write-policy write_through` | Host tier 4× the GPU cache with host dedup (4.445× with the peer KV servicer, which keeps 10 % for pulls); `--hicache-ratio` sets it |
+| Host dedup | `--enable-dsa-hicache-host-dedup` (GLM-5.2), `--enable-mla-hicache-host-dedup` (Kimi-K2.6), `--enable-dsv4-hicache-host-dedup` (DeepSeek-V4) | The model's attention kind, on single-node TP. Each node stores a host page once instead of once per GPU |
+| Peer KV pulls | `--enable-peer-kv-servicer`, `--hicache-storage-backend dynamic` with the peer KV backend | On when `--disaggregation-ib-device` is set. The servicer listens on `--peer-kv-servicer-port` (default 18100) and the next ports, one per GPU; give each engine on a node its own range |
+| Late decode choice | `--disaggregation-late-d choose`, `--disaggregation-late-d-lead-mode need`, `--disaggregation-late-d-allocation-trigger first_chunk` | The router-link port is a free port, reported in `/server_info` |
+| Prefill work snapshot | `--enable-prefill-work-snapshot` | Read by the router's cost function |
+| KV session retention | `--enable-kv-session-retention` | On models with a FULL-only cache tree, such as GLM-5.2 and Kimi-K2.6. Without it the engine ignores the router's session tags |
+
+### Other flags
 
 | Flag | Description |
 |---|---|
-| `--enable-peer-kv-servicer`, `--peer-kv-servicer-port N` | **bench** Serve this worker's host pages to peers. |
-| `--hicache-storage-backend dynamic --hicache-storage-backend-extra-config JSON` | **bench** Load the peer KV backend (`decoupled_engine.srt.mem_cache.storage.peer_kv.peer_kv_backend`). |
-| `--peer-kv-servicer-reserve-ratio-kv`, `--peer-kv-servicer-max-leased-gb` | **bench** Host memory set aside for pulls. |
-
-### Router support
-
-| Flag | Description |
-|---|---|
-| `--enable-prefill-work-snapshot` | **bench** Report each request's remaining prefill work. Needed by the router's cost-function P selection. |
-| `--disaggregation-late-d choose`, `--disaggregation-late-d-control-port N` | **bench** Late decode choice: P asks the router which D to admit at its first prefill chunk. |
 | `--sched-trace-dir DIR` | Write scheduler step traces for the [planner](dynamic-pd.md). |
-| `--enable-kv-session-retention` | [KV retention](kv-retention.md). Not on DeepSeek-V4. |
+| `--hicache-ratio R` | Host tier size as a multiple of the GPU cache. |
 
 ### Environment
 
@@ -57,19 +50,18 @@ The engine keeps SGLang's `SGLANG_*` variables. Set these yourself:
 | Variable | Description |
 |---|---|
 | `SGLANG_HOST_IP` | Address Mooncake and the KV events advertise. Set it when the default route is not reachable from the other workers. |
-| `SGLANG_DECODE_SELECTION_METRICS=1` | Report decode capacity, needed by late D's `fit_req` rule. Without it every late D choice falls back to the simpler `d1` rule. |
 | `WITH_NVIDIA_PEERMEM=0` | Register GPU memory with RDMA through dma-buf. Set it on hosts without the `nvidia_peermem` module, such as GB300 nodes and gVisor sandboxes. |
 
-The flags above turn on the variables their features need. The engine logs them in one
-`Symmetric defaults:` line at startup. Set a variable to `0` to keep it off.
+The features turn on the variables they use, and the engine logs them in one
+`Symmetric defaults:` line. Set a variable to `0` to keep it off.
 
 | When | Variables turned on |
 |---|---|
-| `--disaggregation-mode symmetric` with `--disaggregation-late-d alloc` or `choose` | `SGLANG_SYMMETRIC_PD_IMPORT_LOCAL_RESERVE=1`, `SGLANG_SYMMETRIC_PD_IMPORT_BUDGET_FRACTION=1.0` |
-| `--disaggregation-mode symmetric` | `SGLANG_PREBUILT_NONBLOCKING_H2D`; with `--enable-peer-kv-servicer` `SGLANG_PEER_KV_PUSH_FAST`; with `--enable-hierarchical-cache` on plain TP `SGLANG_HICACHE_PIPELINED_SYNC` and `SGLANG_HICACHE_SKIP_IDLE_SYNC` |
-| Symmetric with `--disaggregation-late-d choose` | `SGLANG_SYMMETRIC_IMPORT_L2_RESTORE`, `SGLANG_SYMMETRIC_SKIP_REUSED_PREFIX_PUBLICATION`, `SGLANG_SYMMETRIC_PUBLISH_AFTER_RESULT`, `SGLANG_SYMMETRIC_BUDGET_STANDARD_PD`, `SGLANG_SYMMETRIC_LAUNCH_THREAD`, `SGLANG_SYMMETRIC_ADMIT_AFTER_LAUNCH`, `SGLANG_HICACHE_DECODE_CLEAR_CONSUMER`; with `--enable-kv-session-retention` also `SGLANG_KV_SESSION_ADMIT_TAG` |
-| `--enable-prefill-work-snapshot` | `SGLANG_PREFILL_ROUTING_SNAPSHOT`, in symmetric mode `SGLANG_SYMMETRIC_ROUTING_SNAPSHOT`; snapshot size `SGLANG_PREFILL_ROUTING_SNAPSHOT_MAX_RECORDS=256`, `SGLANG_PREFILL_ROUTING_SNAPSHOT_MAX_BYTES=98304`, `SGLANG_LOAD_SNAPSHOT_SLOT_BYTES=131072` |
-| Symmetric with `--enable-dsa-hicache-host-dedup` or `--enable-mla-hicache-host-dedup` | `SGLANG_DSA_HOST_DEDUP_FANOUT=ce_peer` or `SGLANG_MLA_HOST_DEDUP_FANOUT=ce_peer`, and the direct host layout. Set the variable to `nccl` for the NCCL broadcast with `--hicache-io-backend kernel --hicache-mem-layout page_first`. |
+| Late decode (`alloc` or `choose`) | `SGLANG_SYMMETRIC_PD_IMPORT_LOCAL_RESERVE=1`, `SGLANG_SYMMETRIC_PD_IMPORT_BUDGET_FRACTION=1.0` |
+| Symmetric mode | `SGLANG_PREBUILT_NONBLOCKING_H2D`; with the peer KV servicer `SGLANG_PEER_KV_PUSH_FAST`; with the host tier on plain TP `SGLANG_HICACHE_PIPELINED_SYNC` and `SGLANG_HICACHE_SKIP_IDLE_SYNC` |
+| Late decode choice | `SGLANG_SYMMETRIC_IMPORT_L2_RESTORE`, `SGLANG_SYMMETRIC_SKIP_REUSED_PREFIX_PUBLICATION`, `SGLANG_SYMMETRIC_PUBLISH_AFTER_RESULT`, `SGLANG_SYMMETRIC_BUDGET_STANDARD_PD`, `SGLANG_SYMMETRIC_LAUNCH_THREAD`, `SGLANG_SYMMETRIC_ADMIT_AFTER_LAUNCH`, `SGLANG_HICACHE_DECODE_CLEAR_CONSUMER`, `SGLANG_DECODE_SELECTION_METRICS`; with retention also `SGLANG_KV_SESSION_ADMIT_TAG` |
+| Prefill work snapshot | `SGLANG_PREFILL_ROUTING_SNAPSHOT`, `SGLANG_SYMMETRIC_ROUTING_SNAPSHOT`, `SGLANG_PREFILL_ROUTING_SNAPSHOT_MAX_RECORDS=256`, `SGLANG_PREFILL_ROUTING_SNAPSHOT_MAX_BYTES=98304`, `SGLANG_LOAD_SNAPSHOT_SLOT_BYTES=131072` |
+| DSA or MLA host dedup | `SGLANG_DSA_HOST_DEDUP_FANOUT=ce_peer` or `SGLANG_MLA_HOST_DEDUP_FANOUT=ce_peer` with `--hicache-io-backend direct --hicache-mem-layout page_first_direct`; on GB300 also `SGLANG_DSA_HOST_DEDUP_LAYER_PARTS=8`, `SGLANG_DSA_HOST_DEDUP_PART_PLAN=hybrid`, `SGLANG_DSA_HOST_DEDUP_STREAM_REDRAW=1`. Set the fan-out variable to `nccl` for the NCCL broadcast with `--hicache-io-backend kernel --hicache-mem-layout page_first`. |
 
 A variable turned on this way that the model or the scheduler loop does not support, such as
 the L2 restore on DeepSeek-V4, is turned off again with a log line.
@@ -83,39 +75,39 @@ the L2 restore on DeepSeek-V4, is turned off again with a log line.
 | `--model-id NAME` | The served model name. The router serves one model. |
 | `--tokenizer-path PATH` | Local `tokenizer.json` or a Hugging Face repo id. |
 | `--policy symmetric_pd` | Pick a P and a D for every request over symmetric workers. |
-| `--symmetric-pd-force-split` | Always use two workers (never run both legs on one). The prepared path requires it. |
 | `--symmetric-pd-worker URL,BOOTSTRAP_PORT,P_WEIGHT,D_WEIGHT` | One per worker. The weights set the starting role: `1,0` prefill, `0,1` decode; `0` excludes the worker from that leg. |
+| `--kv-indexer-url URL` | The KV directory's query URL (`query_url` in the indexer's `ready.json`). |
+| `--kv-worker-map JSON` | Maps indexer instance IDs to workers and their peer KV servicers: `[{"id": 20001, "url": "...", "servicer": "host:18100"}]`. |
 | `EVOLVING_INFRA_PREPARED_CONFIG=FILE` | Prepared-path contracts (environment variable). See [Prepared path](#prepared-path-config). |
 
-### KV directory and peer pulls
+### On by default with `--policy symmetric_pd`
+
+`--symmetric-pd-preset paper` (the default) sets these when the flags leave them unset. A flag
+that is given wins.
+
+| Feature | Flags it sets |
+|---|---|
+| Prefill placement by predicted time to first token, with peer pulls | `--symmetric-pd-p-select cost-function`, `--co-schedule-trade`, `--co-schedule-uncached-balance`, `--symmetric-pd-pull-hint`, `--symmetric-pd-pull-from-any-holder`, `--kv-pull-scope any`, `--kv-pull-hint-min-incremental-tokens 512`, `--co-schedule-load-poll-ms 100`. On when `--kv-indexer-url` is set and `--kv-worker-map` names the servicers; otherwise `cache-first` |
+| Late decode choice | `--pd-late-decode choose --pd-late-decode-rule fit_req --pd-late-decode-candidates all --pd-late-decode-local off --pd-late-decode-fit-native --pd-native-decode-state` |
+| KV session retention | `--symmetric-pd-kv-session-retention` |
+| Placement basics | `--symmetric-pd-force-split`, `--symmetric-pd-d-select round-robin`, `--symmetric-pd-load-poll-ms 100` |
+
+### Tuning
 
 | Flag | Description |
 |---|---|
-| `--kv-indexer-url URL` | The KV directory's query URL (`query_url` in the indexer's `ready.json`). Without it, placement uses loads and role weights only. |
-| `--kv-worker-map JSON` | Maps indexer instance IDs to worker URLs: `[{"id": 20001, "url": "...", "servicer": "host:port"}]`. `servicer` is the worker's peer KV servicer, needed for pulls. |
-| `--symmetric-pd-pull-hint` | **bench** Tell P to pull a prefix from the worker that holds it. |
-| `--kv-pull-hint-min-incremental-tokens N` | **bench** Pull only when it saves at least N tokens of prefill (bench: 512). |
-| `--symmetric-pd-pull-from-any-holder` | **bench** Allow pulls from any worker, including D-role ones (for example a former P after a role switch). |
+| `--co-schedule-trade-copy-lambda X` | Price per pulled token of the second copy a pull creates (default 4.6). |
+| `--co-schedule-cost-trace FILE` | Write every placement decision to a new JSONL file. |
+| `--symmetric-pd-p-select cache-first\|cost-function` | `cache-first`: the worker with the best cache hit unless it is overloaded. `cost-function`: the lowest predicted wait plus compute plus pull cost. See [Placement](placement.md). |
+| `--pd-late-decode-rule fit_req\|d1` | How late decode choice picks D. Late decode choice applies to `/v1/completions`; a native `/generate` request gets its D at arrival, and `/v1/chat/completions` is refused. |
 
-### P and D selection
-
-| Flag | Description |
-|---|---|
-| `--symmetric-pd-p-select cache-first\|cost-function` | `cache-first` (default): the worker with the best cache hit unless it is overloaded. `cost-function` (**bench**): the lowest predicted wait plus compute plus pull cost. See [Placement](placement.md). |
-| `--co-schedule-trade --co-schedule-uncached-balance --co-schedule-cost-trace FILE` | **bench** Required by `cost-function`. The trace file must not exist yet. |
-| `--co-schedule-trade-copy-lambda X` | **bench** Price per pulled token of the second copy a pull creates (bench: 4.6). |
-| `--symmetric-pd-d-select score\|round-robin\|cache-first` | How D is picked when late D is off, and the fallback D when it is on. Bench: `round-robin`. |
-| `--symmetric-pd-load-poll-ms N` | How often the router polls each worker's load (bench: 100). |
-| `--pd-late-decode choose --pd-late-decode-rule fit_req --pd-late-decode-fit-native --pd-native-decode-state` | **bench** Late decode choice: pick D when P reaches its first prefill chunk, among the D workers whose free KV fits the request. Applies to `/v1/completions`; a native `/generate` request gets its D at arrival, and `/v1/chat/completions` is refused. |
-
-### Dynamic P/D and retention
+### Dynamic P/D
 
 | Flag | Description |
 |---|---|
 | `--symmetric-pd-external-role-control` | Accept role changes on `PUT /symmetric_pd/roles`. Needed by the [planner](dynamic-pd.md). |
 | `EVOLVING_INFRA_ROLE_CONTROL_TOKEN_FILE=FILE` | Token the role API requires (environment variable; at least 32 characters). |
 | `--symmetric-pd-role-drain-timeout-secs N` | How long a worker moving from decode to prefill waits for its decode legs before moving them elsewhere (default 5). |
-| `--symmetric-pd-kv-session-retention` | [KV retention](kv-retention.md). Needs the engine flag too. |
 
 ### Timeouts
 

@@ -1,11 +1,13 @@
 # From the Paper to the Code
 
 Where each mechanism of *Evolving Infra: Agent-Adaptive LLM Serving at Scale* lives in this
-repository, and the flags that turn it on. Engine paths are under `engine/decoupled_engine/srt/`.
+repository, and the flags that control it. With `--disaggregation-mode symmetric` on the engines
+and `--policy symmetric_pd` on the router, every mechanism below is on by default
+([Configuration](configuration.md)). Engine paths are under `engine/decoupled_engine/srt/`.
 
 ## Mechanisms
 
-| Paper | Turn it on | Code |
+| Paper | Flags | Code |
 |---|---|---|
 | §4.1 Symmetric engines: every worker serves both phases and switches phase without a restart | Engine `--disaggregation-mode symmetric`. Router `--policy symmetric_pd`, `--symmetric-pd-external-role-control` (`PUT /symmetric_pd/roles`) | `disaggregation/symmetric/`, `router/core/src/server/app.rs` |
 | §4.2 Shared host-memory KV pool: prefill workers read KV from a peer's host memory over RDMA | Engine `--enable-hierarchical-cache --hicache-write-policy write_through`, `--enable-peer-kv-servicer`. Router `--symmetric-pd-pull-hint`, `--symmetric-pd-pull-from-any-holder` | `mem_cache/peer_kv_servicer.py`, `mem_cache/storage/peer_kv/`, `disaggregation/pull/` |
@@ -29,7 +31,7 @@ repository, and the flags that turn it on. Engine paths are under `engine/decoup
 | Chunk size | 8192 tokens | Engine `--chunked-prefill-size 8192` |
 | Fetch time τ(x) | 0.45 s + 1 µs per token | Router defaults `DEFAULT_TRADE_PULL_FIXED_MS`, `DEFAULT_TRADE_PULL_MS_PER_100K` |
 | Smallest fetch | 512 tokens | Router `--kv-pull-hint-min-incremental-tokens 512` |
-| Copy price κ | 4.6 | Router `--co-schedule-trade-copy-lambda 4.6` |
+| Copy price κ | 4.6 | Router default `DEFAULT_TRADE_COPY_LAMBDA` (`--co-schedule-trade-copy-lambda`) |
 | Age of a prefill worker's reported state | 1.5 s | Router default `DEFAULT_TRADE_EFT_MAX_VIEW_AGE_S` |
 | Return-time table for eviction | Built-in table; a branch idle for 150 s or longer counts as finished | `retention_order.DEFAULT_FIXED_TABLE` |
 

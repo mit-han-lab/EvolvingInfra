@@ -42,7 +42,9 @@ SGLANG_HOST_IP=127.0.0.1 python3 -m decoupled_engine.launch_server \
 ```
 
 Start `w1` with the same command, changing `--base-gpu-id 4 --port 31000
---disaggregation-bootstrap-port 9998` and the KV event ports to `6557` / `6558`.
+--disaggregation-bootstrap-port 9998 --peer-kv-servicer-port 19100` and the KV event ports to
+`6557` / `6558`. In symmetric mode each engine runs the paper's configuration, including a peer KV
+servicer, so the two engines on one node need their own servicer ports.
 
 Wait until both answer `curl -sf http://127.0.0.1:30000/health` (and `:31000`). The first start
 compiles kernels and takes about 14 minutes; later starts take a few minutes.
@@ -94,11 +96,11 @@ cat > prepared.json <<EOF
 EOF
 EVOLVING_INFRA_PREPARED_CONFIG=prepared.json sgl-router --host 0.0.0.0 --port 30900 \
   --model-id deepseek-v4-flash --tokenizer-path "$MODEL/tokenizer.json" \
-  --policy symmetric_pd --symmetric-pd-force-split \
+  --policy symmetric_pd \
   --symmetric-pd-worker http://127.0.0.1:30000,8998,1,0 \
   --symmetric-pd-worker http://127.0.0.1:31000,9998,0,1 \
   --kv-indexer-url "$(python3 -c 'import json; print(json.load(open("indexer/ready.json"))["query_url"])')" \
-  --kv-worker-map '[{"id": 20001, "url": "http://127.0.0.1:30000"}, {"id": 20002, "url": "http://127.0.0.1:31000"}]' &
+  --kv-worker-map '[{"id": 20001, "url": "http://127.0.0.1:30000", "servicer": "127.0.0.1:18100"}, {"id": 20002, "url": "http://127.0.0.1:31000", "servicer": "127.0.0.1:19100"}]' &
 until curl -sf http://127.0.0.1:30900/readyz; do sleep 2; done
 ```
 
