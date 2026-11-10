@@ -151,7 +151,7 @@ def check_image() -> dict:
         "engine_cli": "python3 -m decoupled_engine.launch_server --help | head -3",
         "router": f"{stack.ROUTER_BIN} --version",
         "services": f"{stack.SERVICE_PY} -c 'import dynamo.llm, evolving_infra.router.frontend.server, "
-                    "evolving_infra.router.indexer.services, evolving_infra.planner.control.loop; print(\"ok\")'",
+                    "evolving_infra.router.indexer.services, evolving_infra.planner.managers.planner_manager; print(\"ok\")'",
         "planner_cli": f"{stack.SERVICE_PY} -m evolving_infra.planner --help | head -3",
         "trie": f"{stack.TRIE_PY} -c 'import trie.cli, evolving_infra.router.client; print(\"ok\")'",
         "replay": f"cd {stack.REPLAY_DIR} && {stack.TRIE_PY} -c 'import prepared_replay, session_replay, replay_agent_identity; print(\"ok\")'",
