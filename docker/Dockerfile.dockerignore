@@ -1,0 +1,9 @@
+# Build context filter for docker/Dockerfile (BuildKit reads <Dockerfile>.dockerignore).
+**/.git
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+**/.venv
+**/.pytest_cache
+**/node_modules
+router/core/target

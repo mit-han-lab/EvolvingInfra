@@ -1,0 +1,263 @@
+{
+ "source": "POST /symmetric_pd/prepared of the router binary with a late-D argv (cost function, --pd-late-decode choose fit_req, --symmetric-pd-external-role-control, --symmetric-pd-kv-session-retention, prepared inputs) and 3 P + 6 D fake symmetric engines; requested by the SDK with a request identity. Captured by a CPU-only router SDK smoke test; the callback token is redacted.",
+ "descriptor": {
+  "protocol_version": 1,
+  "node_id": "smoke",
+  "request_id": "agent_29b8fdb793cad176f8a6a093eabac53960d0bcebf4c4b1eaa653f0821ef2f8b0",
+  "ref": "ref-agent_29b8fdb793cad176f8a6a093eabac53960d0bcebf4c4b1eaa653f0821ef2f8b0",
+  "config_id": "test",
+  "prompt_tokens": 200,
+  "max_new_tokens": 8,
+  "expires_in_ms": 300000,
+  "content": {
+   "namespace": "test",
+   "hash_spec": {
+    "mode": "dynamo",
+    "encoding": "signed_i64",
+    "implementation": "dynamo.llm.compute_block_hash_for_seq",
+    "page_size": 64,
+    "is_eagle": false,
+    "model": "tiny",
+    "cache_namespace": null,
+    "partial_blocks": false,
+    "window_tokens": 64
+   },
+   "blocks": [
+    {
+     "hash": 1000,
+     "valid_tokens": 64
+    },
+    {
+     "hash": 1001,
+     "valid_tokens": 64
+    },
+    {
+     "hash": 1002,
+     "valid_tokens": 64
+    }
+   ]
+  }
+ },
+ "plan": {
+  "protocol_version": 1,
+  "request_id": "agent_29b8fdb793cad176f8a6a093eabac53960d0bcebf4c4b1eaa653f0821ef2f8b0",
+  "config_id": "test",
+  "ref": "ref-agent_29b8fdb793cad176f8a6a093eabac53960d0bcebf4c4b1eaa653f0821ef2f8b0",
+  "reservation_id": "048392a7-c65e-48ef-93f1-85c173d0a591",
+  "transfer_id": 7704755807831353693,
+  "prefill": {
+   "target": {
+    "transport": "sglang_generate",
+    "endpoint": "http://127.0.0.1:28833/generate",
+    "config_id": "test"
+   },
+   "kv_export": {
+    "transfer_id": 7704755807831353693,
+    "candidates": [
+     {
+      "cand_idx": 0,
+      "reader_worker": "http://127.0.0.1:28836",
+      "reader_addr": "tcp://127.0.0.1:18999",
+      "attempt_id": 6689205865455259004
+     },
+     {
+      "cand_idx": 1,
+      "reader_worker": "http://127.0.0.1:28837",
+      "reader_addr": "tcp://127.0.0.1:18999",
+      "attempt_id": 6689205865455259005
+     },
+     {
+      "cand_idx": 2,
+      "reader_worker": "http://127.0.0.1:28838",
+      "reader_addr": "tcp://127.0.0.1:18999",
+      "attempt_id": 6689205865455259006
+     },
+     {
+      "cand_idx": 3,
+      "reader_worker": "http://127.0.0.1:28839",
+      "reader_addr": "tcp://127.0.0.1:18999",
+      "attempt_id": 6689205865455259007
+     },
+     {
+      "cand_idx": 4,
+      "reader_worker": "http://127.0.0.1:28840",
+      "reader_addr": "tcp://127.0.0.1:18999",
+      "attempt_id": 6689205865455259008
+     },
+     {
+      "cand_idx": 5,
+      "reader_worker": "http://127.0.0.1:28841",
+      "reader_addr": "tcp://127.0.0.1:18999",
+      "attempt_id": 6689205865455259009
+     }
+    ]
+   },
+   "pull_hint": null,
+   "late_d": {
+    "v": 1,
+    "mode": "choose",
+    "router_epoch": 2354989674,
+    "k": 6,
+    "default_idx": 1,
+    "local_ok": false
+   },
+   "kv_session": {
+    "session_id": "2e0f5318-f757-4daf-b932-96f58f97074f:483a3e2f652745c334964772fdc17fd9d6254d6c0a84baff77ab56ede244b822",
+    "version": 1
+   }
+  },
+  "decode": {
+   "target": {
+    "transport": "sglang_generate",
+    "endpoint": "http://127.0.0.1:28837/generate",
+    "config_id": "test"
+   },
+   "kv_import": {
+    "transfer_id": 7704755807831353693,
+    "attempt_id": 6689205865455259005,
+    "owner_worker": "http://127.0.0.1:28833",
+    "owner_addr": "tcp://127.0.0.1:18998",
+    "expected_tokens": 200,
+    "cache_policy": "retain"
+   }
+  },
+  "callback": {
+   "endpoint": "http://127.0.0.1:9/symmetric_pd/events",
+   "token": "<redacted>"
+  },
+  "decode_candidates": [
+   {
+    "target": {
+     "transport": "sglang_generate",
+     "endpoint": "http://127.0.0.1:28836/generate",
+     "config_id": "test"
+    },
+    "kv_import": {
+     "transfer_id": 7704755807831353693,
+     "attempt_id": 6689205865455259004,
+     "owner_worker": "http://127.0.0.1:28833",
+     "owner_addr": "tcp://127.0.0.1:18998",
+     "expected_tokens": 200,
+     "cache_policy": "retain"
+    },
+    "late_d": {
+     "v": 1,
+     "mode": "choose",
+     "router_epoch": 2354989674,
+     "k": 6,
+     "cand_idx": 0
+    }
+   },
+   {
+    "target": {
+     "transport": "sglang_generate",
+     "endpoint": "http://127.0.0.1:28837/generate",
+     "config_id": "test"
+    },
+    "kv_import": {
+     "transfer_id": 7704755807831353693,
+     "attempt_id": 6689205865455259005,
+     "owner_worker": "http://127.0.0.1:28833",
+     "owner_addr": "tcp://127.0.0.1:18998",
+     "expected_tokens": 200,
+     "cache_policy": "retain"
+    },
+    "late_d": {
+     "v": 1,
+     "mode": "choose",
+     "router_epoch": 2354989674,
+     "k": 6,
+     "cand_idx": 1
+    }
+   },
+   {
+    "target": {
+     "transport": "sglang_generate",
+     "endpoint": "http://127.0.0.1:28838/generate",
+     "config_id": "test"
+    },
+    "kv_import": {
+     "transfer_id": 7704755807831353693,
+     "attempt_id": 6689205865455259006,
+     "owner_worker": "http://127.0.0.1:28833",
+     "owner_addr": "tcp://127.0.0.1:18998",
+     "expected_tokens": 200,
+     "cache_policy": "retain"
+    },
+    "late_d": {
+     "v": 1,
+     "mode": "choose",
+     "router_epoch": 2354989674,
+     "k": 6,
+     "cand_idx": 2
+    }
+   },
+   {
+    "target": {
+     "transport": "sglang_generate",
+     "endpoint": "http://127.0.0.1:28839/generate",
+     "config_id": "test"
+    },
+    "kv_import": {
+     "transfer_id": 7704755807831353693,
+     "attempt_id": 6689205865455259007,
+     "owner_worker": "http://127.0.0.1:28833",
+     "owner_addr": "tcp://127.0.0.1:18998",
+     "expected_tokens": 200,
+     "cache_policy": "retain"
+    },
+    "late_d": {
+     "v": 1,
+     "mode": "choose",
+     "router_epoch": 2354989674,
+     "k": 6,
+     "cand_idx": 3
+    }
+   },
+   {
+    "target": {
+     "transport": "sglang_generate",
+     "endpoint": "http://127.0.0.1:28840/generate",
+     "config_id": "test"
+    },
+    "kv_import": {
+     "transfer_id": 7704755807831353693,
+     "attempt_id": 6689205865455259008,
+     "owner_worker": "http://127.0.0.1:28833",
+     "owner_addr": "tcp://127.0.0.1:18998",
+     "expected_tokens": 200,
+     "cache_policy": "retain"
+    },
+    "late_d": {
+     "v": 1,
+     "mode": "choose",
+     "router_epoch": 2354989674,
+     "k": 6,
+     "cand_idx": 4
+    }
+   },
+   {
+    "target": {
+     "transport": "sglang_generate",
+     "endpoint": "http://127.0.0.1:28841/generate",
+     "config_id": "test"
+    },
+    "kv_import": {
+     "transfer_id": 7704755807831353693,
+     "attempt_id": 6689205865455259009,
+     "owner_worker": "http://127.0.0.1:28833",
+     "owner_addr": "tcp://127.0.0.1:18998",
+     "expected_tokens": 200,
+     "cache_policy": "retain"
+    },
+    "late_d": {
+     "v": 1,
+     "mode": "choose",
+     "router_epoch": 2354989674,
+     "k": 6,
+     "cand_idx": 5
+    }
+   }
+  ]
+ }
+}

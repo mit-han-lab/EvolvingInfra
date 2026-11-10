@@ -1,0 +1,13 @@
+{
+  "model_name": "glm-5.2-nvfp4",
+  "block_size": 64,
+  "eagle": true,
+  "threads": 4,
+  "indexer_port": 30911,
+  "query_port": 30910,
+  "workers": [
+    {"instance_id": 1, "events_endpoint": "tcp://prefill0:22510",
+     "replay_endpoint": "tcp://prefill0:23510", "bridge_pub_port": 24510,
+     "bridge_replay_port": 25510, "topic": ""}
+  ]
+}

@@ -1,0 +1,66 @@
+diff --git a/mooncake-transfer-engine/src/transport/rdma_transport/rdma_context.cpp b/mooncake-transfer-engine/src/transport/rdma_transport/rdma_context.cpp
+index 629c516..d29c88b 100644
+--- a/mooncake-transfer-engine/src/transport/rdma_transport/rdma_context.cpp
++++ b/mooncake-transfer-engine/src/transport/rdma_transport/rdma_context.cpp
+@@ -16,6 +16,7 @@
+ 
+ #include <algorithm>
+ #include <cerrno>
++#include <cstdlib>
+ #include <cstdio>
+ #include <fcntl.h>
+ #include <netinet/in.h>
+@@ -27,6 +28,7 @@
+ #include <exception>
+ #include <fstream>
+ #include <memory>
++#include <string>
+ #include <thread>
+ 
+ #include "config.h"
+@@ -226,9 +228,16 @@ int RdmaContext::construct(size_t num_cq_list, size_t num_comp_channels,
+         return ERR_CONTEXT;
+     }
+ 
+-    num_comp_channel_ = num_comp_channels;
++    // MC_RDMA_POLLING_ONLY=1: for sandboxes (e.g. gVisor) that hand back
++    // unusable completion-channel fds and refuse epoll on RDMA device fds.
++    // CQs are always busy-polled and never armed, so no channel is needed;
++    // device async events are then left unmonitored.
++    const char *polling_only_env = std::getenv("MC_RDMA_POLLING_ONLY");
++    const bool polling_only =
++        polling_only_env && std::string(polling_only_env) == "1";
++    num_comp_channel_ = polling_only ? 0 : num_comp_channels;
+     comp_channel_ = new ibv_comp_channel *[num_comp_channels]();
+-    for (size_t i = 0; i < num_comp_channels; ++i) {
++    for (size_t i = 0; i < num_comp_channel_; ++i) {
+         comp_channel_[i] = ibv_create_comp_channel(context_);
+         if (!comp_channel_[i]) {
+             PLOG(ERROR) << "Failed to create completion channel on device "
+@@ -244,10 +253,14 @@ int RdmaContext::construct(size_t num_cq_list, size_t num_comp_channels,
+     }
+ 
+     if (joinNonblockingPollList(event_fd_, context_->async_fd)) {
+-        LOG(ERROR) << "Failed to register context async fd to epoll";
+-        close(event_fd_);
+-        event_fd_ = -1;
+-        return ERR_CONTEXT;
++        if (!polling_only) {
++            LOG(ERROR) << "Failed to register context async fd to epoll";
++            close(event_fd_);
++            event_fd_ = -1;
++            return ERR_CONTEXT;
++        }
++        LOG(WARNING) << "MC_RDMA_POLLING_ONLY: async events of device "
++                     << device_name_ << " are not monitored";
+     }
+ 
+     for (size_t i = 0; i < num_comp_channel_; ++i)
+@@ -816,6 +829,7 @@ ibv_cq *RdmaContext::cq() {
+ }
+ 
+ ibv_comp_channel *RdmaContext::compChannel() {
++    if (num_comp_channel_ == 0) return nullptr;
+     int index = (next_comp_channel_index_++) % num_comp_channel_;
+     return comp_channel_[index];
+ }

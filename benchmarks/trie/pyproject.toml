@@ -1,0 +1,33 @@
+[project]
+name = "trie"
+version = "0.1.0"
+description = "A small harness for evaluating OpenAI-compatible inference endpoints with synthetic agentic workloads."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "chz",
+    "httpx>=0.28,<1",
+    "jinja2",
+    "jsonschema>=4.23",
+    "numpy",
+    "openai>=2.30,<3",
+    "rich",
+    "structlog",
+    "transformers==4.57.6",
+]
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+[project.scripts]
+trie = "trie.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"

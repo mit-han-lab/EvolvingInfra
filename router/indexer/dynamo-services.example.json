@@ -1,0 +1,13 @@
+{
+  "model_name": "example-model",
+  "block_size": 64,
+  "eagle": true,
+  "threads": 4,
+  "indexer_port": 30911,
+  "query_port": 30910,
+  "workers": [
+    {"instance_id": 1, "events_endpoint": "tcp://127.0.0.1:22510",
+     "replay_endpoint": "tcp://127.0.0.1:23510", "bridge_pub_port": 24510,
+     "bridge_replay_port": 25510, "topic": ""}
+  ]
+}

@@ -1,0 +1,10 @@
+Trie strict-replay integration
+
+This directory includes Trie (https://github.com/Applied-Compute/trie), imported
+from the strict-replay branch of the public fork https://github.com/crmsndu/trie.
+
+Copyright 2026 Applied Compute
+
+The imported work is licensed under the Apache License, Version 2.0.
+The complete license text is available in the evolving-infra repository root LICENSE
+file. Local modifications implement the generic SGLang replay contract.

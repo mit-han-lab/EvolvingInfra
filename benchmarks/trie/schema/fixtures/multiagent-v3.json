@@ -1,0 +1,120 @@
+{
+  "schema_version": 3,
+  "trace_id": "task-1",
+  "traces": [
+    {
+      "schema_version": 2,
+      "trace_id": "main",
+      "start_offset_s": 0.0,
+      "initial_messages": [],
+      "tools": null,
+      "metadata": {},
+      "events": [
+        {
+          "type": "generate",
+          "max_tokens": 1,
+          "recorded_prompt_token_ids": [
+            1
+          ],
+          "recorded_output_token_ids": [
+            7
+          ]
+        },
+        {
+          "type": "generate",
+          "max_tokens": 1,
+          "recorded_prompt_token_ids": [
+            2
+          ],
+          "recorded_output_token_ids": [
+            7
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": 2,
+      "trace_id": "child-a",
+      "start_offset_s": 0.0,
+      "initial_messages": [],
+      "tools": null,
+      "metadata": {},
+      "events": [
+        {
+          "type": "generate",
+          "max_tokens": 1,
+          "recorded_prompt_token_ids": [
+            3
+          ],
+          "recorded_output_token_ids": [
+            7
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": 2,
+      "trace_id": "child-b",
+      "start_offset_s": 0.0,
+      "initial_messages": [],
+      "tools": null,
+      "metadata": {},
+      "events": [
+        {
+          "type": "generate",
+          "max_tokens": 1,
+          "recorded_prompt_token_ids": [
+            4
+          ],
+          "recorded_output_token_ids": [
+            7
+          ]
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "before": {
+        "trace_id": "main",
+        "event_index": 0
+      },
+      "after": {
+        "trace_id": "child-a",
+        "event_index": 0
+      }
+    },
+    {
+      "before": {
+        "trace_id": "main",
+        "event_index": 0
+      },
+      "after": {
+        "trace_id": "child-b",
+        "event_index": 0
+      }
+    },
+    {
+      "before": {
+        "trace_id": "child-a",
+        "event_index": 0
+      },
+      "after": {
+        "trace_id": "main",
+        "event_index": 1
+      }
+    },
+    {
+      "before": {
+        "trace_id": "child-b",
+        "event_index": 0
+      },
+      "after": {
+        "trace_id": "main",
+        "event_index": 1
+      }
+    }
+  ],
+  "start_offset_s": 0.0,
+  "metadata": {}
+}

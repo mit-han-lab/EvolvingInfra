@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evolving-infra"
+version = "0.1.0"
+description = "Router frontend, KV indexer, client SDK and P/D planner for decoupled, agent-aware LLM serving"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+# Python client SDK for the Router (Agent, Backend, Scheduler).
+client = ["aiohttp>=3.10,<4"]
+# Frontend (T) service. hash_mode="sglang_native" and image inputs
+# also need the engine (decoupled-engine); hash_mode="dynamo" needs [indexer].
+frontend = [
+    "aiohttp>=3.10,<4",
+    "fastapi>=0.115,<0.142",
+    "pydantic>=2,<3",
+    "orjson>=3.10,<4",
+    "pillow>=10",
+    "uvicorn>=0.30,<1",
+]
+# KV directory: the pinned Dynamo indexer plus event bridge and query adapter.
+# fastapi 0.142 turns on OpenTelemetry export at startup, which stops the frontend.
+indexer = [
+    "ai-dynamo==1.4.0",
+    "fastapi<0.142",
+    "aiohttp>=3.10,<4",
+    "msgpack>=1",
+    "pyzmq>=25",
+]
+planner = ["numpy>=1.26", "scipy>=1.11"]
+test = ["pytest>=8", "httpx>=0.27"]
+
+[tool.setuptools]
+packages = [
+    "evolving_infra.router.client",
+    "evolving_infra.router.client.agent",
+    "evolving_infra.router.client.backend",
+    "evolving_infra.router.client.scheduler",
+    "evolving_infra.router.frontend",
+    "evolving_infra.router.indexer",
+    "evolving_infra.planner",
+    "evolving_infra.planner.calibration",
+]
+
+[tool.setuptools.package-dir]
+"evolving_infra.router.client" = "router/client"
+"evolving_infra.router.frontend" = "router/frontend"
+"evolving_infra.router.indexer" = "router/indexer"
+"evolving_infra.planner" = "planner"
+
+[tool.setuptools.package-data]
+"evolving_infra.router.frontend" = ["node.example.json"]
+"evolving_infra.router.indexer" = ["dynamo-services.example.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "engine: needs decoupled-engine installed (skipped otherwise)",
+]

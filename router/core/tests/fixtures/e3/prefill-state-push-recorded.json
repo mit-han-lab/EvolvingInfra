@@ -1,0 +1,62 @@
+{
+  "schema": "e3-push-fixture.v1",
+  "inputs": {
+    "prefill_state_push_py_sha256": "0150c8ab73401a583cd4f403be4a1d0c07328d6828afa0439ac1daaed15a0ad0",
+    "routing_snapshot_sha256": "b1c99ea30d3d209554316c2ec3e9732243d0cfa9e8dce2a36c76d1e8b4fb3ebf",
+    "engine_commit": "5ec941aa3db27cf19d76b3fefbffcbb2ce4dd8fe"
+  },
+  "python": "3.12.3",
+  "msgspec": "0.21.1",
+  "frames": {
+    "topic": "prefill_state",
+    "seq_be_u64_hex": "0000000000000bb9"
+  },
+  "files": {
+    "prefill-state-push-recorded.msgpack": {
+      "bytes": 59036,
+      "sha256": "246118d9a2f7cd296296a4011c8d8a4f0065517d959a10a7de7bbc4a43d5d9cf"
+    },
+    "prefill-state-push-oversize.msgpack": {
+      "bytes": 845,
+      "sha256": "62a910b56469f480d847ad3e227969d159666cb31c0496ca067512d69c3bf6e2"
+    }
+  },
+  "expected": {
+    "seq": 3001,
+    "epoch": "8e884f52591543248367e6693fba8b72",
+    "trigger": "result",
+    "sent_mono_s": 834988.424183818,
+    "snapshot_sampled_monotonic_s": 834988.423933818,
+    "snapshot_age_s": 0.0002500000409781933,
+    "snapshot_stale": false,
+    "events": [
+      {
+        "kind": "result",
+        "forward_iter": 2050,
+        "launch_mono_s": 834987.812163626,
+        "observed_mono_s": 834988.421833818,
+        "gpu_started": null,
+        "gpu_ended": null,
+        "gpu_ms": null,
+        "gpu_gap_before_ms": null,
+        "gpu_start_mono_s": null,
+        "gpu_end_mono_s": null
+      }
+    ],
+    "inflight": [
+      {
+        "kind": "inflight",
+        "forward_iter": 2051,
+        "launch_mono_s": 834988.115759413,
+        "observed_mono_s": null,
+        "gpu_started": null,
+        "gpu_ended": null,
+        "gpu_ms": null,
+        "gpu_gap_before_ms": null,
+        "gpu_start_mono_s": null,
+        "gpu_end_mono_s": null
+      }
+    ],
+    "launch_2051_mono_s": 834988.115759413
+  }
+}
