@@ -19,10 +19,7 @@ same steps.
 
 `docker/build_and_push.sh` builds and pushes it from a committed revision (`git archive`, so
 local files never enter the image) and prints the digest; pin the digest, not the tag. Build each
-architecture on a host of that architecture. The `ai-dynamo` wheel needs AVX2: on an older x86_64
-build host the script skips only the build-time `import dynamo.llm` check and labels the image
-`evolving-infra.build-checks=no-dynamo-import`. The image above was built that way, and the import
-was then checked on a Modal host.
+architecture on a host of that architecture.
 
 ## Base image
 
