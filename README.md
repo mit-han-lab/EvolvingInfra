@@ -121,7 +121,7 @@ client.completions.create(
 We welcome contributions, and we recommend making them with a coding agent:
 
 - Use Claude Opus 5.5, GPT-6 Astra or a stronger model.
-- Attach the agent's session transcript to your pull request (remove any credentials first), so
+- Attach the agent's session transcript to your pull request, so
   reviewers can see how the change was made and checked.
 - For a larger change, open an issue first.
 
