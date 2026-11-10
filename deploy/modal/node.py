@@ -327,9 +327,9 @@ class Driver:
 
     def start_controller(self):
         run_dir = self.replay_dir
-        conf = stack.controller_config(self.cfg, self.ips, str(run_dir))
-        Path(conf["config_path"]).write_text(json.dumps(conf, indent=1))
-        self.services["controller"] = start(stack.controller_command(conf["config_path"]), str(run_dir), "controller",
+        conf, path = stack.controller_config(self.cfg, self.ips, str(run_dir)), stack.controller_config_path(str(run_dir))
+        Path(path).write_text(json.dumps(conf, indent=1))
+        self.services["controller"] = start(stack.controller_command(path), str(run_dir), "controller",
                                             {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
                                              "NO_PROXY": "*", "no_proxy": "*"})
         t0 = time.time()

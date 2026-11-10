@@ -235,20 +235,24 @@ def token_file(cfg: dict) -> str:
 
 
 def controller_config(cfg: dict, ips: list, run_dir: str) -> dict:
-    """planner `control` config (planner/README.md); the token is passed as a path only."""
+    """planner `control --config` arguments (PlannerArgs field names); the token is passed as a path only."""
     c = cfg["controller"]
     workers_ = [dict(node=f"node{w['idx']}", idx=w["idx"], name=w["name"], host=w["node"], ip=ips[w["node"]],
                      url=worker_url(w, ips), trace_url=f"http://{ips[w['node']]}:{TRACE_PORT}",
                      initial_role=role(w, cfg))
                 for w in workers(len(ips))]
     return dict({k: v for k, v in c.items() if k != "role_drain_timeout_s"},
-                router_url=ROUTER_URL, token_file=token_file(cfg), run_dir=run_dir,
-                scratch=f"/tmp/planner-scratch/{cfg['run_id']}", config_path=f"{run_dir}/controller.json",
+                router_url=ROUTER_URL, role_control_token_file=token_file(cfg), run_dir=run_dir,
+                scratch_dir=f"/tmp/planner-scratch/{cfg['run_id']}",
                 hosts=[dict(index=i, ip=ip) for i, ip in enumerate(ips)], workers=workers_)
 
 
+def controller_config_path(run_dir: str) -> str:
+    return f"{run_dir}/controller.json"
+
+
 def controller_command(path: str) -> list[str]:
-    return [SERVICE_PY, "-m", "evolving_infra.planner", "control", path]
+    return [SERVICE_PY, "-m", "evolving_infra.planner", "control", "--config", path]
 
 
 def trace_server_command(cfg: dict) -> list[str]:
@@ -288,8 +292,9 @@ def conformance_command(outdir: str, worker_url_: str, name: str) -> list[str]:
 
 # ------------------------------------------------------------------------------------------- configs
 
-CONTROLLER = dict(  # planner config.DEFAULTS overrides of the dynamic run, plus the router's drain timeout
-    learning_s=1800, period_s=600, exclusion_s=120., role_drain_timeout_s=5, role_script=None,
+CONTROLLER = dict(  # planner arguments (PlannerArgs) of the dynamic run, plus the router's drain timeout
+    learning_secs=1800, decision_period_secs=600, post_switch_exclusion_secs=120., role_drain_timeout_s=5,
+    role_script=None,
     prefill_shape_prior="dsv4-flash-h200-tp4",
 )
 
@@ -300,8 +305,8 @@ def bench_controller(duration: int) -> dict:
     the cold start takes at most duration/3 - 450 s. The router refuses any swap at 1P1D (a draining
     D -> P leaves no serving P), hence two nodes."""
     learning = duration // 3
-    return dict(CONTROLLER, learning_s=learning, period_s=min(600, learning),
-                exclusion_s=min(120., min(600, learning) - 120),
+    return dict(CONTROLLER, learning_secs=learning, decision_period_secs=min(600, learning),
+                post_switch_exclusion_secs=min(120., min(600, learning) - 120),
                 role_script=[[learning + 150, {"node0": "decode"}], [learning + 450, {"node0": "prefill"}]])
 
 

@@ -1,7 +1,7 @@
 """When the cold start is over: the per-minute share of input tokens served from cache stops changing."""
 import pytest
 
-from evolving_infra.planner.control.cold_start import MAX_WAIT_S, ColdStart
+from evolving_infra.planner.managers.cold_start import ColdStart
 
 # Cached share and completed requests of minutes 1-12 of a GLM-5.2 Claude Code run on nine GB300 nodes (90 agents).
 CLUSTER_MINUTES = [(0.0, 59), (0.0, 20), (0.0941, 18), (0.6985, 113), (0.9296, 189), (0.9126, 126), (0.9723, 120),
@@ -47,7 +47,7 @@ def test_minute_without_completions_breaks_the_comparison():
 def test_unsettled_share_starts_learning_after_the_maximum_wait():
     cold = ColdStart()
     feed(cold, [(0.80 if i % 2 else 0.85, 30) for i in range(40)])
-    assert cold.done["reason"] == "max_wait" and cold.done["waited_s"] == MAX_WAIT_S
+    assert cold.done["reason"] == "max_wait" and cold.done["waited_s"] == cold.max_wait_secs == 1800
 
 
 def test_nothing_happens_before_the_first_completed_request_and_a_router_restart_starts_again():

@@ -37,6 +37,9 @@ The planner (`python -m evolving_infra.planner control`) runs in three phases:
   workload, one 60-second slice at a time, and switches only when the predicted gain is larger than two
   standard errors. After a switch it waits before scoring again, so it measures the new split.
 
+[How the planner works](../planner/README.md#how-it-works) gives the models, the fit and the rule,
+with the fit of the models on GB300 and H200.
+
 A rejected or failed update is logged and not retried.
 
 ## Run it
@@ -59,11 +62,11 @@ A rejected or failed update is logged and not retried.
    Role control needs the prepared path: the router counts completed work from the frontend's
    reports.
 
-4. Start the planner with a [configuration](#configuration):
+4. Start the planner with its [arguments](#configuration):
 
    ```bash
    pip install -e ".[planner]"
-   python -m evolving_infra.planner control controller.json
+   python -m evolving_infra.planner control --config planner.json
    ```
 
    The planner can start before traffic: the cold start begins with the first completed request.
@@ -71,18 +74,28 @@ A rejected or failed update is logged and not retried.
 
 The planner writes its decisions to `<run_dir>/role-decisions.jsonl` and the learning start to
 `<run_dir>/learning-start.json`. It stops, with `<run_dir>/PLANNER_FAILED`, only when the router's
-workers differ from the configuration, the roles change before the learning-end fit, or that fit fails.
+workers differ from `--workers`, the roles change before the learning-end fit, or that fit fails.
 Any other error, such as an unreachable router or engine, a failed clock probe or a failed role update,
 skips at most one decision and is logged; roles changed by another client after the fit are adopted.
 
 ## Configuration
 
+Every launch parameter is a flag with a default, as in SGLang's server arguments.
+`--config FILE` reads a JSON object of the same names (with underscores), and a flag given on the
+command line overrides the file. `python -m evolving_infra.planner control --help` lists every flag.
+The planner logs the resolved arguments at startup and saves them to `<run_dir>/planner_args.json`,
+which the learning-end fit reads too.
+
+```bash
+python -m evolving_infra.planner control --config planner.json --decision-period-secs 300
+```
+
 ```json
 {
   "router_url": "http://127.0.0.1:30900",
-  "token_file": "/secure/role-token",
+  "role_control_token_file": "/secure/role-token",
   "run_dir": "/path/to/run",
-  "scratch": "/path/to/scratch",
+  "scratch_dir": "/path/to/scratch",
   "prefill_shape_prior": "glm52-gb300-tp4",
   "hosts": [{"index": 0, "ip": "192.0.2.1"}],
   "workers": [
@@ -94,17 +107,58 @@ skips at most one decision and is logged; roles changed by another client after 
 }
 ```
 
-| Key | Description |
-|---|---|
-| `workers[].node` | Must be `node<idx>`. |
-| `workers[].name` | The worker's trace subdirectory under `--root`. |
-| `learning_s`, `period_s` | Learning window and decision period (defaults 1800 and 600 seconds). The workload slices (60 s) and the switch rule (two standard errors) are fixed. |
-| `prefill_shape_prior` | Required. Fallback prefill model shape for a worker whose own fit is not identifiable. Built in: `dsv4-flash-h200-tp4` (DeepSeek-V4-Flash, TP4, H200), `glm52-gb300-tp4` (GLM-5.2, TP4, GB300) and `kimi-k26-gb300-tp4` (Kimi-K2.6, TP4, GB300). Build one for another setup with `python -m evolving_infra.planner prior <report.json>`, or give `{"coefficients": [...]}`. |
-| `role_script` | Testing only: role changes instead of decisions, at the given seconds after the learning start (after the fit), e.g. `[[2400, {"node0": "decode"}]]`. |
+**Deployment** (all required, except the prior's checksum):
 
-Every other tunable has a default in `evolving_infra.planner.config.DEFAULTS`; any key in the
-file overrides it, and an unknown key is an error. The engines' TP size, which scales the restore
-counters, is read from each engine's `/server_info`. Keep the token file outside `run_dir`.
+| Flag | Description |
+|---|---|
+| `--router-url` | The router, started with `--symmetric-pd-external-role-control`. |
+| `--role-control-token-file` | The router's role-control token. Keep it outside the run directory. |
+| `--run-dir` | Journals, the fit report and the resolved arguments. |
+| `--scratch-dir` | Trace copies and snapshots (large; node-local is fine). |
+| `--hosts` | Worker hosts, a JSON list of `{index, ip}`. |
+| `--workers` | Workers, a JSON list as above. `node` must be `node<idx>`; `name` is the worker's trace subdirectory under `--root`; the router starts with the `initial_role`s. |
+| `--prefill-shape-prior` | Prefill model shape for a worker whose own fit cannot separate the terms. Built in: `dsv4-flash-h200-tp4` (DeepSeek-V4-Flash, TP4, H200), `glm52-gb300-tp4` (GLM-5.2, TP4, GB300) and `kimi-k26-gb300-tp4` (Kimi-K2.6, TP4, GB300). Build one for another setup with `python -m evolving_infra.planner prior <report.json>`, or give `{"coefficients": [...]}`. |
+| `--prefill-shape-prior-sha256` | Optional checksum that pins the prior. |
+
+**Method** ([how the planner works](../planner/README.md#how-it-works)):
+
+| Flag | Default | Description |
+|---|---|---|
+| `--learning-secs` | 1800 | Learning interval, from the end of the cold start to the fit. |
+| `--decision-period-secs` | 600 | Time between two decisions. |
+| `--slice-secs` | 60 | Slice length: decisions compare the splits slice by slice, the cold start compares consecutive slices, and the prefill model is fitted and the prefill workers re-measured on windows of this length. |
+| `--switch-standard-errors` | 2 | A split is chosen only when its mean gain per slice exceeds this many standard errors. |
+| `--post-switch-exclusion-secs` | 120 | Samples skipped after a switch has drained, so the next decision measures the new split. |
+| `--transition-hold-max-secs` | 5 | Longest wait of a decision while requests of a worker's old role still run; a drain is always waited for. |
+| `--observation-gap-max-secs` | 15 | A decision is skipped when two router reads within its interval are further apart. |
+| `--disable-prefill-observation` | off | Keep the learning-interval packing and restore ratio instead of measuring them before each decision. |
+| `--cold-start-stable-change` | 0.003 | The cold start is over when the cached share of two consecutive slices differs by at most this (0.3 percentage points). |
+| `--cold-start-max-wait-secs` | 1800 | Learning starts at the latest this long after the first completed request. |
+| `--router-poll-interval-secs` | 3 | Interval between two reads of the router. |
+| `--restore-scrape-interval-secs` | 3 | Interval between two scrapes of the prefill workers' restored-token counters. |
+| `--clock-probe-interval-secs` | 300 | Interval between two clock probes of every host. |
+| `--clock-tolerance-secs` | 0.5 | Largest allowed drift of a host clock from its offset at start. |
+| `--trace-port` | 18500 | Port of `serve-traces` on every host. |
+| `--role-script` | none | Testing only: role changes instead of decisions, at the given seconds after the learning start (after the fit), e.g. `[[2400, {"node0": "decode"}]]`. |
+
+The engines' TP size, which scales the restore counters, is read from each engine's
+`/server_info`. The thresholds of the fit (70% of the learning interval trains, the rest measures
+the error; the minimum number of windows), the 8-iteration decode groups, and the decode batch
+bound of 95% of the KV capacity are fixed in the code.
+
+**Environment variables** for internals that are not part of the method:
+
+| Variable | Default |
+|---|---|
+| `EVOLVING_INFRA_PLANNER_ROLE_API_TIMEOUT_SECS` | 5 |
+| `EVOLVING_INFRA_PLANNER_BACKEND_LOADS_TIMEOUT_SECS` | 5 |
+| `EVOLVING_INFRA_PLANNER_SERVER_INFO_TIMEOUT_SECS` | 30 |
+| `EVOLVING_INFRA_PLANNER_MODEL_INFO_TIMEOUT_SECS` | 5 |
+| `EVOLVING_INFRA_PLANNER_METRICS_TIMEOUT_SECS` | 4 |
+| `EVOLVING_INFRA_PLANNER_TRACE_LIST_TIMEOUT_SECS` | 30 |
+| `EVOLVING_INFRA_PLANNER_TRACE_READ_TIMEOUT_SECS` | 120 |
+| `EVOLVING_INFRA_PLANNER_CLOCK_PROBE_TIMEOUT_SECS` | 15 |
+| `EVOLVING_INFRA_PLANNER_CLOCK_PROBE_EXCHANGES` | 8 |
 
 ## Limits
 

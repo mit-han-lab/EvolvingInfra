@@ -3,8 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from evolving_infra.planner.collect.trace_server import Mirror, serve_traces
-from evolving_infra.planner.common import http_json
+from evolving_infra.planner.observability.trace_mirror import Mirror
+from evolving_infra.planner.observability.trace_server import serve_traces
+from evolving_infra.planner.utils import http_json
 
 
 def free_port():
