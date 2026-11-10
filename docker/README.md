@@ -11,6 +11,19 @@ The same file builds on x86_64 (Modal H200 and B300, `deploy/modal/app.py`) and 
 (GB300). On clusters without a Docker daemon, build it as an enroot or Singularity image from the
 same steps.
 
+## Prebuilt image
+
+| Architecture | Image | Source |
+|---|---|---|
+| x86_64 (H200, B300) | `docker.io/weili0234/evolving-infra@sha256:6a50d6ba748419b7f93975478967e159dabf6e5a25f3961853d999c5518f529b` | `d347048` |
+
+`docker/build_and_push.sh` builds and pushes it from a committed revision (`git archive`, so
+local files never enter the image) and prints the digest; pin the digest, not the tag. Build each
+architecture on a host of that architecture. The `ai-dynamo` wheel needs AVX2: on an older x86_64
+build host the script skips only the build-time `import dynamo.llm` check and labels the image
+`evolving-infra.build-checks=no-dynamo-import`. The image above was built that way, and the import
+was then checked on a Modal host.
+
 ## Base image
 
 The image starts from `docker.io/lmsysorg/sglang:v0.5.20-cu130`, the base the benchmarks run on. That base

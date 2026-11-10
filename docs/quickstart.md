@@ -10,13 +10,15 @@ router. Worker `w0` (GPUs 0–3) starts as prefill (P), `w1` (GPUs 4–7) as dec
 - The runtime image, which has every component installed:
 
   ```bash
+  docker pull docker.io/weili0234/evolving-infra@sha256:6a50d6ba748419b7f93975478967e159dabf6e5a25f3961853d999c5518f529b
+  docker tag docker.io/weili0234/evolving-infra@sha256:6a50d6ba748419b7f93975478967e159dabf6e5a25f3961853d999c5518f529b evolving-infra
   git clone https://github.com/mit-han-lab/EvolvingInfra.git && cd EvolvingInfra
-  docker build -f docker/Dockerfile -t evolving-infra .
   docker run --gpus all --network host --ipc host --device /dev/infiniband \
     -v /models:/models -it evolving-infra bash
   ```
 
-  To install from source instead, see [Installation](#installation-from-source).
+  To build the image yourself, run `docker build -f docker/Dockerfile -t evolving-infra .` in the
+  repository instead of the pull; to install from source, see [Installation](#installation-from-source).
 
 Inside the container, set the model path and the RDMA device of every GPU. Each TP rank looks up
 its own GPU, so the map must list all eight:
