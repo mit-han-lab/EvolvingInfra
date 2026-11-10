@@ -5,8 +5,6 @@ Commands:
   fit CONFIG            learning-end fit; started by ``control`` as a subprocess, runnable alone
   serve-traces          per worker host: serve scheduler trace files and the host clock to the controller
   prior REPORT          print a prefill shape prior rebuilt from a fit report
-  calibrate             one-window P/D ratio calibration from a trace manifest
-  node-plan             fixed per-node P/D plan from a completed learning capture
 """
 import argparse
 import json
@@ -22,44 +20,39 @@ def build_parser() -> argparse.ArgumentParser:
     for name, text in (("control", "Run the live P/D role controller."),
                        ("fit", "Run the learning-end fit and write <run_dir>/calibration/report.json.")):
         p = sub.add_parser(name, help=text, description=text)
-        p.add_argument("config", type=Path, help="controller JSON (see planner/README.md)")
+        p.add_argument("config", type=Path, help="controller JSON (see docs/dynamic-pd.md)")
     p = sub.add_parser("serve-traces", help="Serve trace files and /time on one worker host.",
                        description="Read-only HTTP server: GET /time, /list?dir=, /read?path=&offset= under ROOT.")
     p.add_argument("--root", required=True, help="parent of the workers' --sched-trace-dir directories")
-    p.add_argument("--port", type=int, default=None, help="default: loop.TRACE_PORT")
+    p.add_argument("--port", type=int, default=None, help="default: collect.trace_server.TRACE_PORT")
     p.add_argument("--host", default="0.0.0.0")
     p = sub.add_parser("prior", help="Rebuild a prefill shape prior from a fit report.")
     p.add_argument("report", type=Path)
-    from evolving_infra.planner.calibration import __main__ as calibrate
-    from evolving_infra.planner import node_plan
-    calibrate.add_arguments(sub.add_parser("calibrate", help="One-window P/D ratio calibration.",
-                                           description=calibrate.__doc__))
-    node_plan.add_arguments(sub.add_parser("node-plan", help="Fixed per-node P/D plan from a learning capture.",
-                                           description=node_plan.__doc__))
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.command == "calibrate":
-        from evolving_infra.planner.calibration import __main__ as calibrate
-        return calibrate.run(args)
-    if args.command == "node-plan":
-        from evolving_infra.planner import node_plan
-        return node_plan.run(args)
-    from evolving_infra.planner import loop
     if args.command == "prior":
-        print(json.dumps(loop.build_prior(json.loads(args.report.read_text()))))
+        from evolving_infra.planner.priors import build_prior
+        print(json.dumps(build_prior(json.loads(args.report.read_text()))))
     elif args.command == "serve-traces":
-        server = loop.serve_traces(args.root, args.port or loop.TRACE_PORT, args.host)
+        from evolving_infra.planner.collect.trace_server import TRACE_PORT, serve_traces
+        server = serve_traces(args.root, args.port or TRACE_PORT, args.host)
         print(f"serving {Path(args.root).resolve()} on {args.host}:{server.server_port}", flush=True)
         try:
             threading.Event().wait()
         except KeyboardInterrupt:
             server.shutdown()
     else:
-        cfg = loop.load_config(args.config)
-        {"control": loop.control, "fit": loop.fit}[args.command](cfg)
+        from evolving_infra.planner.config import load_config
+        cfg = load_config(args.config)
+        if args.command == "control":
+            from evolving_infra.planner.control.loop import control
+            control(cfg)
+        else:
+            from evolving_infra.planner.fit.learning import learning_fit
+            learning_fit(cfg)
 
 
 if __name__ == "__main__":

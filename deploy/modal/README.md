@@ -6,7 +6,7 @@ on Modal H200 nodes, with every component built from this checkout:
 | Benchmark | Nodes | Workers | Replay | Scored window |
 |---|---|---|---|---|
 | `static` | 1 | 1P1D | 1200 s | 600-1200 s |
-| `dynamic` | 2 | 2P2D, planner switches to 1P3D at 900 s and back at 1350 s | 1800 s | 900-1800 s |
+| `dynamic` | 2 | 2P2D; the planner learns for 600 s once the cold start is over, then switches to 1P3D 150 s after the fit and back 300 s later | 1800 s | 900-1800 s |
 
 ```bash
 m() { uv run --no-project --with modal==1.5.5 modal "$@"; }
@@ -50,7 +50,7 @@ Rank 0 writes `summary.json`; `valid` is true only when all of these pass:
    periodic snapshots (role switches do not restart engines).
 6. **Method evidence**: router alive and every worker registered at start and end; static roles as
    configured; for the dynamic benchmark also the planner's fit completed, both scripted switches
-   confirmed, controller alive to the cutoff and the router's roles equal to the last applied update.
+   confirmed, controller alive at the end of the replay and the router's roles equal to the last applied update.
 
 The window score (`score.py`) reports requests admitted in the window (warm-start
 requests excluded), token-weighted prefix hit, client TTFT percentiles.

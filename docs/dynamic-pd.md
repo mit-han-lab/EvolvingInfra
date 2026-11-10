@@ -24,8 +24,12 @@ request is dropped.
 
 ## The planner's decision rule
 
-The planner (`python -m evolving_infra.planner control`) runs in two phases:
+The planner (`python -m evolving_infra.planner control`) runs in three phases:
 
+- **Cold start.** From the first completed request it computes, every minute, the share of input
+  tokens served from cache. When two consecutive minutes differ by at most 0.3 percentage points, the
+  cold start is over. A minute with no cache hit at all does not count, and learning starts anyway
+  30 minutes after the first completed request.
 - **Learning** (default 30 minutes). It reads each engine's scheduler step traces and, at the
   end, fits one step-time model per worker: prefill time from new tokens, attention work and
   restored tokens; decode time from batch size and active experts.
@@ -62,11 +66,14 @@ A rejected or failed update is logged and not retried.
    python -m evolving_infra.planner control controller.json
    ```
 
-   Learning starts when the caller writes `<run_dir>/replay-timing.json` with `start_wall`
-   (epoch seconds) and `duration_s`.
+   The planner can start before traffic: the cold start begins with the first completed request.
+   It runs until it is stopped.
 
-The planner writes its decisions to `<run_dir>/role-decisions.jsonl` and, on failure,
-`<run_dir>/PLANNER_FAILED`.
+The planner writes its decisions to `<run_dir>/role-decisions.jsonl` and the learning start to
+`<run_dir>/learning-start.json`. It stops, with `<run_dir>/PLANNER_FAILED`, only when the router's
+workers differ from the configuration, the roles change before the learning-end fit, or that fit fails.
+Any other error, such as an unreachable router or engine, a failed clock probe or a failed role update,
+skips at most one decision and is logged; roles changed by another client after the fit are adopted.
 
 ## Configuration
 
@@ -76,6 +83,7 @@ The planner writes its decisions to `<run_dir>/role-decisions.jsonl` and, on fai
   "token_file": "/secure/role-token",
   "run_dir": "/path/to/run",
   "scratch": "/path/to/scratch",
+  "prefill_shape_prior": "glm52-gb300-tp4",
   "hosts": [{"index": 0, "ip": "192.0.2.1"}],
   "workers": [
     {"node": "node0", "idx": 0, "name": "w0", "host": 0, "ip": "192.0.2.1",
@@ -90,13 +98,13 @@ The planner writes its decisions to `<run_dir>/role-decisions.jsonl` and, on fai
 |---|---|
 | `workers[].node` | Must be `node<idx>`. |
 | `workers[].name` | The worker's trace subdirectory under `--root`. |
-| `learning_s`, `period_s` | Learning window and decision period (defaults 1800 and 600 seconds). |
-| `restore_counter_replicas` | The engine's TP size. |
-| `prefill_shape_prior` | Fallback prefill model shape when a worker's own fit is not identifiable. The built-in `dsv4-flash-h200-tp4` was measured on DeepSeek-V4-Flash TP4 on H200; build one for another setup with `python -m evolving_infra.planner prior <report.json>`. |
-| `role_script` | Testing only: timed role changes instead of decisions, e.g. `[[2400, {"node0": "decode"}]]`. |
+| `learning_s`, `period_s` | Learning window and decision period (defaults 1800 and 600 seconds). The workload slices (60 s) and the switch rule (two standard errors) are fixed. |
+| `prefill_shape_prior` | Required. Fallback prefill model shape for a worker whose own fit is not identifiable. Built in: `dsv4-flash-h200-tp4` (DeepSeek-V4-Flash, TP4, H200), `glm52-gb300-tp4` (GLM-5.2, TP4, GB300) and `kimi-k26-gb300-tp4` (Kimi-K2.6, TP4, GB300). Build one for another setup with `python -m evolving_infra.planner prior <report.json>`, or give `{"coefficients": [...]}`. |
+| `role_script` | Testing only: role changes instead of decisions, at the given seconds after the learning start (after the fit), e.g. `[[2400, {"node0": "decode"}]]`. |
 
-Every other tunable has a default in `evolving_infra.planner.loop.DEFAULTS`; any key in the
-file overrides it. Keep the token file outside `run_dir`.
+Every other tunable has a default in `evolving_infra.planner.config.DEFAULTS`; any key in the
+file overrides it, and an unknown key is an error. The engines' TP size, which scales the restore
+counters, is read from each engine's `/server_info`. Keep the token file outside `run_dir`.
 
 ## Limits
 

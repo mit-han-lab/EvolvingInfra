@@ -337,7 +337,7 @@ class Driver:
             if self.services["controller"].poll() is not None or time.time() - t0 > 180:
                 raise RuntimeError("planner controller not ready; see replay/controller.log")
             time.sleep(1)
-        log("planner controller ready (learning starts with the replay)")
+        log("planner controller ready (learning starts once the replay's cold start is over)")
 
     # --------------------------------------------------------------------------------- replay
     def scrape_loop(self, stop_event: threading.Event):
@@ -375,8 +375,6 @@ class Driver:
         scraper = threading.Thread(target=self.scrape_loop, args=(stop_event,), daemon=True)
         scraper.start()
         t0 = time.time()
-        if c.get("controller"):  # the planner's clock: learning starts at the replay start
-            (d / "replay-timing.json").write_text(json.dumps(dict(start_wall=t0, duration_s=c["duration"])))
         procs = [start(stack.trie_command(c, shards[i], per[i], str(d), i), str(d), f"trie-{i}", env) for i in range(n)]
         log(f"replay: {n} Trie processes, concurrency {per}, {c['duration']} s")
         deadline = t0 + c["duration"] + c["trie_grace_s"]
@@ -423,7 +421,6 @@ class Driver:
         d = self.replay_dir
         journal = d / "role-decisions.jsonl"
         events = [json.loads(line)["event"] for line in journal.open()] if journal.exists() else []
-        done = json.loads((d / "role-controller-complete.json").read_text()) if (d / "role-controller-complete.json").exists() else {}
         ready = d / "role-controller-ready.json"
         initial = json.loads(ready.read_text())["initial_assignment"] if ready.exists() else None
         applied = initial
@@ -443,19 +440,16 @@ class Driver:
         out.update(
             initial_roles_as_configured=weights == configured and external,
             controller_alive_at_end=controller is not None and controller.poll() is None,
-            controller_reached_cutoff=bool(done.get("cutoff_reached")),
-            fit_completed=(d / "calibration" / "report.json").exists() and "warmup_fit_completed" in events
-            and bool(done.get("fit_completed")),
-            decisions_journal_present=journal.exists() and "replay_timing" in events,
+            fit_completed=(d / "calibration" / "report.json").exists() and "warmup_fit_completed" in events,
+            decisions_journal_present=journal.exists() and "learning_started" in events,
             roles_consistent_with_last_applied=applied is not None and live == applied,
-            scripted_changes_confirmed=events.count("role_update_confirmed") == len(script)
-            and done.get("scripted_changes_left") == 0,
+            scripted_changes_confirmed=events.count("role_update_confirmed") == len(script),
             role_updates_confirmed=events.count("role_update_confirmed"),
             decisions={e: events.count(e) for e in sorted(set(events))},
             planner_failed=(d / "PLANNER_FAILED").read_text() if (d / "PLANNER_FAILED").exists() else None,
             final_n_p=sum(r == "prefill" for r in live["roles"].values()) if isinstance(live, dict) else None)
         return dict(out, required=["router_alive_at_end", "all_workers_registered", "initial_roles_as_configured",
-                                   "controller_alive_at_end", "controller_reached_cutoff", "fit_completed",
+                                   "controller_alive_at_end", "fit_completed",
                                    "decisions_journal_present", "roles_consistent_with_last_applied",
                                    "scripted_changes_confirmed"])
 

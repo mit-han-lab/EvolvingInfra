@@ -288,20 +288,21 @@ def conformance_command(outdir: str, worker_url_: str, name: str) -> list[str]:
 
 # ------------------------------------------------------------------------------------------- configs
 
-CONTROLLER = dict(  # planner loop.DEFAULTS overrides of the dynamic run, plus the router's drain timeout
+CONTROLLER = dict(  # planner config.DEFAULTS overrides of the dynamic run, plus the router's drain timeout
     learning_s=1800, period_s=600, exclusion_s=120., role_drain_timeout_s=5, role_script=None,
     prefill_shape_prior="dsv4-flash-h200-tp4",
 )
 
 
 def bench_controller(duration: int) -> dict:
-    """2 nodes, 2P2D. Learning ends (fit) at 1/3 of the replay; w00 P -> D at 1/2 (1P3D) and back
-    D -> P at 3/4 (2P2D). The router refuses any swap at 1P1D (a draining D -> P leaves no serving P),
-    hence two nodes."""
+    """2 nodes, 2P2D. Learning (1/3 of the replay) starts when the planner sees the cold start end; w00
+    P -> D 150 s after the fit (1P3D) and back D -> P 300 s later (2P2D), both before the replay ends when
+    the cold start takes at most duration/3 - 450 s. The router refuses any swap at 1P1D (a draining
+    D -> P leaves no serving P), hence two nodes."""
     learning = duration // 3
     return dict(CONTROLLER, learning_s=learning, period_s=min(600, learning),
                 exclusion_s=min(120., min(600, learning) - 120),
-                role_script=[[duration // 2, {"node0": "decode"}], [3 * duration // 4, {"node0": "prefill"}]])
+                role_script=[[learning + 150, {"node0": "decode"}], [learning + 450, {"node0": "prefill"}]])
 
 
 def bench_config(run_id: str, dynamic: bool, duration: int = 0, concurrency: int = 16, trie_procs: int = 2,
