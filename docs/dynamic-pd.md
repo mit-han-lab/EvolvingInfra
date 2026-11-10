@@ -37,6 +37,9 @@ The planner (`python -m evolving_infra.planner control`) runs in three phases:
   workload, one 60-second slice at a time, and switches only when the predicted gain is larger than two
   standard errors. After a switch it waits before scoring again, so it measures the new split.
 
+[How the planner works](../planner/README.md#how-it-works) gives the models, the fit and the rule,
+with the fit of the models on GB300 and H200.
+
 A rejected or failed update is logged and not retried.
 
 ## Run it
@@ -117,7 +120,7 @@ python -m evolving_infra.planner control --config planner.json --decision-period
 | `--prefill-shape-prior` | Prefill model shape for a worker whose own fit cannot separate the terms. Built in: `dsv4-flash-h200-tp4` (DeepSeek-V4-Flash, TP4, H200), `glm52-gb300-tp4` (GLM-5.2, TP4, GB300) and `kimi-k26-gb300-tp4` (Kimi-K2.6, TP4, GB300). Build one for another setup with `python -m evolving_infra.planner prior <report.json>`, or give `{"coefficients": [...]}`. |
 | `--prefill-shape-prior-sha256` | Optional checksum that pins the prior. |
 
-**Method**:
+**Method** ([how the planner works](../planner/README.md#how-it-works)):
 
 | Flag | Default | Description |
 |---|---|---|
