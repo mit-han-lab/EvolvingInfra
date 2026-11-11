@@ -107,12 +107,12 @@ from evolving_infra.router.client.scheduler import Scheduler
 async def generate():
     frontend = "http://127.0.0.1:28100"
     async with Scheduler("http://127.0.0.1:30900") as scheduler:
-        agent = Agent(scheduler, agent_id="task-42")   # one agent run; branch 0
+        agent = Agent(scheduler)                      # one task run: a new agent_id; branch 0
         request = agent.request({})                   # the next step of branch 0
         body = {
             "protocol_version": 1,
             "request_id": request.identity.engine_rid,
-            "config_id": "dsv4",
+            "config_id": "default",                     # the frontend's; `evolving-infra serve` uses "default"
             "input": {"prompt": "Explain prefix caching.", "add_special_tokens": False},
             "generation": {"sampling_params": {"max_new_tokens": 64}, "stream": False},
         }
@@ -120,11 +120,23 @@ async def generate():
             async with http.post(frontend + "/prepare", json=body) as response:
                 response.raise_for_status()
                 prepared = await response.json()
-        return await scheduler.submit_prepared(frontend, prepared)
+        return await scheduler.submit_prepared(frontend, prepared, identity=request.identity)
 ```
 
 - `agent.fork()` starts a new branch (sub-agent) with its own request counter.
+- Use a new `agent_id` for every task run (`Agent(scheduler)` draws one). The router refuses a
+  request ID it has already planned (`request already planned; do not repeat generation`).
+- `identity=` registers the request's branch for KV retention when the router runs with it (the
+  default; `retention: false` in the config turns it off). Without `identity=` the request runs
+  but its branch is not tracked; with it, a request whose branch cannot be registered (the branch
+  has ended, or the request is older than the branch's last) fails with HTTP 400.
+- `await agent.end_trajectory()` ends this branch; end each `fork()` separately, before the
+  `Scheduler` closes. The router refuses it (HTTP 400) when retention is off, or when no request
+  of the branch reached the router with its identity: `identity=` on the prepared path, or the
+  `x-agent-context` header that `agent.submit()` and `scheduler.submit()` send on the plain path.
 - For streaming, prepare with `"stream": true` and iterate `scheduler.stream_prepared(...)`.
-- Nothing is retried automatically: not preparation, placement or generation.
+- Nothing is retried after a failure: not preparation, placement or generation. When the
+  planner moves a streamed request's decode leg off a draining worker, the frontend places the
+  rest of the request on a new P/D pair and continues the same stream.
 - A closed stream does not prove the engine stopped; cancellation goes to the router, which
   aborts both legs.

@@ -150,13 +150,8 @@ The router turns the identity into the engine request ID and uses it for
 
 ## Installation from source
 
-The engine needs a CUDA 13 GPU host; the other components run anywhere.
-
-```bash
-pip install -e evolving_infra/engine                                # DecoupledEngine, Python >= 3.10
-pip install -e ".[client,frontend,indexer,planner]"                 # frontend, KV directory, client SDK, planner; Python >= 3.11
-(cd evolving_infra/router/core && cargo build --release --locked)   # router, binary target/release/sgl-router; needs protoc
-```
+The engine needs a CUDA 13 GPU host; the other components run anywhere. The steps are in
+[Without the image](../docker/README.md#without-the-image).
 
 Run the CPU tests:
 

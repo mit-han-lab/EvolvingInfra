@@ -53,8 +53,8 @@ or the image's runtime. Without an RDMA device P/D transfers cannot run: say so 
 - **Image** (every component inside): `docker build -f docker/Dockerfile -t evolving-infra .`,
   or pull the published tag in [`README.md`](../../README.md). Run it with
   `--gpus all --network host --ipc host --device /dev/infiniband --ulimit memlock=-1 -v <models>:/models`.
-- **Source**: the three install lines of [`README.md`](../../README.md) (engine, the Python
-  package, `cargo build` of the router). `sgl-router` must be on `PATH`.
+- **Source**: the steps of [Without the image](../../docker/README.md#without-the-image)
+  (engine, router, and the launcher's own venv). `sgl-router` must be on `PATH`.
 
 **Check**: `evolving-infra serve --help` prints its usage on every host (under a scheduler,
 in a job step).

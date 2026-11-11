@@ -31,6 +31,45 @@ docker buildx imagetools create -t docker.io/weili0234/evolving-infra:<tag> \
   docker.io/weili0234/evolving-infra:<sha12>-amd64 docker.io/weili0234/evolving-infra:<sha12>-arm64
 ```
 
+## Without the image
+
+Install the same pieces on a host that has what the [base image](#base-image) provides (CUDA 13,
+PyTorch, the kernels, the Mooncake wheel, NCCL / RDMA user space), plus `protoc`
+(`apt-get install protobuf-compiler`) and `rustup` for the router. These are the steps of
+`docker/Dockerfile`, run from the repository root:
+
+```bash
+# Engine, into the Python that `python3` runs. Where upstream SGLang is installed (as in the base
+# image), remove it first: pip uninstall -y sglang sgl-router sglang-router
+PIP_CONSTRAINT= pip install -e evolving_infra/engine
+pip install --no-deps "flashinfer-cubin==$(pip show flashinfer_python | awk '/^Version/{print $2}')" \
+  --index-url https://flashinfer.ai/whl                  # FlashInfer's prebuilt kernels
+# Where flashinfer-jit-cache is installed, its version must match FlashInfer's
+pip show flashinfer-jit-cache >/dev/null 2>&1 && pip install --no-deps \
+  "flashinfer-jit-cache==$(pip show flashinfer_python | awk '/^Version/{print $2}')" --index-url https://flashinfer.ai/whl/cu130
+
+# Router; rustup takes the Rust version from rust-toolchain.toml
+(cd evolving_infra/router/core && cargo build --release --locked --bin sgl-router)
+install -m 0755 evolving_infra/router/core/target/release/sgl-router /usr/local/bin/   # or any directory on PATH
+
+# Launcher, frontend, KV directory and planner, in a venv of their own (Python >= 3.11)
+python3 -m venv .venv && .venv/bin/pip install -e ".[frontend,indexer,planner]"
+
+# Replay client, in another venv: Trie pins transformers 4.57.6
+python3 -m venv .venv-trie && .venv-trie/bin/pip install -e benchmarks/trie 'openai==2.30.0' 'httpx==0.28.1' -e ".[client]"
+```
+
+Start the stack with `.venv/bin/evolving-infra` and leave the venv inactive: the launcher runs the
+frontend, KV directory and planner with its own interpreter and the engines with `python3`. Set
+the variables the image sets ([Environment](#environment)) first:
+
+```bash
+export SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=false \
+  SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=3600 SGLANG_DISAGGREGATION_WAITING_TIMEOUT=3600
+```
+
+The image also rebuilds Mooncake with a patch that only gVisor needs ([Mooncake patch](#mooncake-patch)).
+
 ## Base image
 
 The image starts from `docker.io/lmsysorg/sglang:v0.5.20-cu130`, the base the benchmarks run on. That base

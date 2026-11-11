@@ -18,12 +18,18 @@ Agent-Adaptive LLM Serving at Scale
 </p>
 
 <p align="center">
+  <a href="AGENTS.md"><img src="https://img.shields.io/badge/Agent--native-AGENTS.md-0F766E.svg" alt="Agent-native repository"></a>
   <a href="https://inference-rsi.com/"><img src="https://img.shields.io/badge/Website-inference--rsi.com-2A78D6.svg" alt="Website"></a>
   <a href="https://arxiv.org/abs/2611.12304"><img src="https://img.shields.io/badge/arXiv-2611.12304-b31b1b.svg" alt="Paper on arXiv"></a>
   <a href="docs/README.md"><img src="https://img.shields.io/badge/Docs-evolving--infra-6f42c1.svg" alt="Documentation"></a>
   <a href="https://huggingface.co/datasets/crmsndu/evolving-infra-traces"><img src="https://img.shields.io/badge/Traces-Hugging_Face-FFD21E.svg?logo=huggingface&logoColor=FFD21E" alt="Agent traces on Hugging Face"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green.svg" alt="License"></a>
 </p>
+
+> [!TIP]
+> **This is an agent-native repository.** Use your coding agent (Claude Code, Codex, ...) to
+> understand, deploy, benchmark and develop Evolving Infra. It reads [`AGENTS.md`](AGENTS.md) for
+> the rules and the map of the code, and follows a [skill](skills/README.md) for each task.
 
 ---
 
@@ -67,67 +73,81 @@ uses it. [Architecture](docs/architecture.md) describes the request path.
 
 ## Getting Started
 
-Evolving Infra runs DeepSeek-V4-Flash, GLM-5.2 and Kimi-K2.6 on NVIDIA H200, B300 and GB300
-([models and hardware](docs/README.md#models-and-hardware)). The runtime image has every
-component. Pull the prebuilt image (x86_64 for H200 and B300, aarch64 for GB300):
+There are two things to do with this repository: serve a model, or reproduce the paper. Your
+coding agent (Claude Code, Codex, ...) can do either by following a [skill](skills/README.md),
+or you can run the commands yourself.
+
+Every component is in the runtime image, built for x86_64 (H200, B300) and aarch64 (GB300):
 
 ```bash
 docker pull docker.io/weili0234/evolving-infra:v0.1.0
 ```
 
-or build it:
+To build the image or install from source, see [docker/README.md](docker/README.md).
 
-```bash
-git clone https://github.com/mit-han-lab/EvolvingInfra.git
-cd EvolvingInfra
-docker build -f docker/Dockerfile -t evolving-infra .
-```
+### Serve a model
 
-Or install from source:
+**With your coding agent**: "Deploy `<model>` on `<hosts>` with Evolving Infra, following
+`skills/deploy-stack/SKILL.md`." Give it the model directory, the hosts and how commands reach
+them (a shell on each, or a scheduler). It inspects the machines, writes a config when the
+model or GPU has no example, starts the stack and checks that it answers.
 
-```bash
-pip install -e evolving_infra/engine                                # engine
-pip install -e ".[client,frontend,indexer,planner]"                 # launcher, client, tokenizer service, KV directory, planner
-(cd evolving_infra/router/core && cargo build --release --locked)   # router
-```
-
-To reproduce the paper's setup, GLM-5.2 on GB300, start it on one node:
+**By hand**: on each host, inside the image (`docker run --gpus all --network host --ipc host
+--device /dev/infiniband --ulimit memlock=-1 -v <models>:/models -it <image> bash`), take the config of your
+hardware from [examples/](examples/README.md) and start it. The GB300 configs read GLM-5.2 from
+`/models/GLM-5.2-NVFP4`; `--model-path` overrides it. On one GB300 node:
 
 ```bash
 evolving-infra serve --config examples/gb300/glm52-1node.yaml
 ```
 
 The node's GPUs become one prefill and one decode worker, and the router serves an
-OpenAI-compatible API on port 30900. To run the paper's experiment on nine GB300 nodes with Slurm:
+OpenAI-compatible API on port 30900. On several hosts, run
+`evolving-infra serve --config examples/gb300/glm52.yaml --hosts h0,h1,h2 --prefill-workers 1`
+on each. [Quickstart](docs/quickstart.md) starts each component by hand.
+
+**Connect the agents you serve.** Tag each request with the agent and branch it belongs to, so
+the KV cache of live branches is kept:
+
+```python
+client = openai.OpenAI(base_url="http://localhost:30900/v1", api_key="unused")
+identity = {"agent_id": run_id, "subagent_id": 0, "request_id": step}
+client.chat.completions.create(
+    model="glm-5.2", messages=messages, max_tokens=1024,
+    extra_headers={"x-agent-context": json.dumps(identity)},
+)
+```
+
+`agent_id` is new for every task run, `subagent_id` names the branch and `request_id` is the
+request's position in it; end a branch with `POST /kv_sessions/end`
+([KV retention](docs/kv-retention.md)). This works on a stack started without `--planner`. To
+connect an agent framework, including its sub-agents and a stack that serves with `--planner`,
+have your coding agent follow [`connect-agent`](skills/connect-agent/SKILL.md).
+
+### Reproduce the paper
+
+**With your coding agent**: "Reproduce the paper's Claude Code result on our Slurm cluster,
+following `skills/run-benchmark/SKILL.md`." Give it the workload (Claude Code, Putnam or
+OSWorld), the Slurm account and partition, the image, the model directory and a directory every
+node sees. OSWorld runs Kimi-K2.6, which has no example config: the agent derives one first. A
+run holds nine GPU nodes for about two hours.
+
+**By hand**: on nine GB300 nodes with Slurm and [Pyxis](https://github.com/NVIDIA/pyxis), with
+GLM-5.2 at `/models/GLM-5.2-NVFP4` on every node, run from a directory every node sees. The job
+downloads the workload from Hugging Face, so the first node needs internet access. It runs the
+replay inside the image, so use an image built from this checkout
+([docker/README.md](docker/README.md)):
 
 ```bash
 python examples/slurm/submit.py --account <account> --partition <partition> --image <image>
 ```
 
-It serves, replays the Claude Code workload and writes the score
-([examples/gb300](examples/gb300/README.md)). [Quickstart](docs/quickstart.md) starts each
-component by hand.
+It serves, replays the Claude Code workload and writes `runs/<job id>/score.json`. Compare it
+with the reference in [examples/gb300](examples/gb300/README.md). The workloads and the paper's
+results are in [benchmarks/](benchmarks/README.md).
 
-For another model, GPU or cluster, give your coding agent the
-[`deploy-stack`](skills/deploy-stack/SKILL.md) skill: "serve `<model>` on these hosts with Evolving Infra,
-following `skills/deploy-stack/SKILL.md`". It inspects the machines, derives the config for the
-model, starts the stack and checks that it answers. The other skills run the benchmark
-([`run-benchmark`](skills/run-benchmark/SKILL.md)) and find why a run failed or is slow
-([`diagnose-run`](skills/diagnose-run/SKILL.md)).
-
-To connect an agent, point its OpenAI client at the router and tag each request with the agent
-and branch it belongs to:
-
-```python
-client = openai.OpenAI(base_url="http://localhost:30900/v1", api_key="unused")
-identity = {"agent_id": "task-42", "subagent_id": 0, "request_id": 7}
-client.completions.create(
-    model="glm-5.2", prompt=prompt, max_tokens=1024,
-    extra_headers={"x-agent-context": json.dumps(identity)},
-)
-```
-
-`subagent_id` names the branch and `request_id` the request's position in it.
+A run that does not start, fails a request or scores below the reference:
+[`diagnose-run`](skills/diagnose-run/SKILL.md).
 
 ## Repository layout
 
