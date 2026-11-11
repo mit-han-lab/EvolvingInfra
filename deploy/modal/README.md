@@ -65,11 +65,22 @@ requests excluded), token-weighted prefix hit, client TTFT percentiles.
   - weights, mounted at `/weights`: a Hugging Face cache holding `deepseek-ai/DeepSeek-V4-Flash-0731`
     at the snapshot `stack.MODEL` names (`hub/models--deepseek-ai--DeepSeek-V4-Flash-0731/snapshots/...`);
   - inputs, mounted at `/inputs`: the workload `stack.WORKLOAD` (`workloads/cc-semi-062126-kh20261001.v3.jsonl`)
-    and its offline validation report beside it (`<workload>.validate.json`). The workload is a semi-synthetic
-    Trie workload built from the public Claude Code trace of
-    [cc-trace-replay](../../benchmarks/trie/docs/cc-trace-replay.md) (tool waits capped at 2 min). It is
-    not distributed with this repository, and its exact conversion settings are not recorded here;
-    the harness checks it against the sha256 its validation report attests.
+    and its offline validation report beside it (`<workload>.validate.json`). The workload is the Claude Code
+    trace of [cc-trace-replay](../../benchmarks/trie/docs/cc-trace-replay.md) for the DeepSeek-V4-Flash
+    tokenizer (tool waits capped at 2 min), as replayed in the paper's H200 runs. Download it from
+    [Hugging Face](https://huggingface.co/datasets/crmsndu/evolving-infra-traces) and put it on the
+    Volume under the name the harness expects:
+
+    ```bash
+    hf download crmsndu/evolving-infra-traces --repo-type dataset --local-dir traces \
+      --include 'claude-code/cc062126-dsv4-flash.jsonl*'
+    modal volume put evolving-infra-inputs traces/claude-code/cc062126-dsv4-flash.jsonl \
+      workloads/cc-semi-062126-kh20261001.v3.jsonl
+    modal volume put evolving-infra-inputs traces/claude-code/cc062126-dsv4-flash.jsonl.validation.json \
+      workloads/cc-semi-062126-kh20261001.v3.jsonl.validate.json
+    ```
+
+    The harness checks it against the sha256 its validation report attests (`2916be77…`).
 
   No secrets are used.
 - Each run writes `<run_id>/node<rank>/` (engine, router, frontend and indexer logs and commands,
