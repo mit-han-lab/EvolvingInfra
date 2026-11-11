@@ -1,6 +1,6 @@
 # Benchmarks on Modal
 
-`app.py` runs the two benchmarks of [`benchmarks/reproduce`](../../benchmarks/reproduce/README.md)
+`app.py` runs the two [Modal benchmarks](../../benchmarks/reproduce/README.md#benchmarks-on-modal)
 on Modal H200 nodes, with every component built from this checkout:
 
 | Benchmark | Nodes | Workers | Replay | Scored window |

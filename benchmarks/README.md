@@ -4,7 +4,7 @@
 |---|---|
 | [`trie/`](trie/README.md) | Trie, the strict-replay client: its own Python distribution (`trie`, Python >= 3.11, pins `transformers==4.57.6`); install it in a separate venv. Workload converters and the live conformance probe are in `trie/scripts/`. |
 | [`replay/`](replay/README.md) | The adapter that runs Trie through the router's prepared path, and the checks that decide whether a run is valid. |
-| [`reproduce/`](reproduce/README.md) | Benchmark setup and expected results. |
+| [`reproduce/`](reproduce/README.md) | How the paper's experiments were run, their results, and the commands that run them. |
 
 The agent traces used in the paper are on Hugging Face:
 [crmsndu/evolving-infra-traces](https://huggingface.co/datasets/crmsndu/evolving-infra-traces).
