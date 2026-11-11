@@ -71,5 +71,6 @@ checks every rule below that a script can check.
 - List the skill in `AGENTS.md` and in [`skills/README.md`](../../skills/README.md).
 
 Agents find the instructions and the skills without setup. Codex and most other agents read
-`AGENTS.md`. Claude Code reads `CLAUDE.md`, which holds the one line `@AGENTS.md`, and finds
-skills through `.claude/skills`, a link to `skills/`. Write skills only in `skills/`.
+`AGENTS.md`; Claude Code reads `CLAUDE.md`, which holds the one line `@AGENTS.md`. Codex finds
+skills through `.agents/skills` and Claude Code through `.claude/skills`, both links to
+`skills/`. Write skills only in `skills/`.

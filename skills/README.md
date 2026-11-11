@@ -16,8 +16,8 @@ They follow one another: `deploy-stack` starts the stack, `run-benchmark` measur
 `diagnose-run` explains a failure or a gap, and `check-pr` comes before the change goes up for
 review.
 
-Agents find these skills on their own: [`AGENTS.md`](../AGENTS.md) lists them for Codex and
-other agents, and `.claude/skills` links here for Claude Code.
+Agents find these skills on their own: `.agents/skills` (Codex) and `.claude/skills` (Claude
+Code) link to this directory, and [`AGENTS.md`](../AGENTS.md) lists them for every other agent.
 
 ## What a skill directory holds
 
