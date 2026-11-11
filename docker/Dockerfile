@@ -88,6 +88,7 @@ COPY router/indexer /opt/evolving-infra/router/indexer
 COPY router/client /opt/evolving-infra/router/client
 COPY planner /opt/evolving-infra/planner
 COPY launch /opt/evolving-infra/launch
+COPY examples /opt/evolving-infra/examples
 RUN python3 -m venv /opt/indexer-venv \
  && /opt/indexer-venv/bin/pip install -q "ai-dynamo==${DYNAMO_VERSION}" msgpack pyzmq \
  && /opt/indexer-venv/bin/pip install -q "/opt/evolving-infra[frontend,indexer,planner]" 'fastapi<0.142' \

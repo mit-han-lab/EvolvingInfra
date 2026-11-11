@@ -21,7 +21,7 @@ moves through it.
 - **User-visible changes update the docs in the same pull request**: flags, defaults,
   environment variables, config keys, endpoints.
 - Before opening a pull request or asking for another review, run the
-  [`pr-checklist`](.agents/skills/pr-checklist/SKILL.md) skill and address what it finds.
+  [`pr-checklist`](skills/pr-checklist/SKILL.md) skill and address what it finds.
 
 ## 2. Repository map
 
@@ -37,7 +37,7 @@ moves through it.
 | `deploy/modal/`, `docker/` | Benchmarks on Modal, the runtime image | their READMEs |
 | `docs/` | User documentation; [`docs/paper.md`](docs/paper.md) maps the paper to the code | [`docs/README.md`](docs/README.md) |
 | `tests/`, `tools/` | Python tests, one directory per component; repository tools | |
-| `.agents/skills/` | Agent skills (see [Skills](#4-skills)) | |
+| `skills/` | Agent skills (see [Skills](#4-skills)) | |
 
 ## 3. Development workflow
 
@@ -72,31 +72,35 @@ Commits: imperative subject that says what changed for the user, body that says 
 
 ## 4. Skills
 
-Skills live in `.agents/skills/`; `.claude/skills/` holds symlinks to them. Edit the files in
-`.agents/skills/`.
+Skills live in `skills/`. To use one, read its `SKILL.md` and follow it.
 
-- [`pr-checklist`](.agents/skills/pr-checklist/SKILL.md): check a change and its description
+- [`pr-checklist`](skills/pr-checklist/SKILL.md): check a change and its description
   before a pull request or a re-review.
+- [`serve`](skills/serve/SKILL.md): install and start the stack on one host or
+  several, and confirm it answers.
+- [`run-benchmark`](skills/run-benchmark/SKILL.md): run the paper's replay benchmark,
+  score it and compare it with the reference.
+- [`debug-run`](skills/debug-run/SKILL.md): find why a run did not start, failed a
+  request, or scored below the reference.
 
-## 5. Rules the code does not show
+## 5. Component guides
 
-- **Engine: read resolved settings, not raw arguments.** Startup resolution declares values
-  (`declare_resolution`); the raw `ServerArgs` field keeps what the operator typed. Read
-  `resolution_result(server_args, field)`. A raw read ignores every default the engine turned on.
+Read the guide of a directory before changing code in it. If the guide conflicts with the
+requested change, stop and say so.
+
+- [`engine/AGENTS.md`](engine/AGENTS.md): resolved settings, where defaults live, ports, TP ranks.
+- [`router/core/AGENTS.md`](router/core/AGENTS.md): the preset, the test helper, which routes
+  late decode choice and role control accept.
+- [`planner/AGENTS.md`](planner/AGENTS.md): launch parameters, the role API, what stops the planner.
+- [`launch/AGENTS.md`](launch/AGENTS.md): interpreters, port layout, hardware detection, hosts.
+- [`benchmarks/AGENTS.md`](benchmarks/AGENTS.md): replay settings, scoring windows, comparing runs.
+
+Two rules cross components:
+
 - **Engine and router presets match.** `--symmetric-preset` (engine) and
-  `--symmetric-pd-preset` (router) are both `paper` by default. With one side set to `none`
-  the router refuses the worker.
-- **Ports on one host do not overlap.** An engine binds two ports per GPU from
-  `--disaggregation-bootstrap-port` and one per GPU from `--peer-kv-servicer-port`.
-  `launch/layout.py` assigns them; change it there.
-- **Benchmarks replay with `replay_context_mode=actual_output`**, as the paper's runs do: later
-  prompts carry the model's own earlier outputs. Recorded outputs in the context change how
-  many draft tokens speculative decoding accepts, so the results do not compare.
-- **Compare runs on the same window and the same P/D split.** The planner changes the split
-  during a run; a throughput difference over the whole window can be a difference in when it
-  switched. `benchmarks/replay/score.py --skip-s --window-s` scores any window.
-- **Hosts find themselves.** `evolving-infra serve` locates the host in `--hosts` by name. A
-  scheduler's node index is not the position in a sorted host list.
+  `--symmetric-pd-preset` (router) are both `paper` by default; set both or neither to `none`.
+- **A performance number names its window and its P/D split.** The planner changes the split
+  during a run, so a difference over a whole run can be a difference in when it switched.
 
 Rules for editing this file and the skills:
 [`docs/contributing/agent-instructions.md`](docs/contributing/agent-instructions.md).

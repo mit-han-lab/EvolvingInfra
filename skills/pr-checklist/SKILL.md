@@ -39,12 +39,12 @@ git fetch origin && git log --oneline origin/main..HEAD && git diff --stat origi
 - **No environment-specific values in code**: host names, cluster paths, NIC names, account
   names. They belong in a config or are detected (`launch/hardware.py`).
 - **Agent files** (`AGENTS.md`, a skill, the template): follow
-  [`docs/contributing/agent-instructions.md`](../../../docs/contributing/agent-instructions.md)
+  [`docs/contributing/agent-instructions.md`](../../docs/contributing/agent-instructions.md)
   and run `python tools/check_agent_files.py`.
 
 ## 2. Testing and validation
 
-- Run the test commands of [`AGENTS.md`](../../../AGENTS.md) for every component the diff
+- Run the test commands of [`AGENTS.md`](../../AGENTS.md) for every component the diff
   touches, and the directory of any test the diff adds.
 - A bug fix has a test that fails on the base commit for the reported reason and passes with
   the fix. Paste both results.
@@ -64,7 +64,7 @@ git fetch origin && git log --oneline origin/main..HEAD && git diff --stat origi
 
 ## 4. Pull request contents
 
-Fill a copy of [`.github/PULL_REQUEST_TEMPLATE.md`](../../../.github/PULL_REQUEST_TEMPLATE.md),
+Fill a copy of [`docs/PULL_REQUEST_TEMPLATE.md`](../../docs/PULL_REQUEST_TEMPLATE.md),
 keep its sections, and create with `gh pr create --body-file <file>`.
 
 - **Overview**: one or two lines, with the issue link when there is one.

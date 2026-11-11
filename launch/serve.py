@@ -62,9 +62,10 @@ class Stack:
                 os.killpg(proc.pid, signal.SIGKILL)
 
     def check(self):
-        for name, proc in self.procs:
-            if proc.poll() is not None:
-                raise RuntimeError(f"{name} exited with {proc.returncode}; see {self.dir}/logs/{name}.log")
+        dead = [(name, proc.returncode) for name, proc in self.procs if proc.poll() is not None]
+        if dead:
+            raise RuntimeError("; ".join(f"{name} exited with {code}; see {self.dir}/logs/{name}.log"
+                                         for name, code in dead))
 
     def wait(self, what, url, timeout):
         deadline = time.time() + timeout

@@ -32,13 +32,11 @@ made more than once. Keep it short, specific and actionable.
 
 ## Skills
 
-Skills live in `.agents/skills/<name>/` and follow the
+Skills live in `skills/<name>/` and follow the
 [Agent Skills specification](https://agentskills.io/specification).
 
 - Frontmatter: `name` equals the directory name; `description` says what the skill does and
   when to use it.
-- Claude Code reads `.claude/skills/`, so link each skill:
-  `ln -s ../../.agents/skills/<name> .claude/skills/<name>`.
 - A skill states its purpose, its inputs, numbered steps, and what it returns. Scripts go in
   `scripts/`, long reference material in `references/`.
 - A skill enters the repository after a fresh agent session has followed it to the end on a

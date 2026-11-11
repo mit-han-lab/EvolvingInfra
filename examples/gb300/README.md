@@ -51,8 +51,17 @@ The node's 4 GPUs become two TP2 workers, one P and one D, and the router listen
 
 ## Results
 
-The paper's run of this experiment:
+The paper's run of this experiment, scored with `benchmarks/replay/score.py`. Times are
+seconds after the replay's first event.
 
-| Requests/s | Prefix hit | TTFT p50 | TTFT p95 | End-to-end mean | Failed |
-|---:|---:|---:|---:|---:|---:|
-| 5.89 | 96.3 % | 5.0 s | 19.4 s | 12.9 s | 0 |
+| Window | Split | Requests/s | Prefix hit | TTFT p50 | TTFT p95 | End-to-end mean | Failed |
+|---|---|---:|---:|---:|---:|---:|---:|
+| [1800, 5400), the score | changes | 5.89 | 96.3 % | 5.0 s | 19.4 s | 12.9 s | 0 |
+| [1200, 1800) | 6P3D | 4.91 | 96.6 % | 7.0 s | 28.0 s | 17.9 s | 0 |
+| [1937, 3024) | 3P6D | 5.67 | 96.7 % | 5.1 s | 19.5 s | 12.8 s | 0 |
+| [3144, 5400) | 4P5D | 6.00 | 96.1 % | 4.9 s | 19.4 s | 12.9 s | 0 |
+
+The planner switched from 6P3D to 3P6D at 1818 s and to 4P5D at 3025 s, and held after that.
+In the 6P3D window a request has 4,298 uncached prompt tokens and 1,126 output tokens on
+average, and decode takes 7.0 ms per output token (median). Three runs of this configuration
+scored 5.76 to 5.89 requests/s on the whole window and 4.71 to 4.91 on the 6P3D window.

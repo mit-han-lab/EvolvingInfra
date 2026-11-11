@@ -131,7 +131,7 @@ client.completions.create(
 | [`router/frontend/`](router/frontend/README.md), [`router/indexer/`](router/indexer/README.md), [`router/client/`](router/client/__init__.py) | Tokenizer service, KV directory, Python client |
 | [`planner/`](planner/README.md) | Planner |
 | [`launch/`](launch/__main__.py), [`examples/`](examples/gb300/README.md) | `evolving-infra serve`, and the paper's experiment as a config |
-| [`AGENTS.md`](AGENTS.md), [`.agents/skills/`](.agents/skills/) | Instructions and skills for coding agents |
+| [`AGENTS.md`](AGENTS.md), [`skills/`](skills/) | Instructions and skills for coding agents |
 | [`benchmarks/`](benchmarks/README.md) | Agent trace replay, run checks, reference results |
 | [`deploy/modal/`](deploy/modal/README.md), [`docker/`](docker/README.md) | Benchmarks on Modal, runtime image |
 
@@ -145,7 +145,7 @@ We welcome contributions, and we recommend making them with a coding agent:
 - Point the agent at [`AGENTS.md`](AGENTS.md): the contribution rules, the repository map and
   the commands to build and test.
 - Before opening a pull request, have the agent run the
-  [`pr-checklist`](.agents/skills/pr-checklist/SKILL.md) skill. It checks the change and fills
+  [`pr-checklist`](skills/pr-checklist/SKILL.md) skill. It checks the change and fills
   the pull request template: claims, the evidence for each, and the root cause of a fix.
 - Attach the agent's session transcript to your pull request, so
   reviewers can see how the change was made and checked. Scrub it first:

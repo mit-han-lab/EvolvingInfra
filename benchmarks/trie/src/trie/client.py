@@ -1431,6 +1431,8 @@ class Client:
             if trajectory_prefix_ids
             else {}
         )
+        if actual_context is not None:
+            prefix_attrs["replay_context_mode"] = "actual_output"
         if cache_salt_mode == "session":
             if run_cache_salt is None:
                 raise ValueError("session cache salt requires a run UUID")

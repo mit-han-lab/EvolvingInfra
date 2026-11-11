@@ -4,8 +4,7 @@
     python tools/check_agent_files.py
 
 Exit code 1 lists every problem: a file over its line budget, a skill whose frontmatter name
-differs from its directory or lacks a description, a skill without its .claude/skills link or
-its line in AGENTS.md. Standard library only.
+differs from its directory or lacks a description, a skill without its line in AGENTS.md. Standard library only.
 """
 import argparse
 from pathlib import Path
@@ -35,7 +34,7 @@ def problems() -> list:
         if guide != root and lines(guide) > BUDGET["guide"]:
             found.append(f"{guide.relative_to(ROOT)} has {lines(guide)} lines (limit {BUDGET['guide']})")
     index = root.read_text()
-    for skill in sorted((ROOT / ".agents/skills").glob("*/SKILL.md")):
+    for skill in sorted((ROOT / "skills").glob("*/SKILL.md")):
         name = skill.parent.name
         text = skill.read_text()
         front = re.match(r"---\n(.*?)\n---\n", text, re.S)
@@ -46,10 +45,7 @@ def problems() -> list:
             found.append(f"{name}: description must say what the skill does and when to use it")
         if lines(skill) > BUDGET["skill"]:
             found.append(f"{name}: SKILL.md has {lines(skill)} lines (limit {BUDGET['skill']})")
-        link = ROOT / ".claude/skills" / name
-        if not link.is_symlink() or link.resolve() != skill.parent.resolve():
-            found.append(f"{name}: missing link .claude/skills/{name} -> ../../.agents/skills/{name}")
-        if f".agents/skills/{name}/SKILL.md" not in index:
+        if f"skills/{name}/SKILL.md" not in index:
             found.append(f"{name}: not listed in AGENTS.md")
     return found
 
