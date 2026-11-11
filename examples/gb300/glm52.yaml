@@ -1,6 +1,6 @@
 # GLM-5.2 (NVFP4) on GB300, as in the paper: one TP4 worker per 4-GPU node, EAGLE speculative
 # decoding, the planner on. `evolving-infra serve --config` reads the top part; `slurm/submit.py`
-# also reads `benchmark` and `slurm`.
+# also reads `benchmarks` and `slurm`.
 
 model: /models/GLM-5.2-NVFP4
 served_model_name: glm-5.2
@@ -36,14 +36,25 @@ engine_args:
 planner:
   prefill_shape_prior: glm52-gb300-tp4
 
-# Replay of the paper's Claude Code workload (Hugging Face crmsndu/evolving-infra-traces) on 9
-# nodes starting as 6P3D: 126 concurrent tasks for 5400 s; the score covers [1800 s, 5400 s).
-benchmark:
-  prefill_workers: 6
-  workload: claude-code/cc062126-stationary-full-v1.jsonl
-  concurrency: 126
-  duration: 5400
-  warmup: 1800
+# The paper's replays (Hugging Face crmsndu/evolving-infra-traces) on 9 nodes starting as 6P3D:
+# 5400 s each; the score covers [1800 s, 5400 s). `slurm/submit.py --benchmark <name>` runs one.
+benchmarks:
+  claude-code:                 # 126 concurrent tasks (the paper also ran 90 and 108)
+    prefill_workers: 6
+    workload: claude-code/cc062126-stationary-full-v1.jsonl
+    concurrency: 126
+    duration: 5400
+    warmup: 1800
+  putnam:                      # 224 concurrent agents (also 256 and 288), 16 client processes
+    prefill_workers: 6
+    workload: putnam/decode-heavy-100.stationary.jsonl
+    shards: putnam/shards.json
+    processes: 16
+    concurrency: 224
+    duration: 5400
+    warmup: 1800
+    router_args:
+      - --symmetric-pd-decode-host-return    # a D returns the KV it decoded to the request's P
 
 # For slurm/submit.py.
 slurm:

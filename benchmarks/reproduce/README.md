@@ -34,6 +34,7 @@ Every run uses nine GB300 nodes with four GPUs each, on one RDMA network:
 | Replay client processes | 16 | 1 | 16 |
 | Planning window | 600 s | 600 s | 300 s |
 | Router wait model (`--co-schedule-trade-wait`) | `ledger`, λ = 4.6 | `ledger`, λ = 4.6 | `e3`, λ and rate `auto` |
+| Decode worker returns decoded KV to the prefill worker (`--symmetric-pd-decode-host-return`) | on | off | off |
 | Workload ([Hugging Face](https://huggingface.co/datasets/crmsndu/evolving-infra-traces)) | `putnam/decode-heavy-100.stationary.jsonl` | `claude-code/cc062126-stationary-full-v1.jsonl` | `osworld/osworld2-kimi-formal.jsonl` and `osworld/screenshots/` |
 
 With 16 client processes, each process replays one shard of the workload at 1/16 of the
@@ -48,7 +49,7 @@ concurrent agents as one Slurm job: it serves on nine nodes, replays, and writes
 python examples/slurm/submit.py --account <account> --partition <partition> --image <image>
 ```
 
-For 90 or 108 agents, set `benchmark.concurrency` in
+For 90 or 108 agents, set `benchmarks.claude-code.concurrency` in
 [`glm52.yaml`](../../examples/gb300/glm52.yaml). To score another window of a finished run:
 
 ```bash

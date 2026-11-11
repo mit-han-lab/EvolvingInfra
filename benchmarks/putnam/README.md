@@ -15,17 +15,25 @@ prompt with the model's chat template and asks for the recorded number of output
 
 Nine GB300 nodes, GLM-5.2, starting as 6P3D, planning window 600 s, router wait model `ledger`
 with λ = 4.6; the engine and router settings are those of
-[`examples/gb300/glm52.yaml`](../../examples/gb300/glm52.yaml). The replay uses 16 client
-processes: each replays one shard at 1/16 of the concurrency (224, 256 or 288 agents in
-total). Write the shards with the dataset's script:
+[`examples/gb300/glm52.yaml`](../../examples/gb300/glm52.yaml), plus the router's
+`--symmetric-pd-decode-host-return`: a decode worker returns the KV it decoded to the
+request's prefill worker. The replay uses 16 client processes: each replays one shard at 1/16
+of the concurrency (224, 256 or 288 agents in total). As one Slurm job, at 224 agents:
+
+```bash
+python examples/slurm/submit.py --config examples/gb300/glm52.yaml --benchmark putnam \
+  --account <account> --partition <partition> --image <image>
+```
+
+For 256 or 288 agents set `benchmarks.putnam.concurrency`. Without Slurm, serve with the
+benchmark's `router_args` in the config, write the shards with the dataset's script, and
+start one replay process per shard, two seconds apart
+([`replay/README.md`](../replay/README.md), `processes=16 process=<i>`):
 
 ```bash
 hf download crmsndu/evolving-infra-traces --repo-type dataset --local-dir traces && cd traces
 python make_shards.py putnam/decode-heavy-100.stationary.jsonl putnam/shards.json shards/putnam
 ```
-
-Each process runs the command of [`replay/README.md`](../replay/README.md) on its shard
-with `processes=16 process=<i>` and writes `trie-results-<i>.json`; [`replay/score.py`](../replay/score.py) scores the directory.
 
 Results of the paper's runs on [1800 s, 5400 s), two runs per setting:
 

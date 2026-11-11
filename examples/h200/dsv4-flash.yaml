@@ -1,6 +1,6 @@
 # DeepSeek-V4-Flash on H200, as in the paper's H200 runs: two TP4 workers per 8-GPU node, DSPARK
 # speculative decoding. `evolving-infra serve --config` reads the top part; `slurm/submit.py` and
-# `modal/app.py` also read `benchmark`.
+# `modal/app.py` also read `benchmarks`.
 
 model: /models/DeepSeek-V4-Flash
 served_model_name: deepseek-v4-flash
@@ -26,13 +26,14 @@ planner:
 
 # Replay of the Claude Code workload for this tokenizer on one node (1P1D): 16 concurrent tasks
 # for 1200 s; the score covers [600 s, 1200 s).
-benchmark:
-  planner: false               # a fixed 1P1D split
-  prefill_workers: 1
-  workload: claude-code/cc062126-dsv4-flash.jsonl
-  concurrency: 16
-  duration: 1200
-  warmup: 600
+benchmarks:
+  claude-code:
+    serve_planner: false       # a fixed 1P1D split
+    prefill_workers: 1
+    workload: claude-code/cc062126-dsv4-flash.jsonl
+    concurrency: 16
+    duration: 1200
+    warmup: 600
 
 slurm:
   nodes: 1

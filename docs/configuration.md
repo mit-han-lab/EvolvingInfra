@@ -174,6 +174,11 @@ holds what it cannot detect.
 | `planner` | planner arguments ([Dynamic P/D](dynamic-pd.md)); used with `--planner` | none |
 | `base` | another config file to start from; `engine_args` replace the base's flags of the same name | none |
 
+`examples/slurm/submit.py` also reads `benchmarks` (a map of name to replay: `workload`,
+`concurrency`, `duration`, `warmup`, `prefill_workers`; `processes` and `shards` for several
+client processes; `router_args`, `engine_args` and `planner` added to the served config for
+that benchmark) and `slurm` (site settings).
+
 When the stack is ready the first host writes `READY` and `stack.json` (router and tokenizer
 URLs, model, block size, GPU and worker counts) to its work directory;
 `benchmarks/replay/run_trie.py stack=<work dir>` reads it.

@@ -20,10 +20,10 @@ A full run holds nine GPU nodes for about two hours (20 minutes to start, 90 min
 replay). Confirm with the owner before submitting.
 
 Read the workload's README and `AGENTS.md` first: they give the paper's setup, its results and
-the rules of that workload. The steps below are the Claude Code experiment, which
-`submit.py` runs as one job. Putnam and OSWorld use 16 replay processes and their own
-settings: start the stack with the [`serve`](../serve/SKILL.md) skill, write the shards as
-the workload's README says, run one replay process per shard on the host that runs the
+the rules of that workload. `submit.py --benchmark <name>` runs a benchmark of the config as
+one job: `claude-code` (the default) and `putnam` in `examples/gb300/glm52.yaml`. OSWorld
+has no benchmark entry: start the stack with the [`serve`](../serve/SKILL.md) skill, write
+the shards as its README says, run one replay process per shard on the host that runs the
 router, then score and compare as in steps 3 and 4.
 
 ## 1. Submit

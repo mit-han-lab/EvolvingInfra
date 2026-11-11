@@ -29,7 +29,7 @@ runs it at 126 concurrent agents as one Slurm job:
 python examples/slurm/submit.py --account <account> --partition <partition> --image <image>
 ```
 
-For 90 or 108 agents set `benchmark.concurrency` in
+For 90 or 108 agents set `benchmarks.claude-code.concurrency` in
 [`glm52.yaml`](../../examples/gb300/glm52.yaml).
 
 Results of the paper's runs on [1800 s, 5400 s), two runs per setting:
