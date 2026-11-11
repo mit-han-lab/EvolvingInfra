@@ -78,7 +78,7 @@ def test_config_and_planner(stack):
     assert stack(["--config", "examples/gb300/glm52.yaml"]).planner is None, "off without --planner"
     s = stack(["--config", "examples/gb300/glm52.yaml", "--planner"], hosts=("a", "b"), rank=1)
     assert [(w.ip, w.gpus, w.role) for w in s.workers] == [("10.0.0.1", 4, "prefill"), ("10.0.0.2", 4, "decode")]
-    assert s.eagle and s.planner == {"prefill_shape_prior": "glm52-gb300-tp4"}
+    assert s.eagle and s.planner == {"prefill_shape_prior": "glm52-gb300-tp4", "cold_start_max_wait_secs": 1}
     assert [w.name for w in s.mine] == ["w1"]
     argv = s.engine_argv(s.mine[0], {})
     assert "--speculative-algorithm=EAGLE" in argv and "--sched-trace-dir" in argv

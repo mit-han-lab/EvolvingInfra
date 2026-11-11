@@ -35,6 +35,7 @@ engine_args:
   - --weight-loader-drop-cache-after-load
 planner:
   prefill_shape_prior: glm52-gb300-tp4
+  cold_start_max_wait_secs: 1    # learn from the start of the replay, as the paper's runs did
 
 # The paper's replays (Hugging Face crmsndu/evolving-infra-traces) on 9 nodes starting as 6P3D:
 # 5400 s each; the score covers [1800 s, 5400 s). `slurm/submit.py --benchmark <name>` runs one.
