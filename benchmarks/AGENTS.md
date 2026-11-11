@@ -21,7 +21,7 @@ changing that workload: [`claude-code/`](claude-code/AGENTS.md), [`putnam/`](put
 - **Before blaming the system for a gap, compare the work and the stages**: uncached tokens
   and output tokens per request, time to first token, decode time per token, then per
   worker the decode step time and accepted draft length at equal batch size
-  (the `debug-run` skill has the scripts).
+  (the `diagnose-run` skill has the scripts).
 - **A workload row is never edited by hand.** Converters and `trie/scripts/portable_blocks.py`
   write workloads; a file's sha256 identifies the run's input.
 - **The same seed gives the same replay.** `warm_start=stationary` cuts each first trace at a

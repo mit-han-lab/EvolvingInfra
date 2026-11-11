@@ -1,9 +1,9 @@
 ---
-name: pr-checklist
+name: check-pr
 description: Check an Evolving Infra change and its pull request description against the project's contribution rules. Use when about to open a pull request (drafts included, e.g. `gh pr create`), before pushing review fixes, or when reviewing someone else's pull request.
 ---
 
-# PR Checklist
+# Check a pull request
 
 Check a change and its pull request description against the contribution rules of
 [`AGENTS.md`](../../AGENTS.md), and fill the description. As the author, fix what fails and

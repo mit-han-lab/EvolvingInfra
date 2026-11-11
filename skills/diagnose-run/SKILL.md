@@ -1,9 +1,9 @@
 ---
-name: debug-run
-description: Find why an Evolving Infra run failed to start, failed a request, or scored below a reference. Use when `evolving-infra serve` exits or never prints ready, a replay or request errors, or a benchmark is slower than expected.
+name: diagnose-run
+description: Find why an Evolving Infra run failed to start, failed a request, or scored below a reference. Use when `evolving-infra serve` exits or never prints ready, a replay or request errors, or a benchmark is slower than expected. Not for running or scoring a benchmark; use `run-benchmark`.
 ---
 
-# Debug a run
+# Diagnose a run
 
 Find the root cause of a run that did not start, failed a request, or scored below a
 reference, with the log lines or numbers that show it.
@@ -68,7 +68,7 @@ request returns a reply.
 
 A run can differ from the reference in more than one way: go through steps 1 to 4 for both
 runs before concluding. `<run>/bench` is the directory with `trie-lifecycle-*.jsonl`; scripts
-are in `skills/debug-run/scripts/` and `skills/run-benchmark/scripts/`.
+are in `skills/diagnose-run/scripts/` and `skills/run-benchmark/scripts/`.
 
 1. **When the planner switched.** `switch_times.py <planner dir> <run>/bench` for both runs
    prints the switches on the replay clock. Pick, for each P/D split, a window in which both

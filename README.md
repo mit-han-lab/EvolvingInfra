@@ -109,11 +109,11 @@ It serves, replays the Claude Code workload and writes the score
 component by hand.
 
 For another model, GPU or cluster, give your coding agent the
-[`serve`](skills/serve/SKILL.md) skill: "serve `<model>` on these hosts with Evolving Infra,
-following `skills/serve/SKILL.md`". It inspects the machines, derives the config for the
+[`deploy-stack`](skills/deploy-stack/SKILL.md) skill: "serve `<model>` on these hosts with Evolving Infra,
+following `skills/deploy-stack/SKILL.md`". It inspects the machines, derives the config for the
 model, starts the stack and checks that it answers. The other skills run the benchmark
 ([`run-benchmark`](skills/run-benchmark/SKILL.md)) and find why a run failed or is slow
-([`debug-run`](skills/debug-run/SKILL.md)).
+([`diagnose-run`](skills/diagnose-run/SKILL.md)).
 
 To connect an agent, point its OpenAI client at the router and tag each request with the agent
 and branch it belongs to:
@@ -152,7 +152,7 @@ We welcome contributions, and we recommend making them with a coding agent:
 - Point the agent at [`AGENTS.md`](AGENTS.md): the contribution rules, the repository map and
   the commands to build and test.
 - Before opening a pull request, have the agent run the
-  [`pr-checklist`](skills/pr-checklist/SKILL.md) skill. It checks the change and fills
+  [`check-pr`](skills/check-pr/SKILL.md) skill. It checks the change and fills
   the pull request template: claims, the evidence for each, and the root cause of a fix.
 - Attach the agent's session transcript to your pull request, so
   reviewers can see how the change was made and checked. Scrub it first:

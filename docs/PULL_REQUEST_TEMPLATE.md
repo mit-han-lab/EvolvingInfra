@@ -23,7 +23,7 @@ the P/D path, the steps of one request through P and D that the change affects. 
 
 ---
 
-- [ ] I ran the `pr-checklist` skill (mandatory for agents).
+- [ ] I ran the `check-pr` skill (mandatory for agents).
 - [ ] AI assistance was used in this pull request.
 - [ ] Owner: @<!-- the person who read every changed line and answers the review -->
 - [ ] User-visible changes are in the docs.

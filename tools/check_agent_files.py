@@ -7,7 +7,8 @@ Exit code 1 lists every problem: a file over its line budget; a skill whose fron
 differs from its directory or whose description lacks "Use when"; a skill whose sections differ
 from skills/SKILL_TEMPLATE.md (Scope with Reads, Writes, Never changes and Outside the
 repository; Inputs; Steps numbered from 1, each with a Check line; Returns; optional Pitfalls);
-a path or link in a skill that does not exist; a skill without its line in AGENTS.md.
+a path or link in a skill that does not exist; a skill without its line in AGENTS.md
+and in skills/README.md.
 Standard library only.
 """
 import argparse
@@ -73,6 +74,7 @@ def problems() -> list:
         if guide != root and lines(guide) > BUDGET["guide"]:
             found.append(f"{guide.relative_to(ROOT)} has {lines(guide)} lines (limit {BUDGET['guide']})")
     index = root.read_text()
+    catalog = (ROOT / "skills/README.md").read_text()
     for skill in sorted((ROOT / "skills").glob("*/SKILL.md")):
         name = skill.parent.name
         text = skill.read_text()
@@ -87,6 +89,8 @@ def problems() -> list:
         found += [f"{name}: {problem}" for problem in skill_format(skill, text)]
         if f"skills/{name}/SKILL.md" not in index:
             found.append(f"{name}: not listed in AGENTS.md")
+        if f"]({name}/SKILL.md)" not in catalog:
+            found.append(f"{name}: not listed in skills/README.md")
     return found
 
 

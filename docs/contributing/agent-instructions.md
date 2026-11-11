@@ -67,4 +67,5 @@ checks every rule below that a script can check.
 - Links are relative to the skill's file and must resolve.
 - A skill enters the repository after a fresh agent session has followed it to the end on a
   real task. Say in the pull request what that task was.
-- List the skill in `AGENTS.md`.
+- Name it with a verb and its object (`deploy-stack`, `check-pr`).
+- List the skill in `AGENTS.md` and in [`skills/README.md`](../../skills/README.md).

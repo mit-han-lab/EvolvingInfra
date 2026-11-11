@@ -1,6 +1,6 @@
 ---
 name: run-benchmark
-description: Run the paper's replay benchmark on Evolving Infra, score it and compare it with the reference results. Use when asked to reproduce the paper's numbers, benchmark a change, or produce the performance table of a pull request.
+description: Run the paper's replay benchmark on Evolving Infra, score it and compare it with the reference results. Use when asked to reproduce the paper's numbers, benchmark a change, or produce the performance table of a pull request. Not for finding why a run failed or is slower than the reference; use `diagnose-run`.
 ---
 
 # Run the replay benchmark
@@ -35,7 +35,7 @@ reference results.
 Read the workload's README and `AGENTS.md` first: they give the paper's setup, its results and
 the rules of that workload. `submit.py --benchmark <name>` runs a benchmark of the config as
 one job: `claude-code` (the default) and `putnam` in `examples/gb300/glm52.yaml`. OSWorld
-has no benchmark entry: start the stack with the [`serve`](../serve/SKILL.md) skill, write
+has no benchmark entry: start the stack with the [`deploy-stack`](../deploy-stack/SKILL.md) skill, write
 the shards as its README says, run one replay process per shard on the host that runs the
 router, then score and compare as in steps 3 and 4.
 
@@ -49,7 +49,7 @@ path inside the container), and the replay command (`run_trie.py` with `stack`, 
 `duration` and `output_dir`; every other replay setting is the paper's by default).
 Then run it without `--dry-run`. `--output-dir` is on storage every node sees. Site settings
 can also stay in a copy of the config (`slurm:` section). Without Slurm: start the stack with
-the [`serve`](../serve/SKILL.md) skill, then run the replay and scoring commands of the dry
+the [`deploy-stack`](../deploy-stack/SKILL.md) skill, then run the replay and scoring commands of the dry
 run on the host that runs the router.
 
 **Check**: the dry run shows the `#SBATCH` line, the model mounted at the config's `model`
@@ -62,7 +62,7 @@ directory per host with `logs/<process>.log`, `bench.log` (the replay client), a
 `score.json`. The host directory that holds `READY` is the one that runs the router and the
 planner ("the head" below). The job stops the stack when the replay ends, so `srun: ...
 Killed` lines at the end of `serve.log` are the normal stop. If `serve.log` shows
-`<name> exited` or the job ends early, use the [`debug-run`](../debug-run/SKILL.md) skill.
+`<name> exited` or the job ends early, use the [`diagnose-run`](../diagnose-run/SKILL.md) skill.
 
 **Check**: `serve.log` shows `ready: ... (9 workers, 6P3D)` and `score.json` exists when the
 job ends.
@@ -103,7 +103,7 @@ P/D split.
    A whole-window gap with equal per-split results is a gap in when the planner switched.
 3. Three runs of the reference configuration differ by about 4 % in requests per second, on
    the whole window and on the 6P3D window. For a larger gap on a like-for-like window, use
-   "Slower than the reference" in [`debug-run`](../debug-run/SKILL.md) before concluding.
+   "Slower than the reference" in [`diagnose-run`](../diagnose-run/SKILL.md) before concluding.
 
 **Check**: both runs are compared on the same window and the same P/D split.
 

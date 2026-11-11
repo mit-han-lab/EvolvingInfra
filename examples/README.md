@@ -10,9 +10,9 @@ from: the same config runs on a host you log in to, under Slurm, or on Modal.
 
 | Where it runs | How |
 |---|---|
-| A host with a shell | `evolving-infra serve --config <config>` on every host ([`serve`](../skills/serve/SKILL.md) skill) |
+| A host with a shell | `evolving-infra serve --config <config>` on every host ([`deploy-stack`](../skills/deploy-stack/SKILL.md) skill) |
 | Slurm with Pyxis | [`slurm/submit.py`](slurm/submit.py)` --config <config>`: serve, replay and score as one job |
 | Modal | [`modal/`](modal/README.md): builds the image and runs two H200 benchmarks |
 
-For other hardware or another model, the [`serve`](../skills/serve/SKILL.md) skill derives a
+For other hardware or another model, the [`deploy-stack`](../skills/deploy-stack/SKILL.md) skill derives a
 config; add it here as `<hardware>/<model>.yaml`.

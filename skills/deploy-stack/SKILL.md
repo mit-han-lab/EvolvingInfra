@@ -1,9 +1,9 @@
 ---
-name: serve
-description: Install and start Evolving Infra on one host or several and confirm it answers a request. Use when asked to deploy, launch, serve or try Evolving Infra on a machine or cluster, to serve a model or GPU the examples do not cover, or to adapt the launch to an environment (Docker, Slurm with Pyxis, source install).
+name: deploy-stack
+description: Install and start Evolving Infra on one host or several and confirm it answers a request. Use when asked to deploy, launch, serve or try Evolving Infra on a machine or cluster, to serve a model or GPU the examples do not cover, or to adapt the launch to an environment (Docker, Slurm with Pyxis, source install). Not for a stack that does not start or answer; use `diagnose-run`.
 ---
 
-# Serve Evolving Infra
+# Deploy Evolving Infra
 
 Start Evolving Infra on one host or several and confirm that it answers a request. Needs GPU
 hosts with RDMA NICs and the model at the same path on each.
@@ -158,7 +158,7 @@ the reply. Each process logs to `run/logs/<name>.log`; `SIGTERM` to `evolving-in
 stops everything it started.
 
 **Check**: `run/READY` exists and the reply's `choices[0].text` holds generated text. If it
-does not become ready, or the request fails, use the [`debug-run`](../debug-run/SKILL.md)
+does not become ready, or the request fails, use the [`diagnose-run`](../diagnose-run/SKILL.md)
 skill.
 
 ## Returns

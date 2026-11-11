@@ -21,7 +21,7 @@ moves through it.
 - **User-visible changes update the docs in the same pull request**: flags, defaults,
   environment variables, config keys, endpoints.
 - Before opening a pull request or asking for another review, run the
-  [`pr-checklist`](skills/pr-checklist/SKILL.md) skill and address what it finds.
+  [`check-pr`](skills/check-pr/SKILL.md) skill and address what it finds.
 
 ## 2. Repository map
 
@@ -76,10 +76,10 @@ Skills live in `skills/`. To use one, read its `SKILL.md` and follow it.
 
 | Skill | Scope | Use it to |
 |---|---|---|
-| [`pr-checklist`](skills/pr-checklist/SKILL.md) | repository | check a change and its description before a pull request or a re-review |
-| [`serve`](skills/serve/SKILL.md) | `evolving_infra/launch/`, `examples/`, `docker/` | install and start the stack on one host or several; serve a model or GPU without an example |
+| [`check-pr`](skills/check-pr/SKILL.md) | repository | check a change and its description before a pull request or a re-review |
+| [`deploy-stack`](skills/deploy-stack/SKILL.md) | `evolving_infra/launch/`, `examples/`, `docker/` | install and start the stack on one host or several; serve a model or GPU without an example |
 | [`run-benchmark`](skills/run-benchmark/SKILL.md) | `examples/`, `benchmarks/` | run the paper's replay benchmark, score it and compare it with the reference |
-| [`debug-run`](skills/debug-run/SKILL.md) | repository, read-only | find why a run did not start, failed a request, or scored below the reference |
+| [`diagnose-run`](skills/diagnose-run/SKILL.md) | repository, read-only | find why a run did not start, failed a request, or scored below the reference |
 
 Each skill follows [`skills/SKILL_TEMPLATE.md`](skills/SKILL_TEMPLATE.md): its scope (what it
 reads, writes, never changes, and does outside the repository), its inputs, numbered steps that
