@@ -16,9 +16,10 @@ Every run uses nine GB300 nodes with four GPUs each, on one RDMA network:
   cost function with peer pulls, round-robin decode, late decode choice (`fit_req`), and role
   changes from the planner.
 - **Planner.** The nine workers start as 6P3D. The planner learns its iteration-time models
-  during the first 1800 s, then decides at the end of every planning window, on 60 s slices,
-  and switches when the mean gain exceeds two standard errors. The tables below list the
-  splits it chose.
+  during the first 1800 s, cold start included (`cold_start_max_wait_secs: 1` in the planner
+  arguments; by default it first waits for the cache to warm up), then decides at the end of
+  every planning window, on 60 s slices, and switches when the mean gain exceeds two standard
+  errors. The tables below list the splits it chose.
 - **Replay.** Trie replays the recorded agents through the prepared path for 5400 s at a fixed
   number of concurrent agents, replacing each finished agent with a new one. Later prompts
   carry the model's own earlier outputs (`replay_context_mode=actual_output`,

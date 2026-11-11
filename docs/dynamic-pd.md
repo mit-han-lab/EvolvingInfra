@@ -29,7 +29,9 @@ The planner (`python -m evolving_infra.planner control`) runs in three phases:
 - **Cold start.** From the first completed request it computes, every minute, the share of input
   tokens served from cache. When two consecutive minutes differ by at most 0.3 percentage points, the
   cold start is over. A minute with no cache hit at all does not count, and learning starts anyway
-  30 minutes after the first completed request.
+  30 minutes after the first completed request (`--cold-start-max-wait-secs`). With a wait of 1 s
+  learning starts at the first completed request and covers the cold start; the paper's runs
+  did this, and [`examples/gb300`](../examples/gb300/README.md) sets it.
 - **Learning** (default 30 minutes). It reads each engine's scheduler step traces and, at the
   end, fits one step-time model per worker: prefill time from new tokens, attention work and
   restored tokens; decode time from batch size and active experts.
