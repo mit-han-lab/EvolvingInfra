@@ -4,7 +4,8 @@
     python tools/check_agent_files.py
 
 Exit code 1 lists every problem: a file over its line budget, a skill whose frontmatter name
-differs from its directory or lacks a description, a skill without its line in AGENTS.md. Standard library only.
+differs from its directory or lacks a description, a skill without its Scope, Inputs and
+Returns lines or with a Scope path that does not exist, a skill without its line in AGENTS.md. Standard library only.
 """
 import argparse
 from pathlib import Path
@@ -45,6 +46,15 @@ def problems() -> list:
             found.append(f"{name}: description must say what the skill does and when to use it")
         if lines(skill) > BUDGET["skill"]:
             found.append(f"{name}: SKILL.md has {lines(skill)} lines (limit {BUDGET['skill']})")
+        head = text[front.end():].split("\n## ", 1)[0] if front else ""
+        labels = re.findall(r"^\*\*(Scope|Inputs|Returns)\*\*:", head, re.M)
+        if labels != ["Scope", "Inputs", "Returns"]:
+            found.append(f"{name}: needs **Scope**, **Inputs** and **Returns** lines under the title, in this order")
+        scope = re.search(r"^\*\*Scope\*\*: (.*?)\.", head, re.M | re.S)
+        paths = re.findall(r"`([^`]+)`", scope.group(1)) if scope else []
+        if scope and not paths and not scope.group(1).startswith("repository"):
+            found.append(f"{name}: Scope is `repository` or a list of directories")
+        found += [f"{name}: Scope path {p} does not exist" for p in paths if not (ROOT / p).exists()]
         if f"skills/{name}/SKILL.md" not in index:
             found.append(f"{name}: not listed in AGENTS.md")
     return found

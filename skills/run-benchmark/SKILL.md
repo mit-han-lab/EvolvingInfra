@@ -5,6 +5,8 @@ description: Run the paper's replay benchmark on Evolving Infra, score it and co
 
 # Run the replay benchmark
 
+**Scope**: `examples/`, `benchmarks/replay/`. Runs and scores; changes no code and no
+replay setting of the reference.
 **Inputs**: a config ([`examples/gb300/glm52.yaml`](../../examples/gb300/glm52.yaml) for the
 paper's Claude Code experiment), the cluster (Slurm account, partition, the runtime image),
 and what the result is compared with.

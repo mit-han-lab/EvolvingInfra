@@ -37,8 +37,16 @@ Skills live in `skills/<name>/` and follow the
 
 - Frontmatter: `name` equals the directory name; `description` says what the skill does and
   when to use it.
-- A skill states its purpose, its inputs, numbered steps, and what it returns. Scripts go in
-  `scripts/`, long reference material in `references/`.
+- Under the title, three lines in this order:
+  - `**Scope**`: `repository`, or the directories the skill works in. Say what it writes and
+    what it leaves alone.
+  - `**Inputs**`: what the agent needs before starting, and what to ask the person for.
+  - `**Returns**`: what the agent reports at the end.
+- Then numbered steps. Scripts go in `scripts/`, long reference material in `references/`.
+- **Exact commands or guidance.** A step that reproduces the paper gives the exact command and
+  config, so results match. A step that depends on the reader's model, GPU or cluster says
+  how to find the answer (what to inspect, what each setting means, how to check it) and does
+  not ship a guessed command.
 - A skill enters the repository after a fresh agent session has followed it to the end on a
   real task. Say in the pull request what that task was.
 - List the skill in `AGENTS.md`.

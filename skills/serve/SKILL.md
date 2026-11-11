@@ -1,10 +1,12 @@
 ---
 name: serve
-description: Install and start Evolving Infra on one host or several and confirm it answers a request. Use when asked to deploy, launch, serve or try Evolving Infra on a machine or cluster, or to adapt the launch to an environment (Docker, Slurm with Pyxis, source install, another model).
+description: Install and start Evolving Infra on one host or several and confirm it answers a request. Use when asked to deploy, launch, serve or try Evolving Infra on a machine or cluster, to serve a model or GPU the examples do not cover, or to adapt the launch to an environment (Docker, Slurm with Pyxis, source install).
 ---
 
 # Serve Evolving Infra
 
+**Scope**: `launch/`, `examples/`, `docker/`. Writes configs and job scripts; a new model or
+cluster does not need a change to `engine/`, `router/` or `planner/`. If it seems to, stop and say why.
 **Inputs**: the model directory, the hosts (one, or a list), and how commands reach them
 (a shell on each, or a scheduler). Ask for what is missing; do not guess host names.
 **Returns**: the router URL, the workers and their starting roles, the work directory with
@@ -45,14 +47,44 @@ found; `peer memory 0` means the module is not loaded and transfers go through h
 | one | [`examples/gb300/glm52-1node.yaml`](../../examples/gb300/glm52-1node.yaml) | the host's GPUs split into one P and one D |
 | several | [`examples/gb300/glm52.yaml`](../../examples/gb300/glm52.yaml) | one worker per host; `--prefill-workers N` start as P |
 
-For another model or GPU, copy a config, set `model`, `served_model_name`, `page_size` and the
-`engine_args` the model needs ([`docs/README.md`](../../docs/README.md#models-and-hardware)).
-Config paths are relative to the repository checkout; the image has the same files under
+These two are the paper's setup (GLM-5.2 on GB300); use them unchanged to reproduce it. For
+any other model or GPU, write the config yourself with the next section. Config paths are relative to the repository checkout; the image has the same files under
 `/opt/evolving-infra` (its working directory). A child config with `base:` replaces single
 flags of its base and needs that file beside it, so copy both when copying one. If the engine stops with
 "Loaded weights leave no GPU memory for the KV cache", the message gives the smallest
 `--mem-fraction-static`; raise it in the config or give each worker more GPUs
 (`--gpus-per-worker`).
+
+### A model or GPU without an example
+
+The repository has no config to copy for it. Derive one, on one host first:
+
+1. **Start from the nearest example.** Copy `glm52-1node.yaml` with its base into a new
+   directory `examples/<hardware>/` and set `model` and `served_model_name`. The model
+   directory needs `tokenizer.json`: the frontend reads it.
+2. **Engine flags.** The engine takes SGLang's flags. Take the model's own flags
+   (quantization, attention and MoE backends, `--trust-remote-code`) from its model card or
+   its SGLang launch command, and replace the GLM-5.2 ones. Drop every `--dsa-*` flag for a
+   model without DSA attention. Keep the flags that are not about the model (CUDA graphs,
+   timeouts, loader).
+3. **`page_size`.** The KV block size, shared by engine, router and KV directory; the launcher
+   passes this one value to all three. Tested values: 64 (GLM-5.2), 256 (DeepSeek-V4-Flash,
+   `deploy/modal/stack.py`). Keep 64 unless the model's attention backend requires another.
+4. **Speculative decoding.** Keep the `--speculative-*` flags only when the model ships a draft
+   head, with that head's algorithm; otherwise remove them all. The launcher tells the router
+   from the flags.
+5. **Memory and TP.** Start it. If the engine stops with "Loaded weights leave no GPU memory
+   for the KV cache", the message gives the smallest `--mem-fraction-static`; raise it, or
+   give each worker more GPUs with `gpus_per_worker`. Lower `--max-running-requests` and the
+   prefill chunk when little KV memory is left.
+6. **Verify** with step 5 below on one host, then on several.
+7. **Planner last.** `--planner` needs `planner.prefill_shape_prior`: a named prior of
+   `planner/perf_model/priors.py` or the coefficients fitted for this model and GPU
+   ([`docs/dynamic-pd.md`](../../docs/dynamic-pd.md)). Serve with a fixed split until then.
+
+Report the config with the reply it produced. A config that served a request belongs in the
+repository: open a pull request with it and a row in
+[`docs/README.md`](../../docs/README.md#models-and-hardware).
 
 ## 4. Start
 

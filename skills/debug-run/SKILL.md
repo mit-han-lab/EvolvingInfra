@@ -5,6 +5,8 @@ description: Find why an Evolving Infra run failed to start, failed a request, o
 
 # Debug a run
 
+**Scope**: repository, read-only until the cause is named. Reads the run's logs and the code
+of every component they point to.
 **Inputs**: the work directory of `evolving-infra serve` (or `runs/<job id>/` of
 `submit.py`), and what was expected.
 **Returns**: the root cause with the log lines or numbers that show it, and the fix or the

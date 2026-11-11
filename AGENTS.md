@@ -74,14 +74,16 @@ Commits: imperative subject that says what changed for the user, body that says 
 
 Skills live in `skills/`. To use one, read its `SKILL.md` and follow it.
 
-- [`pr-checklist`](skills/pr-checklist/SKILL.md): check a change and its description
-  before a pull request or a re-review.
-- [`serve`](skills/serve/SKILL.md): install and start the stack on one host or
-  several, and confirm it answers.
-- [`run-benchmark`](skills/run-benchmark/SKILL.md): run the paper's replay benchmark,
-  score it and compare it with the reference.
-- [`debug-run`](skills/debug-run/SKILL.md): find why a run did not start, failed a
-  request, or scored below the reference.
+| Skill | Scope | Use it to |
+|---|---|---|
+| [`pr-checklist`](skills/pr-checklist/SKILL.md) | repository | check a change and its description before a pull request or a re-review |
+| [`serve`](skills/serve/SKILL.md) | `launch/`, `examples/`, `docker/` | install and start the stack on one host or several; serve a model or GPU without an example |
+| [`run-benchmark`](skills/run-benchmark/SKILL.md) | `examples/`, `benchmarks/replay/` | run the paper's replay benchmark, score it and compare it with the reference |
+| [`debug-run`](skills/debug-run/SKILL.md) | repository, read-only | find why a run did not start, failed a request, or scored below the reference |
+
+Each skill states its scope, its inputs and what it returns. Commands that reproduce the paper
+are exact; for anything that depends on your model, GPU or cluster, the skill says how to
+work it out.
 
 ## 5. Component guides
 

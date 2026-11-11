@@ -5,6 +5,8 @@ description: Check an Evolving Infra change and its pull request description aga
 
 # PR Checklist
 
+**Scope**: repository. Reads the whole diff; writes the pull request description and the
+transcript, and as the author also the fixes for what fails.
 **Inputs**: a branch (or an open pull request), and the person who owns it.
 **Returns**: a report with one entry per section below (passes, fails, could not verify),
 the follow-up work, the decisions that are the owner's, and the filled pull request

@@ -91,7 +91,7 @@ pip install -e ".[client,frontend,indexer,planner]"     # launcher, client, toke
 (cd router/core && cargo build --release --locked)      # router
 ```
 
-Start it on one node:
+To reproduce the paper's setup, GLM-5.2 on GB300, start it on one node:
 
 ```bash
 evolving-infra serve --config examples/gb300/glm52-1node.yaml
@@ -107,6 +107,13 @@ python examples/gb300/submit.py --account <account> --partition <partition> --im
 It serves, replays the Claude Code workload and writes the score
 ([examples/gb300](examples/gb300/README.md)). [Quickstart](docs/quickstart.md) starts each
 component by hand.
+
+For another model, GPU or cluster, give your coding agent the
+[`serve`](skills/serve/SKILL.md) skill: "serve `<model>` on these hosts with Evolving Infra,
+following `skills/serve/SKILL.md`". It inspects the machines, derives the config for the
+model, starts the stack and checks that it answers. The other skills run the benchmark
+([`run-benchmark`](skills/run-benchmark/SKILL.md)) and find why a run failed or is slow
+([`debug-run`](skills/debug-run/SKILL.md)).
 
 To connect an agent, point its OpenAI client at the router and tag each request with the agent
 and branch it belongs to:
