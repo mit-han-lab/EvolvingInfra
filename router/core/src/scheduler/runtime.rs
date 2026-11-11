@@ -17,7 +17,7 @@
 //! its reservation until the execution manager receives a terminal callback.
 
 use super::{
-    experimental_sticky, placement,
+    placement,
     policy::{validate_placement, DefaultCostModel, DefaultPlacementPolicy, PlacementPolicy},
 };
 
@@ -53,7 +53,9 @@ use placement::{
     TERM_EXPECTED_HIT_TOKENS, TERM_HIT_TOKENS, TERM_P_REASON, TERM_REUSE_GAIN, TERM_ROLE_PEN_D,
     TERM_ROLE_PEN_P, TERM_SCORE, TERM_XFER_COST,
 };
-use placement::{DSelect, PSelect};
+#[cfg(test)]
+use placement::DSelect;
+use placement::PSelect;
 use placement::{
     HitTokens, IndexerHits, Placement, PlacementError, PlacementRequest, RoleWeights, WorkerLoads,
 };
@@ -467,7 +469,6 @@ pub struct SymmetricPdRuntime {
     cfg: SymmetricPdConfig,
     /// `--symmetric-pd-decision-replay` table, when configured.
     replay: Option<DecisionReplay>,
-    experimental_sticky: Option<experimental_sticky::ExperimentSticky>,
     backend: Arc<Backend>,
     policy: Arc<dyn PlacementPolicy>,
     model: ModelId,
@@ -570,19 +571,6 @@ impl SymmetricPdRuntime {
             !cfg.external_role_control || replay.is_none(),
             "external role control conflicts with decision replay"
         );
-        let experimental_sticky = experimental_sticky::ExperimentSticky::from_environment();
-        if experimental_sticky.is_some() {
-            assert!(
-                replay.is_none() && indexer.is_none() && !cfg.pull_hint && !cfg.external_role_control,
-                "experimental sticky cannot combine replay, indexer or peer pulls"
-            );
-            assert!(
-                cfg.placement.force_split
-                    && cfg.placement.d_select == DSelect::RoundRobin
-                    && cfg.max_queue_wait_ms == 0,
-                "experimental sticky requires Split, D RR and no hold queue"
-            );
-        }
         let gateway_ca = cfg
             .gateway_cache_aware
             .clone()
@@ -596,7 +584,6 @@ impl SymmetricPdRuntime {
             gateway_ca,
             cost_function,
             replay,
-            experimental_sticky,
             backend: Backend::new(
                 registry,
                 model.clone(),
@@ -742,25 +729,12 @@ impl SymmetricPdRuntime {
             .is_some_and(|cf| cf.session_end(session))
     }
 
-    /// Header the routes must read the routing key from, when decision
-    /// replay is on.
-    /// Tell request handlers which optional routing-key header to read.
-    ///
-    /// # Inputs
-    /// `self`: replay and experimental-sticky configuration.
-    ///
-    /// # Outputs
-    /// The configured replay header, or `x-smg-routing-key` for sticky mode, or `None` when
-    /// neither mode is active.
+    /// The header that carries the decision-replay key, when
+    /// `--symmetric-pd-decision-replay` is configured.
     pub fn replay_header(&self) -> Option<&str> {
         self.replay
             .as_ref()
             .map(|_| self.cfg.decision_replay_header.as_str())
-            .or_else(|| {
-                self.experimental_sticky
-                    .as_ref()
-                    .map(|_| "x-smg-routing-key")
-            })
     }
 
     /// Decision-replay counters `(hit, unknown_key, exhausted, no_key)`.
@@ -1285,15 +1259,7 @@ impl SymmetricPdRuntime {
                     None
                 } else {
                     let transfer_seed = self.mint_transfer_seed();
-                    let pin = if let Some(sticky) = &self.experimental_sticky {
-                        Some(
-                            sticky
-                                .pair(input.routing_key.as_deref(), &weights, transfer_seed)
-                                .ok_or(SymmetricPdError::NoWorkers)?,
-                        )
-                    } else {
-                        pin.clone()
-                    };
+                    let pin = pin.clone();
                     let req = PlacementRequest {
                         hashes: input.hashes.clone().unwrap_or_default(),
                         prompt_len,
@@ -1384,11 +1350,7 @@ impl SymmetricPdRuntime {
             forced,
             indexer_ms,
             "dispatch",
-            if self.experimental_sticky.is_some() {
-                "experimental_sticky"
-            } else {
-                replay
-            },
+            replay,
         );
         Ok(Decision {
             placement,

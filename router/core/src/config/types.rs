@@ -264,9 +264,6 @@ pub enum PolicyKind {
     /// `ModelConfig::sticky`.
     #[value(name = "sticky")]
     Sticky,
-    /// Fixed-fleet comparison only: agent key -> observed SMG HTTP PD worker order.
-    #[value(name = "experimental_agent_sticky")]
-    ExperimentalAgentSticky,
     /// Co-scheduled routing + KV movement: prefer the max-cache-hit worker
     /// unless its pending uncached-prefill backlog exceeds a threshold, in
     /// which case either detour to an under-threshold worker (pulling the

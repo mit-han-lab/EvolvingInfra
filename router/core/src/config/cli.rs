@@ -1475,7 +1475,6 @@ impl Cli {
                 fallback_policy,
                 PolicyKind::Sticky
                     | PolicyKind::CacheAwareZmq
-                    | PolicyKind::ExperimentalAgentSticky
                     | PolicyKind::GatewayCacheAware
             ) {
                 return Err(anyhow!(

@@ -43,6 +43,16 @@ use crate::policies::{Policy, SelectionContext};
 use crate::server::metrics::{MetricsRegistry, StickyOutcome};
 use crate::workers::Worker;
 
+/// The request's routing key: the value of the sticky policy's header, when
+/// the model has a sticky configuration and the header is present and nonempty.
+pub fn routing_key<'a>(
+    model: &crate::config::ModelConfig,
+    headers: &'a axum::http::HeaderMap,
+) -> Option<&'a str> {
+    let name = model.sticky.as_ref()?.header_name.as_str();
+    headers.get(name)?.to_str().ok().filter(|key| !key.is_empty())
+}
+
 /// One routing-key → worker pin, with the last time it was referenced (used
 /// by the idle-eviction sweep).
 #[derive(Debug)]

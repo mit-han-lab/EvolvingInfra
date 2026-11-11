@@ -234,7 +234,7 @@ pub async fn chat_completions(
     // read the routing key from the operator-chosen header into the
     // selection context; the policy pins it to a worker. Other policies
     // leave `routing_key` `None` and ignore it.
-    let routing_key = crate::policies::experimental_agent_sticky::routing_key(
+    let routing_key = crate::policies::sticky::routing_key(
         &ctx.config.model, &headers,
     );
     // Salted requests publish KV events under a salt-seeded hash chain; the

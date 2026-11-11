@@ -5,7 +5,6 @@ pub mod active_load;
 pub mod cache_aware_zmq;
 pub mod decode_po2_smg;
 pub mod decode_tokens;
-pub mod experimental_agent_sticky;
 pub mod factory;
 #[cfg(test)]
 mod gateway_ca_golden_gen;

@@ -259,7 +259,7 @@ async fn dispatch(
         }
     }
 
-    let routing_key = crate::policies::experimental_agent_sticky::routing_key(
+    let routing_key = crate::policies::sticky::routing_key(
         &ctx.config.model, &headers,
     );
     // Salted requests publish KV events under a salt-seeded hash chain; the

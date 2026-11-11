@@ -3,7 +3,6 @@
 //! remains the owner of worker observations, reservations, and execution state.
 pub mod co_schedule;
 pub mod cost_function;
-mod experimental_sticky;
 pub mod placement;
 pub mod policy;
 pub mod role_drain;

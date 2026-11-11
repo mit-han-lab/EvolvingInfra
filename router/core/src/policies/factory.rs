@@ -5,7 +5,6 @@ use crate::config::{Config, ModelConfig, PolicyKind};
 use crate::discovery::ModelId;
 use crate::policies::{
     cache_aware_zmq::CacheAwareZmqPolicy,
-    experimental_agent_sticky::ExperimentalAgentStickyPolicy,
     gateway_cache_aware::GatewayCacheAwarePolicy,
     kv_events::{BlockSizeOracle, HashTree},
     load_based::LoadBasedPolicy,
@@ -32,7 +31,6 @@ fn build_sticky_fallback(kind: PolicyKind) -> Arc<dyn Policy> {
         PolicyKind::LoadBased => Arc::new(LoadBasedPolicy::new()),
         PolicyKind::CacheAwareZmq
         | PolicyKind::Sticky
-        | PolicyKind::ExperimentalAgentSticky
         | PolicyKind::CoSchedule
         | PolicyKind::SymmetricPd
         | PolicyKind::GatewayCacheAware => {
@@ -80,9 +78,6 @@ pub fn build_policy(
                 block_size_oracle,
             ))
         }
-        PolicyKind::ExperimentalAgentSticky => {
-            Arc::new(ExperimentalAgentStickyPolicy::from_environment())
-        }
         PolicyKind::Sticky => build_sticky(model),
         PolicyKind::GatewayCacheAware => Arc::new(GatewayCacheAwarePolicy::new(
             model.gateway_cache_aware.clone().unwrap_or_default(),
@@ -120,7 +115,6 @@ pub fn build_policy_kind_only(kind: PolicyKind) -> Arc<dyn Policy> {
                 BlockSizeOracle::new(),
             ))
         }
-        PolicyKind::ExperimentalAgentSticky => Arc::new(ExperimentalAgentStickyPolicy::from_environment()),
         PolicyKind::Sticky => {
             let s = crate::config::StickyConfig::default();
             Arc::new(StickyPolicy::new(
