@@ -78,7 +78,7 @@ Skills live in `skills/`. To use one, read its `SKILL.md` and follow it.
 |---|---|---|
 | [`pr-checklist`](skills/pr-checklist/SKILL.md) | repository | check a change and its description before a pull request or a re-review |
 | [`serve`](skills/serve/SKILL.md) | `launch/`, `examples/`, `docker/` | install and start the stack on one host or several; serve a model or GPU without an example |
-| [`run-benchmark`](skills/run-benchmark/SKILL.md) | `examples/`, `benchmarks/replay/` | run the paper's replay benchmark, score it and compare it with the reference |
+| [`run-benchmark`](skills/run-benchmark/SKILL.md) | `examples/`, `benchmarks/` | run the paper's replay benchmark, score it and compare it with the reference |
 | [`debug-run`](skills/debug-run/SKILL.md) | repository, read-only | find why a run did not start, failed a request, or scored below the reference |
 
 Each skill states its scope, its inputs and what it returns. Commands that reproduce the paper
@@ -95,7 +95,8 @@ requested change, stop and say so.
   late decode choice and role control accept.
 - [`planner/AGENTS.md`](planner/AGENTS.md): launch parameters, the role API, what stops the planner.
 - [`launch/AGENTS.md`](launch/AGENTS.md): interpreters, port layout, hardware detection, hosts.
-- [`benchmarks/AGENTS.md`](benchmarks/AGENTS.md): replay settings, scoring windows, comparing runs.
+- [`benchmarks/AGENTS.md`](benchmarks/AGENTS.md): replay settings, scoring windows, comparing runs;
+  one guide per workload under it.
 
 Two rules cross components:
 

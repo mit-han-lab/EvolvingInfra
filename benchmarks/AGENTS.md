@@ -1,7 +1,9 @@
 # benchmarks
 
 Trie (the replay client), the adapters that run it through the router's prepared path, the
-run checks and the scoring. [`workloads.md`](workloads.md) describes the workload files.
+run checks and the scoring. Each workload has its own guide; read it before running or
+changing that workload: [`claude-code/`](claude-code/AGENTS.md), [`putnam/`](putnam/AGENTS.md),
+[`osworld/`](osworld/AGENTS.md).
 
 - **Trie has its own environment** (`/opt/trie-venv` in the image; it pins `transformers`).
   Run its tests from `benchmarks/trie` with `PYTHONPATH=$PWD/src`, so the tests import this

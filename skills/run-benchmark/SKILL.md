@@ -5,16 +5,26 @@ description: Run the paper's replay benchmark on Evolving Infra, score it and co
 
 # Run the replay benchmark
 
-**Scope**: `examples/`, `benchmarks/replay/`. Runs and scores; changes no code and no
+**Scope**: `examples/`, `benchmarks/`. Runs and scores; changes no code and no
 replay setting of the reference.
-**Inputs**: a config ([`examples/gb300/glm52.yaml`](../../examples/gb300/glm52.yaml) for the
-paper's Claude Code experiment), the cluster (Slurm account, partition, the runtime image),
+**Inputs**: the workload ([`claude-code`](../../benchmarks/claude-code/README.md),
+[`putnam`](../../benchmarks/putnam/README.md) or
+[`osworld`](../../benchmarks/osworld/README.md)), a config
+([`examples/gb300/glm52.yaml`](../../examples/gb300/glm52.yaml) for the paper's Claude Code
+experiment), the cluster (Slurm account, partition, the runtime image),
 and what the result is compared with.
 **Returns**: the score table with its windows, the planner's switch times, whether the run is
 valid, and the comparison.
 
 A full run holds nine GPU nodes for about two hours (20 minutes to start, 90 minutes of
 replay). Confirm with the owner before submitting.
+
+Read the workload's README and `AGENTS.md` first: they give the paper's setup, its results and
+the rules of that workload. The steps below are the Claude Code experiment, which
+`submit.py` runs as one job. Putnam and OSWorld use 16 replay processes and their own
+settings: start the stack with the [`serve`](../serve/SKILL.md) skill, write the shards as
+the workload's README says, run one replay process per shard on the host that runs the
+router, then score and compare as in steps 3 and 4.
 
 ## 1. Submit
 

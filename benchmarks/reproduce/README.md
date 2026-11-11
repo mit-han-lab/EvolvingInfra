@@ -57,37 +57,10 @@ python benchmarks/replay/score.py runs/<job id>/bench --skip-s 1800 --window-s 3
 
 ## Results of the paper's runs
 
-Each setting ran twice. The tables give both runs, scored with `benchmarks/replay/score.py` on
-[1800 s, 5400 s): completed model requests per second, the token-weighted prefix hit
-(`cached / prompt` tokens), the client's time to first token, and the mean end-to-end latency
-of a request.
-
-**Claude Code (GLM-5.2)**
-
-| Agents | Requests/s | Prefix hit | TTFT p50 | TTFT p95 | End-to-end mean | Planner |
-|---:|---:|---:|---:|---:|---:|---|
-| 90 | 5.43, 5.34 | 97.2 %, 97.1 % | 2.0 s, 2.3 s | 9.1 s, 11.0 s | 7.6 s, 8.0 s | 6P3D → 3P6D |
-| 108 | 5.74, 5.78 | 96.9 %, 96.9 % | 3.2 s, 3.6 s | 13.1 s, 13.8 s | 10.0 s, 9.7 s | 6P3D → 3P6D → 4P5D → 3P6D; 6P3D → 3P6D |
-| 126 | 5.89, 5.76 | 96.3 %, 96.3 % | 5.0 s, 5.2 s | 19.4 s, 22.9 s | 12.9 s, 13.2 s | 6P3D → 3P6D → 4P5D |
-
-**Putnam (GLM-5.2)**
-
-| Agents | Requests/s | Prefix hit | TTFT p50 | TTFT p95 | End-to-end mean | Prefill workers after 6P3D |
-|---:|---:|---:|---:|---:|---:|---|
-| 224 | 9.11, 8.77 | 98.7 %, 98.5 % | 0.6 s, 1.3 s | 2.1 s, 6.2 s | 13.8 s, 14.9 s | 1, 2, 1, 2; 1, 2, 1 |
-| 256 | 7.75, 9.15 | 98.7 %, 98.9 % | 0.9 s, 0.4 s | 4.6 s, 0.8 s | 15.8 s, 16.9 s | 2, 3, 1; 3, 4 |
-| 288 | 8.49, 10.09 | 98.8 %, 98.6 % | 0.6 s, 0.5 s | 1.6 s, 18.9 s | 16.3 s, 17.6 s | 2, 3, 2; 2, 3, 1, 3, 2 |
-
-Putnam is decode-heavy: the planner leaves one to four prefill workers. The first run at 256
-agents had 572 failed requests; every other run of the three workloads had none.
-
-**OSWorld (Kimi-K2.6)**
-
-| Agents | Requests/s | Prefix hit | TTFT p50 | TTFT p95 | End-to-end mean | Planner |
-|---:|---:|---:|---:|---:|---:|---|
-| 128 | 4.25, 4.29 | 94.0 %, 94.0 % | 20.9 s, 20.6 s | 35.1 s, 35.5 s | 24.6 s, 24.3 s | 6P3D → 8P1D |
-| 144 | 4.29, 4.30 | 93.9 %, 94.0 % | 24.4 s, 24.1 s | 38.6 s, 39.1 s | 28.0 s, 28.0 s | 6P3D → 8P1D |
-| 160 | 4.33, 4.35 | 93.9 %, 93.9 % | 27.3 s, 27.2 s | 43.3 s, 41.4 s | 31.4 s, 31.3 s | 6P3D → 8P1D |
+Each setting ran twice. Every workload's page gives both runs, scored with
+`benchmarks/replay/score.py` on [1800 s, 5400 s): [Claude Code](../claude-code/README.md),
+[Putnam](../putnam/README.md), [OSWorld](../osworld/README.md). Every run had zero failed
+requests except the first Putnam run at 256 agents.
 
 ## Comparing a run with these
 
