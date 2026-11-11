@@ -3,6 +3,7 @@
   modal run examples/modal/app.py::check_image                 # CPU: image contents and name checks
   modal run --detach examples/modal/app.py::static             # 1 node, 1P1D, 1200 s replay
   modal run --detach examples/modal/app.py::dynamic            # 2 nodes, 2P2D -> 1P3D -> 2P2D, 1800 s
+  modal run --detach examples/modal/app.py::paper              # 8 nodes, 12P4D + planner, CC c384, 5400 s
   python3 examples/modal/app.py --dry-run [--dynamic]          # offline (needs the modal package): commands, configs, name checks
 
 The image is docker/Dockerfile of this checkout, built by Modal. Results go to the Volume RESULTS
@@ -49,7 +50,7 @@ image = (
         "SGLANG_CACHE_DIR": "/cache", "TILELANG_CACHE_DIR": "/cache/tilelang",
         "SGLANG_DG_CACHE_DIR": "/cache/deep_gemm", "TRITON_CACHE_DIR": "/cache/triton",
     })
-    .add_local_python_source("stack", "node", "score")
+    .add_local_python_source("stack", "node")
 )
 
 app = modal.App(APP)
@@ -80,6 +81,12 @@ def run_static(cfg: dict):
 @app.function(**NODE, timeout=3 * 3600)
 @modal.experimental.clustered(size=2, rdma=True)
 def run_dynamic(cfg: dict):
+    return cluster_run(cfg)
+
+
+@app.function(**NODE, timeout=5 * 3600)
+@modal.experimental.clustered(size=8, rdma=True)
+def run_paper(cfg: dict):
     return cluster_run(cfg)
 
 
@@ -116,6 +123,14 @@ def static(duration: int = 0):
 def dynamic(duration: int = 0):
     """duration 0: 1800 s (fit at 600 s, 2P2D -> 1P3D at 900 s, back to 2P2D at 1350 s; scored 900-1800 s)."""
     launch(new_config(True, duration), run_dynamic)
+
+
+@app.local_entrypoint()
+def paper(duration: int = 5400):
+    """8 nodes (64 H200), 12P4D with the live planner, CC at 384 agents; scored 1800 s to the end."""
+    cfg = stack.paper_config("paper-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6], duration)
+    cfg["source"] = source()
+    launch(cfg, run_paper)
 
 
 # ------------------------------------------------------------------------------------------- checks

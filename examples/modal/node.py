@@ -443,7 +443,7 @@ class Driver:
             fit_completed=(d / "calibration" / "report.json").exists() and "warmup_fit_completed" in events,
             decisions_journal_present=journal.exists() and "learning_started" in events,
             roles_consistent_with_last_applied=applied is not None and live == applied,
-            scripted_changes_confirmed=events.count("role_update_confirmed") == len(script),
+            scripted_changes_confirmed=not script or events.count("role_update_confirmed") == len(script),
             role_updates_confirmed=events.count("role_update_confirmed"),
             decisions={e: events.count(e) for e in sorted(set(events))},
             planner_failed=(d / "PLANNER_FAILED").read_text() if (d / "PLANNER_FAILED").exists() else None,

@@ -310,6 +310,16 @@ def bench_controller(duration: int) -> dict:
                 role_script=[[learning + 150, {"node0": "decode"}], [learning + 450, {"node0": "prefill"}]])
 
 
+def paper_config(run_id: str, duration: int = 5400) -> dict:
+    """The paper's H200 run: 8 nodes, 16 workers starting 12P4D, CC at 384 concurrent agents from 32
+    Trie processes; the planner learns for 1800 s once the cold start is over and decides every 600 s.
+    The first 1800 s are warm-up; the score covers [1800 s, duration)."""
+    return dict(run_id=run_id, name="paper-cc-c384", n_nodes=8, n_workers=16, n_p=12,
+                concurrency=384, trie_procs=32, duration=duration, warmup_s=1800,
+                workload=WORKLOAD, metrics_period_s=60, trie_grace_s=900, cold_start_deadline_s=3600,
+                controller=dict(CONTROLLER))
+
+
 def bench_config(run_id: str, dynamic: bool, duration: int = 0, concurrency: int = 16, trie_procs: int = 2,
                  workload: str = WORKLOAD) -> dict:
     """Static: 1 node, 1P1D, 1200 s. Dynamic: 2 nodes, 2P2D -> 1P3D -> 2P2D, 1800 s. Half of the
