@@ -25,4 +25,4 @@ The online P/D planner. [`README.md`](README.md) has the models and the decision
 
 Tests: `python -m pytest -q tests/planner` (a fake router and a virtual clock; no GPU). A
 change to the rule or the fit is also run once with
-`examples/gb300/submit.py`, which starts the planner.
+`examples/slurm/submit.py`, which starts the planner.

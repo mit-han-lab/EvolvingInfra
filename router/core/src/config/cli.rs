@@ -904,6 +904,10 @@ pub struct Cli {
     /// Enable versioned trajectory CPU KV retention (requires matching engine support).
     #[arg(long, default_value_t = false)]
     pub symmetric_pd_kv_session_retention: bool,
+    /// Keep KV session retention off under `--symmetric-pd-preset paper`, for engines whose
+    /// model does not support it (a cache tree that is not FULL-only, e.g. DeepSeek-V4).
+    #[arg(long, conflicts_with = "symmetric_pd_kv_session_retention")]
+    pub symmetric_pd_no_kv_session_retention: bool,
 
     /// File containing the engine API/admin key for background KV controls.
     #[arg(long, requires = "symmetric_pd_kv_session_retention")]
@@ -1271,7 +1275,7 @@ impl Cli {
                 self.pd_native_decode_state = true;
             }
         }
-        self.symmetric_pd_kv_session_retention = true;
+        self.symmetric_pd_kv_session_retention = !self.symmetric_pd_no_kv_session_retention;
         // A worker that serves decode now may serve prefill after a role
         // change, so imported KV keeps the engine's host write policy.
         self.symmetric_pd_import_cache_policy.get_or_insert(SymmetricPdImportCachePolicy::Retain);
@@ -3076,6 +3080,12 @@ mod tests {
         assert_eq!(late.mode, LateDecodeMode::Choose);
         assert_eq!(late.rule, Some(LateDecodeRule::FitReq));
         assert!(late.fit_native && late.native_state_poll);
+
+        let mut no_retention = workers.to_vec();
+        no_retention.push("--symmetric-pd-no-kv-session-retention");
+        let c = into_config_owned(with_model(&no_retention)).unwrap();
+        let flex = c.model.symmetric_pd.as_ref().unwrap();
+        assert!(!flex.kv_session_retention && flex.placement.force_split, "only retention is off");
 
         let mut with_kv = workers.to_vec();
         with_kv.extend([

@@ -168,16 +168,16 @@ pip install -e 'benchmarks/trie[test]' && pytest -q benchmarks/trie/tests   # Tr
 
 ## Benchmarks on Modal
 
-[`deploy/modal`](../deploy/modal/README.md) builds the image on Modal and runs the reference
+[`examples/modal`](../examples/modal/README.md) builds the image on Modal and runs the reference
 benchmarks: a static 1P1D stack on one node, and a two-node stack whose P/D split changes during
 the run. You need a Modal account with H200 access, the model weights and a replay workload in
 two Modal Volumes.
 
 ```bash
 m() { uv run --no-project --with modal==1.5.5 modal "$@"; }
-m run deploy/modal/app.py::check_image_main
-m run --detach deploy/modal/app.py::static     # 1 node, 1P1D, 1200 s replay
-m run --detach deploy/modal/app.py::dynamic    # 2 nodes, 2P2D -> 1P3D -> 2P2D, 1800 s replay
+m run examples/modal/app.py::check_image_main
+m run --detach examples/modal/app.py::static     # 1 node, 1P1D, 1200 s replay
+m run --detach examples/modal/app.py::dynamic    # 2 nodes, 2P2D -> 1P3D -> 2P2D, 1800 s replay
 ```
 
 A run counts only when `valid` is true in `<run_id>/node0/summary.json`. Expected results are in

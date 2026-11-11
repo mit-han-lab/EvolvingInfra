@@ -89,7 +89,7 @@ that is given wins.
 |---|---|
 | Prefill placement by predicted time to first token, with peer pulls | `--symmetric-pd-p-select cost-function`, `--co-schedule-trade`, `--co-schedule-uncached-balance`, `--symmetric-pd-pull-hint`, `--symmetric-pd-pull-from-any-holder`, `--kv-pull-scope any`, `--kv-pull-hint-min-incremental-tokens 512`, `--co-schedule-load-poll-ms 100`. On when `--kv-indexer-url` is set and `--kv-worker-map` names the servicers; otherwise `cache-first` |
 | Late decode choice | `--pd-late-decode choose --pd-late-decode-rule fit_req --pd-late-decode-candidates all --pd-late-decode-local off --pd-late-decode-fit-native --pd-native-decode-state` |
-| KV session retention | `--symmetric-pd-kv-session-retention` |
+| KV session retention | `--symmetric-pd-kv-session-retention`; `--symmetric-pd-no-kv-session-retention` keeps it off for a model whose engine does not support it (DeepSeek-V4) |
 | Placement basics | `--symmetric-pd-force-split`, `--symmetric-pd-d-select round-robin`, `--symmetric-pd-load-poll-ms 100`, `--symmetric-pd-import-cache-policy retain` (a D may become a P later, so imported KV follows the host write policy), `--kv-indexer-timeout-ms 200` |
 
 ### Tuning
@@ -154,3 +154,26 @@ complete example.
 ## Planner
 
 See [Dynamic P/D](dynamic-pd.md#configuration).
+
+## Launcher config
+
+`evolving-infra serve --config <file>` reads one YAML file ([`examples/`](../examples/README.md)).
+The launcher detects GPUs and RDMA NICs, lays out the ports and passes the presets; the file
+holds what it cannot detect.
+
+| Key | Meaning | Default |
+|---|---|---|
+| `model` | model directory, the same path on every host; holds `tokenizer.json` | required |
+| `served_model_name` | the model name clients send | the directory's name, lower case |
+| `page_size` | KV block size of engine, router and KV directory | 64 |
+| `context_length` | maximum prompt length | 1048576 for the frontend |
+| `gpus_per_worker` | TP size of one worker | all GPUs of a host; half of them on a single host |
+| `prefill_workers` | workers that start as prefill | half of the workers |
+| `retention` | KV session retention in the router; `false` for a model whose cache tree is not FULL-only | `true` |
+| `engine_args`, `router_args` | flags appended to every engine and to the router | `--trust-remote-code`; none |
+| `planner` | planner arguments ([Dynamic P/D](dynamic-pd.md)); used with `--planner` | none |
+| `base` | another config file to start from; `engine_args` replace the base's flags of the same name | none |
+
+When the stack is ready the first host writes `READY` and `stack.json` (router and tokenizer
+URLs, model, block size, GPU and worker counts) to its work directory;
+`benchmarks/replay/run_trie.py stack=<work dir>` reads it.

@@ -26,8 +26,8 @@ python make_shards.py osworld/osworld2-kimi-formal.jsonl osworld/shards.json sha
   --image-root "$PWD/osworld/screenshots"
 ```
 
-Each process runs the command of [`replay/README.md`](../replay/README.md) on its shard and
-writes `trie-results-<i>.json`; [`replay/score.py`](../replay/score.py) scores the directory.
+Each process runs the command of [`replay/README.md`](../replay/README.md) on its shard
+with `processes=16 process=<i>` and writes `trie-results-<i>.json`; [`replay/score.py`](../replay/score.py) scores the directory.
 
 Results of the paper's runs on [1800 s, 5400 s), two runs per setting:
 

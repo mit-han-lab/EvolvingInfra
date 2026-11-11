@@ -69,7 +69,7 @@ The repository has no config to copy for it. Derive one, on one host first:
    timeouts, loader).
 3. **`page_size`.** The KV block size, shared by engine, router and KV directory; the launcher
    passes this one value to all three. Tested values: 64 (GLM-5.2), 256 (DeepSeek-V4-Flash,
-   `deploy/modal/stack.py`). Keep 64 unless the model's attention backend requires another.
+   `examples/modal/stack.py`). Keep 64 unless the model's attention backend requires another.
 4. **Speculative decoding.** Keep the `--speculative-*` flags only when the model ships a draft
    head, with that head's algorithm; otherwise remove them all. The launcher tells the router
    from the flags.
@@ -106,7 +106,7 @@ prepared-path requests only ([`docs/dynamic-pd.md`](../../docs/dynamic-pd.md)).
 
 Under Slurm with Pyxis, run the same command in a job. `$RUN` is on a filesystem every node
 shares and is mounted in the container; the serve step stays in the background and the job
-ends when the script does. For several nodes, `python examples/gb300/submit.py --dry-run
+ends when the script does. For several nodes, `python examples/slurm/submit.py --dry-run
 --image <image>` prints this script with `--hosts` filled in from the allocation.
 
 ```bash

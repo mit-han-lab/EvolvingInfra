@@ -269,7 +269,7 @@ def replay_env(cfg: dict, ips: list) -> dict:
 
 
 def trie_command(cfg: dict, shard: str, concurrency: int, outdir: str, i: int) -> list[str]:
-    args = dict(workload_path=shard, endpoint=f"{ROUTER_URL}/v1", model=SERVED, api_key="EMPTY",
+    args = dict(preset="none", workload_path=shard, endpoint=f"{ROUTER_URL}/v1", model=SERVED, api_key="EMPTY",
                 concurrency=concurrency, delay_scale=1.0, duration=cfg["duration"], strict_replay=True,
                 prefix_block_size=256, stream=True, timeout=3600, max_retries=0,
                 num_gpus=4 * cfg["n_workers"],

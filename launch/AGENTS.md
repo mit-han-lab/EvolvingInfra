@@ -9,6 +9,8 @@ host, the KV directory, the frontend, the router and the planner.
   `decoupled_engine` (`engine_python()`), the router is the `sgl-router` binary on `PATH`.
 - **Ports are assigned in `layout.py`** and nowhere else. `Worker.ports()` lists every port a
   worker binds; `serve.py` checks them before starting. A new listening port is added to both.
+- **`stack.json` is the launcher's output for clients** (written with `READY`): the replay
+  adapter reads it. A new fact a client needs goes there, not into the client's command line.
 - **What the launcher reads from the node is in `hardware.py`**: GPU count, the RDMA NICs
   closest to each GPU (InfiniBand ports when there are any; `nvidia-smi topo -m`), whether
   `nvidia_peermem` is loaded. No host, NIC or cluster name appears in code.
@@ -19,7 +21,7 @@ host, the KV directory, the frontend, the router and the planner.
   prepared-path requests, so a plain OpenAI request works only without `--planner`.
 - **A config can start from another** (`base: other.yaml`); an engine flag given in the
   child replaces the same flag of the base. Model settings go in `examples/`, not in code.
-- **`examples/gb300/submit.py` only writes a job script.** Inspect it with `--dry-run`. What
+- **`examples/slurm/submit.py` only writes a job script.** Inspect it with `--dry-run`. What
   runs on the nodes is `evolving-infra serve` and the replay command, the same as by hand.
 
 Tests: `python -m pytest -q tests/launch` (hardware is faked with `monkeypatch`). Then

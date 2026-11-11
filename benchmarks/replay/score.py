@@ -75,8 +75,11 @@ def window_score(directory: str, skip_s: float, window_s: float) -> dict:
         s, f = timing.get("request_start_ts_ns"), timing.get("first_parsed_token_ts_ns")
         ttft.append((f - s) / 1e9 if s and f else None)
         e2e.append((ends[r] - s) / 1e9 if s else None)
+    replays = [json.load(open(p)) for p in sorted(glob.glob(os.path.join(directory, "replay-settings-*.json")))]
     return {
         "files": len(files), "window_start_ns": start, "window_end_ns": end, "window_s": span,
+        "replay_preset": sorted({r["preset"] for r in replays}),
+        "replay_differs_from_preset": {k: v for r in replays for k, v in (r["differs_from_preset"] or {}).items()},
         "replay_context_modes": sorted({a.get("replay_context_mode", "recorded") for a in done}),
         "completed_model_requests": len(done), "completed_traces": traces,
         "failed_requests": sum(errors.values()), "failures_by_class": errors,

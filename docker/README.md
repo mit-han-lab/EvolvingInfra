@@ -7,7 +7,7 @@ DecoupledEngine, the Rust router, the frontend / indexer / planner, and the Trie
 docker build -f docker/Dockerfile -t evolving-infra .    # from the repository root
 ```
 
-The same file builds on x86_64 (Modal H200 and B300, `deploy/modal/app.py`) and on aarch64
+The same file builds on x86_64 (Modal H200 and B300, `examples/modal/app.py`) and on aarch64
 (GB300). On clusters without a Docker daemon, build it as an enroot or Singularity image from the
 same steps.
 

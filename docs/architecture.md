@@ -106,7 +106,8 @@ evolving-infra/
 │   └── client/                # Python client SDK: Agent, Scheduler, Backend
 ├── planner/                   # online P/D controller, step-time fit, trace servers
 ├── benchmarks/                # trie/ (strict-replay client), replay/ (adapter, run checks), reference results
-├── deploy/modal/              # benchmarks on Modal
+├── launch/                    # evolving-infra serve
+├── examples/                  # a config per hardware and model; slurm/ and modal/ run one
 ├── docker/                    # runtime image
 └── tests/                     # Python tests; Rust tests are in router/core/tests/
 ```
@@ -121,7 +122,7 @@ The engine package is renamed from `sglang` to `decoupled_engine`, but names tha
 components and dashboards read stay as in SGLang: the `SGLANG_*` environment variables, the
 `sglang:` Prometheus metric prefix, the router binary `sgl-router`, the wire schema
 `sglang.prefill_state_push`, and the config values `sglang_native` / `sglang_generate`. The
-reference deployment's ports and settings are in [`deploy/modal/stack.py`](../deploy/modal/stack.py).
+reference deployment's ports and settings are in [`examples/modal/stack.py`](../examples/modal/stack.py).
 
 ## Provenance
 

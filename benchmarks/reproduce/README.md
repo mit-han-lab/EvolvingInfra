@@ -45,7 +45,7 @@ concurrency; `shards.json` and `make_shards.py` in the dataset give the shards.
 concurrent agents as one Slurm job: it serves on nine nodes, replays, and writes the score.
 
 ```bash
-python examples/gb300/submit.py --account <account> --partition <partition> --image <image>
+python examples/slurm/submit.py --account <account> --partition <partition> --image <image>
 ```
 
 For 90 or 108 agents, set `benchmark.concurrency` in
@@ -75,7 +75,7 @@ requests except the first Putnam run at 256 agents.
 
 ## Benchmarks on Modal
 
-[`deploy/modal`](../../deploy/modal/README.md) runs two benchmarks on Modal H200 nodes. A correct
+[`examples/modal`](../../examples/modal/README.md) runs two benchmarks on Modal H200 nodes. A correct
 build should land in these ranges (one run takes 20–30 minutes plus cold start):
 
 | Benchmark | Topology | Requests in window | Failures | Prefix hit | TTFT p50 |
@@ -106,5 +106,5 @@ A run is valid only when the four checks in [`benchmarks/replay`](../replay/READ
 input conformance, quiet window, steady-state zero failures and monotonic request counters.
 Prefix hit is token-weighted (`cached_prompt_tokens / completed_prompt_tokens` over the window).
 
-[`deploy/modal`](../../deploy/modal/README.md) runs both benchmarks with these checks.
+[`examples/modal`](../../examples/modal/README.md) runs both benchmarks with these checks.
 The [quickstart](../../docs/quickstart.md) shows the same stack on one node.

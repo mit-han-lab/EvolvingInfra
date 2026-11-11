@@ -23,18 +23,35 @@ Workloads: download them from
 [crmsndu/evolving-infra-traces](https://huggingface.co/datasets/crmsndu/evolving-infra-traces).
 
 ```bash
-export EVOLVING_INFRA_REPLAY='{"router_url": "http://127.0.0.1:30900",
-  "tokenizer_urls": ["http://127.0.0.1:28100"], "config_id": "dsv4",
-  "model_name": "deepseek-v4-flash", "model_path": "/models/DeepSeek-V4-Flash",
-  "incremental_streaming_output": true}'
-/opt/trie-venv/bin/python benchmarks/replay/run_trie.py \
-  workload_path=<workload.jsonl> endpoint=http://127.0.0.1:30900/v1 model=deepseek-v4-flash \
-  api_key=EMPTY strict_replay=true strict_replay_openai_fast_path=true stream=true max_retries=0 \
-  replay_context_mode=actual_output replay_output_mode=model \
-  cache_salt_mode=global prefix_block_size=256 concurrency=<n> duration=<s> \
-  output_json=<run>/trie-results-0.json lifecycle_output_jsonl=<run>/trie-lifecycle-0.jsonl \
-  lifecycle_run_id=<run> lifecycle_cell_id=bench lifecycle_arm=off lifecycle_concurrency=<n>
+/opt/trie-venv/bin/python benchmarks/replay/run_trie.py stack=<serve work dir> \
+  workload_path=<workload.jsonl> concurrency=<n> duration=<s> output_dir=<run>/bench
+/opt/trie-venv/bin/python benchmarks/replay/score.py <run>/bench --skip-s <warmup> --window-s <s>
 ```
+
+These five arguments are the interface. `stack=` is the work directory of `evolving-infra
+serve` on the host that runs the router: its `stack.json` gives the endpoint, the model, the
+tokenizer, the block size and the GPU count. Every other setting comes from the `paper`
+preset:
+
+| Setting | Paper | What it decides |
+|---|---|---|
+| `strict_replay`, `context_source` | `true`, `recorded` | prompts and output lengths are the recorded ones, checked token by token |
+| `replay_output_mode` | `model` | the model generates its outputs; they are not forced |
+| `replay_context_mode` | `actual_output` | later prompts carry the model's own earlier outputs, which speculative decoding predicts better than recorded ones |
+| `warm_start`, `seed` | `stationary`, `0` | the first agents start inside their trace, at points drawn from the seed |
+| `workload_order`, `delay_scale` | `natural`, `1` | tasks in file order; tool and user waits at recorded length |
+| `trajectory_prefix_tokens` | `10` | a per-agent prefix, so agents share a cache only where the trace says so |
+| `cache_salt_mode` | `global` | the prepared path carries one cache salt |
+| `max_retries`, `migration_limit` | `0`, `0` | a failed request counts as failed |
+| `stream`, `strict_replay_openai_fast_path`, `timeout`, `drain_timeout` | `true`, `true`, `3600`, `0` | transport |
+
+An argument given explicitly overrides the preset. `run_trie.py` writes the resolved settings
+and every difference from the preset to `<output dir>/replay-settings-<i>.json`, and
+`score.py` reports them as `replay_differs_from_preset`: an empty object means the paper's
+replay. For a workload with several client processes, start each with `processes=N
+process=I` and its shard as `workload_path`; each gets `concurrency / N`. `preset=none` turns
+the defaults off, and every argument is then given as to the `trie` command, with the
+connection settings in `EVOLVING_INFRA_REPLAY`:
 
 - `EVOLVING_INFRA_REPLAY` holds `prepared_replay.Config`. `config_id` and `model_path` must match the
   frontend's config and the router's prepared contract.

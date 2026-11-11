@@ -39,7 +39,10 @@ class Stack:
         self.mine = [w for w in self.workers if w.host == rank]
         self.head = self.ips[0]
         self.planner = cfg.get("planner")  # None: off; a dict of planner arguments: on
-        self.eagle = "--speculative-algorithm" in " ".join(cfg.get("engine_args", []))
+        self.eagle = "--speculative-algorithm=EAGLE" in " ".join(cfg.get("engine_args", [])).replace("algorithm ", "algorithm=")
+        # KV session retention needs a FULL-only cache tree; the engine preset decides the same way per
+        # model. `retention: false` in the config turns it off in the router for the other models.
+        self.retention = cfg.get("retention", True)
         self.procs = []
 
     # ------------------------------------------------------------------------------------------ processes
@@ -175,6 +178,8 @@ class Stack:
         for w in ws:
             p = int(w.role == "prefill")
             argv += ["--symmetric-pd-worker", f"{w.url},{w.bootstrap_port},{p},{1 - p}"]
+        if not self.retention:
+            argv.append("--symmetric-pd-no-kv-session-retention")
         env = {"EVOLVING_INFRA_PREPARED_CONFIG": prepared}
         if self.planner is not None:
             token = self.dir / "role-token"
@@ -211,6 +216,13 @@ class Stack:
                 print(f"ready: http://{self.head}:{ROUTER_PORT}/v1 ({len(self.workers)} workers, "
                       f"{sum(w.role == 'prefill' for w in self.workers)}P"
                       f"{sum(w.role == 'decode' for w in self.workers)}D)", flush=True)
+                self.write("stack.json", {  # what a client needs; benchmarks/replay/run_trie.py stack=<this dir>
+                    "router_url": f"http://{self.head}:{ROUTER_PORT}",
+                    "tokenizer_url": f"http://{self.head}:{FRONTEND_PORT}",
+                    "model": self.cfg["served_model_name"], "model_path": self.cfg["model"],
+                    "page_size": self.cfg["page_size"], "config_id": "default", "retention": self.retention,
+                    "gpus": sum(w.gpus for w in self.workers), "workers": len(self.workers),
+                    "prefill_workers": sum(w.role == "prefill" for w in self.workers)})
                 (self.dir / "READY").write_text(f"http://{self.head}:{ROUTER_PORT}\n")
             while True:
                 self.check()

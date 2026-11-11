@@ -101,7 +101,7 @@ The node's GPUs become one prefill and one decode worker, and the router serves 
 OpenAI-compatible API on port 30900. To run the paper's experiment on nine GB300 nodes with Slurm:
 
 ```bash
-python examples/gb300/submit.py --account <account> --partition <partition> --image <image>
+python examples/slurm/submit.py --account <account> --partition <partition> --image <image>
 ```
 
 It serves, replays the Claude Code workload and writes the score
@@ -137,10 +137,10 @@ client.completions.create(
 | [`router/core/`](router/core/README.md) | Rust router (`sgl-router`) |
 | [`router/frontend/`](router/frontend/README.md), [`router/indexer/`](router/indexer/README.md), [`router/client/`](router/client/__init__.py) | Tokenizer service, KV directory, Python client |
 | [`planner/`](planner/README.md) | Planner |
-| [`launch/`](launch/__main__.py), [`examples/`](examples/gb300/README.md) | `evolving-infra serve`, and the paper's experiment as a config |
+| [`launch/`](launch/__main__.py), [`examples/`](examples/README.md) | `evolving-infra serve`; a config per hardware and model, and how to run one under Slurm or on Modal |
 | [`AGENTS.md`](AGENTS.md), [`skills/`](skills/) | Instructions and skills for coding agents |
 | [`benchmarks/`](benchmarks/README.md) | Agent trace replay, run checks, reference results |
-| [`deploy/modal/`](deploy/modal/README.md), [`docker/`](docker/README.md) | Benchmarks on Modal, runtime image |
+| [`docker/`](docker/README.md) | Runtime image |
 
 ## Contributing
 

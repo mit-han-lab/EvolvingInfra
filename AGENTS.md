@@ -32,9 +32,9 @@ moves through it.
 | `router/frontend/`, `router/indexer/`, `router/client/` | Tokenizer service, KV directory, Python client | [`router/frontend/README.md`](router/frontend/README.md), [`router/indexer/README.md`](router/indexer/README.md) |
 | `planner/` | Online P/D planner | [`planner/README.md`](planner/README.md) |
 | `launch/` | `evolving-infra serve`: starts every component on one or more hosts | [`examples/gb300/README.md`](examples/gb300/README.md) |
-| `examples/` | Model and experiment configs, the Slurm submit script | [`examples/gb300/README.md`](examples/gb300/README.md) |
+| `examples/` | A config per hardware and model (`gb300/`, `h200/`); running one under Slurm (`slurm/`) or on Modal (`modal/`) | [`examples/README.md`](examples/README.md) |
 | `benchmarks/` | Trie replay client, replay adapters, run checks, scoring | [`benchmarks/README.md`](benchmarks/README.md) |
-| `deploy/modal/`, `docker/` | Benchmarks on Modal, the runtime image | their READMEs |
+| `docker/` | The runtime image | [`docker/README.md`](docker/README.md) |
 | `docs/` | User documentation; [`docs/paper.md`](docs/paper.md) maps the paper to the code | [`docs/README.md`](docs/README.md) |
 | `tests/`, `tools/` | Python tests, one directory per component; repository tools | |
 | `skills/` | Agent skills (see [Skills](#4-skills)) | |
@@ -58,7 +58,7 @@ GPU validation, smallest first:
 
 ```bash
 evolving-infra serve --config examples/gb300/glm52-1node.yaml          # one node, 1P1D
-python examples/gb300/submit.py --account A --partition P --image IMG  # nine nodes, scored
+python examples/slurm/submit.py --account A --partition P --image IMG   # nine nodes, scored
 ```
 
 Tests: extend the nearest existing test file; test behavior through public entry points; one

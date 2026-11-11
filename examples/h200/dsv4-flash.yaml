@@ -1,0 +1,45 @@
+# DeepSeek-V4-Flash on H200, as in the paper's H200 runs: two TP4 workers per 8-GPU node, DSPARK
+# speculative decoding. `evolving-infra serve --config` reads the top part; `slurm/submit.py` and
+# `modal/app.py` also read `benchmark`.
+
+model: /models/DeepSeek-V4-Flash
+served_model_name: deepseek-v4-flash
+page_size: 256
+context_length: 1048576
+gpus_per_worker: 4
+retention: false               # KV session retention needs a FULL-only cache tree; DSV4's is FULL+SWA
+engine_args:
+  - --trust-remote-code
+  - --moe-runner-backend=flashinfer_mxfp4
+  - --mem-fraction-static=0.71
+  - --max-running-requests=256
+  - --chunked-prefill-size=8192
+  - --max-prefill-tokens=16384
+  - --swa-full-tokens-ratio=0.1
+  - --hicache-write-policy=write_through
+  - --speculative-algorithm=DSPARK
+  - --synthetic-oracle-dspark-accept-rate=0.6
+  - --dist-timeout=1800
+  - --watchdog-timeout=900
+planner:
+  prefill_shape_prior: dsv4-flash-h200-tp4
+
+# Replay of the Claude Code workload for this tokenizer on one node (1P1D): 16 concurrent tasks
+# for 1200 s; the score covers [600 s, 1200 s).
+benchmark:
+  planner: false               # a fixed 1P1D split
+  prefill_workers: 1
+  workload: claude-code/cc062126-dsv4-flash.jsonl
+  concurrency: 16
+  duration: 1200
+  warmup: 600
+
+slurm:
+  nodes: 1
+  account: null
+  partition: null
+  time: "01:30:00"
+  image: null
+  mounts: /models:/models
+  extra_args: ""
+  setup: ""

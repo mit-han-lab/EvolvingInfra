@@ -8,9 +8,12 @@ changing that workload: [`claude-code/`](claude-code/AGENTS.md), [`putnam/`](put
 - **Trie has its own environment** (`/opt/trie-venv` in the image; it pins `transformers`).
   Run its tests from `benchmarks/trie` with `PYTHONPATH=$PWD/src`, so the tests import this
   checkout and not an installed copy.
-- **A benchmark replays with `replay_context_mode=actual_output` and
-  `replay_output_mode=model`**, as the paper's runs do. `examples/gb300/submit.py` is the
-  reference command.
+- **The replay's flags are its interface.** `replay/run_trie.py` takes `stack`,
+  `workload_path`, `concurrency`, `duration` and `output_dir`; every other setting defaults to
+  the paper's (`PAPER` in that file). Pass another setting only when the experiment is about
+  it, and report `replay_differs_from_preset` of `score.py` with the result.
+- **A new setting that changes what is measured gets a default in `PAPER`** and a row in
+  `replay/README.md`, so leaving it out still runs the paper's replay.
 - **A result is a score on a stated window**: `replay/score.py <dir> --skip-s S --window-s W`
   over the lifecycle files. Report the window with every number. Two runs are compared on
   the same window and the same P/D split; the planner's switch times are in the first

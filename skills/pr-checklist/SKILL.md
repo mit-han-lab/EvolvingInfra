@@ -54,7 +54,7 @@ git fetch origin && git log --oneline origin/main..HEAD && git diff --stat origi
   loosened thresholds to pass.
 - A change to the serving path is run on GPUs, at the smallest level that shows it:
   `evolving-infra serve --config examples/gb300/glm52-1node.yaml` with one request, then
-  `examples/gb300/submit.py` for anything that claims throughput or latency.
+  `examples/slurm/submit.py` for anything that claims throughput or latency.
 
 ## 3. Docs
 
@@ -76,7 +76,8 @@ keep its sections, and create with `gh pr create --body-file <file>`.
     concurrency), baseline, changed result, scored window, and the reproduction command.
     Compare on the same window and the same P/D split; report the planner's switch times
     when the split changes during the run. With repeated runs, give the count and the spread.
-  - Benchmarks replay with `replay_context_mode=actual_output`; say so if a run did not.
+  - Benchmarks replay with the `paper` preset of `benchmarks/replay/run_trie.py`; report
+    `replay_differs_from_preset` of the score when it is not empty.
   - State what was not run (hardware, model, scale).
 - **Details**: root cause for a fix (what failed, how it was found, why the change removes
   it). For the P/D path, a short numbered sequence of one request through router, P, transfer

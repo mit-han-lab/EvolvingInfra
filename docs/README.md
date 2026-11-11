@@ -48,4 +48,4 @@ host-memory tier.
 Component READMEs: [engine](../engine/README.md), [router core](../router/core/README.md),
 [frontend](../router/frontend/README.md), [indexer](../router/indexer/README.md),
 [planner](../planner/README.md), [benchmarks](../benchmarks/README.md),
-[Modal benchmarks](../deploy/modal/README.md), [runtime image](../docker/README.md).
+[Modal benchmarks](../examples/modal/README.md), [runtime image](../docker/README.md).

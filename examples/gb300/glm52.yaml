@@ -1,5 +1,5 @@
 # GLM-5.2 (NVFP4) on GB300, as in the paper: one TP4 worker per 4-GPU node, EAGLE speculative
-# decoding, the planner on. `evolving-infra serve --config` reads the top part; `submit.py`
+# decoding, the planner on. `evolving-infra serve --config` reads the top part; `slurm/submit.py`
 # also reads `benchmark` and `slurm`.
 
 model: /models/GLM-5.2-NVFP4
@@ -45,7 +45,7 @@ benchmark:
   duration: 5400
   warmup: 1800
 
-# For submit.py.
+# For slurm/submit.py.
 slurm:
   nodes: 9
   account: null

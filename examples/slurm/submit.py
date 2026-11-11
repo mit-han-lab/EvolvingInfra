@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Run the paper's experiment as one Slurm job: serve on every node, replay the workload, score it.
+"""Run a config's experiment as one Slurm job: serve on every node, replay the workload, score it.
 
-    python examples/gb300/submit.py --config examples/gb300/glm52.yaml --account A --partition P --image IMG
+    python examples/slurm/submit.py --config examples/gb300/glm52.yaml --account A --partition P --image IMG
+
+The config is any `evolving-infra serve` config with a `benchmark` section; `slurm` holds site settings.
 
 Results go to <output-dir>/<job id>/: score.json, the replay's results and every service's logs.
 The job script runs `evolving-infra serve` on every node, so the cluster only needs Slurm with Pyxis.
 """
 import argparse
-import json
 from pathlib import Path
 import shlex
 import subprocess
@@ -32,7 +33,7 @@ SETUP
 P=". $RUN/setup.sh;"
 srun --ntasks={nodes} --cpu-bind=none $C bash -c \\
   "$P ulimit -l unlimited; evolving-infra serve --config $RUN/config.yaml --hosts $HOSTS \\
-   --planner --prefill-workers {prefill} --work-dir $RUN/\\$(hostname -s)" > $RUN/serve.log 2>&1 &
+   {planner}--prefill-workers {prefill} --work-dir $RUN/\\$(hostname -s)" > $RUN/serve.log 2>&1 &
 SERVE=$!
 until [ -e $RUN/$HEAD/READY ]; do kill -0 $SERVE 2>/dev/null || {{ echo "serving failed, see $RUN"; exit 1; }}; sleep 10; done
 srun --overlap -N1 -n1 -w $HEAD $C bash -c "$P "{bench} > $RUN/bench.log 2>&1
@@ -40,24 +41,18 @@ kill $SERVE; wait $SERVE
 cat $RUN/score.json
 """
 
-BENCH = """set -e; cd /opt/evolving-infra; R={run}; mkdir -p $R/bench
+BENCH = """set -e; cd /opt/evolving-infra; R={run}
 /opt/trie-venv/bin/python -c "from huggingface_hub import hf_hub_download as d; print(d('crmsndu/evolving-infra-traces', '{workload}', repo_type='dataset', local_dir='$R/traces'))"
-export EVOLVING_INFRA_REPLAY='{replay}'
-/opt/trie-venv/bin/python benchmarks/replay/run_trie.py workload_path=$R/traces/{workload} \\
-  endpoint=http://127.0.0.1:30900/v1 api_key=EMPTY model={name} tokenizer_model={model} concurrency={concurrency} duration={duration} \\
-  warm_start=stationary workload_order=natural seed=0 delay_scale=1 strict_replay=true context_source=recorded \\
-  replay_context_mode=actual_output \\
-  replay_output_mode=model trajectory_prefix_tokens=10 migration_limit=0 max_retries=0 stream=true \\
-  strict_replay_openai_fast_path=true cache_salt_mode=global prefix_block_size={page} timeout=3600 drain_timeout=0 \\
-  num_gpus={gpus} output_json=$R/bench/trie-results-0.json lifecycle_output_jsonl=$R/bench/trie-lifecycle-0.jsonl \\
-  lifecycle_run_id=$SLURM_JOB_ID lifecycle_cell_id=bench lifecycle_arm=on lifecycle_concurrency={concurrency}
+# Every replay setting not given here is the paper's (benchmarks/replay/run_trie.py, preset=paper).
+/opt/trie-venv/bin/python benchmarks/replay/run_trie.py stack=$R/$(hostname -s) \\
+  workload_path=$R/traces/{workload} concurrency={concurrency} duration={duration} output_dir=$R/bench
 python3 benchmarks/replay/score.py $R/bench --skip-s {warmup} --window-s {window} > $R/score.json
 """
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--config", default=str(Path(__file__).with_name("glm52.yaml")))
+    parser.add_argument("--config", default=str(Path(__file__).resolve().parents[1] / "gb300/glm52.yaml"))
     for key in ("account", "partition", "image", "mounts", "time", "extra-args"):
         parser.add_argument(f"--{key}")
     parser.add_argument("--nodes", type=int)
@@ -74,16 +69,11 @@ def main():
         sys.exit("give --image (the runtime image) or slurm.image in the config")
     out = Path(args.output_dir).resolve()
     run = "$RUN"  # exported by the job script
-    replay = {"router_url": "http://127.0.0.1:30900", "tokenizer_urls": ["http://127.0.0.1:28100"],
-              "config_id": "default", "model_name": cfg["served_model_name"], "model_path": cfg["model"],
-              "incremental_streaming_output": True, "retention_enabled": True}
     bench_script = BENCH.format(
-        run=run, workload=bench["workload"], replay=json.dumps(replay), name=cfg["served_model_name"],
-        model=cfg["model"], concurrency=bench["concurrency"], duration=bench["duration"],
-        page=cfg.get("page_size", 64), gpus=4 * slurm["nodes"], warmup=bench["warmup"],
-        window=bench["duration"] - bench["warmup"])
+        run=run, workload=bench["workload"], concurrency=bench["concurrency"], duration=bench["duration"],
+        warmup=bench["warmup"], window=bench["duration"] - bench["warmup"])
     script = SCRIPT.format(
-        prefill=bench["prefill_workers"], nodes=slurm["nodes"], time=slurm.get("time", "03:00:00"),
+        prefill=bench["prefill_workers"], planner="--planner " if bench.get("planner", True) else "", nodes=slurm["nodes"], time=slurm.get("time", "03:00:00"),
         account=f"-A {slurm['account']} " if slurm.get("account") else "",
         partition=f"-p {slurm['partition']}" if slurm.get("partition") else "",
         out=out, image=slurm["image"], mounts=slurm.get("mounts", "/models:/models"),

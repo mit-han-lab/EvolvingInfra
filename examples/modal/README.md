@@ -10,10 +10,10 @@ on Modal H200 nodes, with every component built from this checkout:
 
 ```bash
 m() { uv run --no-project --with modal==1.5.5 modal "$@"; }
-uv run --no-project --with modal==1.5.5 python deploy/modal/app.py --dry-run [--dynamic]  # offline: commands, configs, flag/env name checks
-m run deploy/modal/app.py::check_image_main            # CPU container: image contents, name checks
-m run --detach deploy/modal/app.py::static
-m run --detach deploy/modal/app.py::dynamic
+uv run --no-project --with modal==1.5.5 python examples/modal/app.py --dry-run [--dynamic]  # offline: commands, configs, flag/env name checks
+m run examples/modal/app.py::check_image_main            # CPU container: image contents, name checks
+m run --detach examples/modal/app.py::static
+m run --detach examples/modal/app.py::dynamic
 ```
 
 ## What it builds and starts

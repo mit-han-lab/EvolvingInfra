@@ -29,12 +29,13 @@ router, then score and compare as in steps 3 and 4.
 ## 1. Submit
 
 ```bash
-python examples/gb300/submit.py --config <config> --account <a> --partition <p> --image <image> \
+python examples/slurm/submit.py --config <config> --account <a> --partition <p> --image <image> \
   --mounts <model directory>:/models --extra-args "<more sbatch options>" --output-dir <shared dir>/runs --dry-run
 ```
 
 Read the dry run: the `#SBATCH` line, the mounts (the model must be at the config's `model`
-path inside the container), and the replay command (`replay_context_mode=actual_output`).
+path inside the container), and the replay command (`run_trie.py` with `stack`, `workload_path`, `concurrency`,
+`duration` and `output_dir`; every other replay setting is the paper's by default).
 Then run it without `--dry-run`. `--output-dir` is on storage every node sees. Site settings
 can also stay in a copy of the config (`slurm:` section). Without Slurm: start the stack with
 the [`serve`](../serve/SKILL.md) skill, then run the replay and scoring commands of the dry
@@ -60,8 +61,8 @@ The run is valid when all of these hold:
 
 - `failed_requests` is 0 (`cancelled_requests` are requests cut off when the replay ends);
 - `switch_times.py` exits 0 (the planner did not fail);
-- `replay_context_modes` is `["actual_output"]`. A run replayed with another mode does not
-  compare with the reference.
+- `replay_differs_from_preset` is `{}`. A run with another replay setting does not compare
+  with the reference unless that setting is what is being tested.
 
 `cache_hit` is the prefix hit: cached prompt tokens over prompt tokens.
 

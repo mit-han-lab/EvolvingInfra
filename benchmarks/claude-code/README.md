@@ -26,7 +26,7 @@ router wait model `ledger` with λ = 4.6. [`examples/gb300`](../../examples/gb30
 runs it at 126 concurrent agents as one Slurm job:
 
 ```bash
-python examples/gb300/submit.py --account <account> --partition <partition> --image <image>
+python examples/slurm/submit.py --account <account> --partition <partition> --image <image>
 ```
 
 For 90 or 108 agents set `benchmark.concurrency` in

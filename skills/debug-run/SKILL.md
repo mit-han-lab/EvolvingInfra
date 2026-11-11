@@ -58,9 +58,8 @@ are in `skills/debug-run/scripts/` and `skills/run-benchmark/scripts/`.
    on it. A gap only over the whole run is a gap in when the planner switched.
 2. **Same work.** `request_breakdown.py <run>/bench --skip-s S --window-s W` for both. If
    `replay_context_modes`, `uncached_tokens_mean` or `output_tokens_mean` differ, the replay
-   settings or the inputs differ. The benchmark replays with
-   `replay_context_mode=actual_output` (an argument of the replay command; `bench.log` prints
-   the arguments at its start).
+   settings or the inputs differ. `<run>/bench/replay-settings-0.json` has the resolved
+   settings of the run and, under `differs_from_preset`, each one that is not the paper's.
 3. **Which stage.** The same output gives `ttft_s_*` (router, prefill, transfer, decode
    admission) and `decode_ms_per_token_*` (decode).
 4. **Decode.** `engine_batches.py decode <run>/bench --skip-s S --window-s W <logs>` for both,

@@ -1,9 +1,9 @@
 """Reference benchmarks of evolving-infra on Modal H200 nodes (see README.md in this directory).
 
-  modal run deploy/modal/app.py::check_image                 # CPU: image contents and name checks
-  modal run --detach deploy/modal/app.py::static             # 1 node, 1P1D, 1200 s replay
-  modal run --detach deploy/modal/app.py::dynamic            # 2 nodes, 2P2D -> 1P3D -> 2P2D, 1800 s
-  python3 deploy/modal/app.py --dry-run [--dynamic]          # offline (needs the modal package): commands, configs, name checks
+  modal run examples/modal/app.py::check_image                 # CPU: image contents and name checks
+  modal run --detach examples/modal/app.py::static             # 1 node, 1P1D, 1200 s replay
+  modal run --detach examples/modal/app.py::dynamic            # 2 nodes, 2P2D -> 1P3D -> 2P2D, 1800 s
+  python3 examples/modal/app.py --dry-run [--dynamic]          # offline (needs the modal package): commands, configs, name checks
 
 The image is docker/Dockerfile of this checkout, built by Modal. Results go to the Volume RESULTS
 under <run_id>/node<rank>/; rank 0's summary.json holds the verdict. App, Volume and Dict names can

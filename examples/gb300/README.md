@@ -14,12 +14,13 @@ per node, EAGLE speculative decoding, the planner changing the P/D split while s
 
 - The runtime image ([`docker/`](../../docker/README.md)) and GLM-5.2-NVFP4 at the same path on
   every node (`/models/GLM-5.2-NVFP4` in the config).
-- For `submit.py`: Slurm with [Pyxis](https://github.com/NVIDIA/pyxis).
+- For [`slurm/submit.py`](../slurm/submit.py): Slurm with [Pyxis](https://github.com/NVIDIA/pyxis).
 
 ## Run it with Slurm
 
 ```bash
-python examples/gb300/submit.py --account <account> --partition <partition> --image <image>
+python examples/slurm/submit.py --config examples/gb300/glm52.yaml \
+  --account <account> --partition <partition> --image <image>
 ```
 
 The job starts `evolving-infra serve` on every node, waits until the router is ready, downloads
