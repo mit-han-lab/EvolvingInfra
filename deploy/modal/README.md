@@ -52,7 +52,7 @@ Rank 0 writes `summary.json`; `valid` is true only when all of these pass:
    configured; for the dynamic benchmark also the planner's fit completed, both scripted switches
    confirmed, controller alive at the end of the replay and the router's roles equal to the last applied update.
 
-The window score (`score.py`) reports requests admitted in the window (warm-start
+The window score ([`benchmarks/replay/score.py`](../../benchmarks/replay/score.py)) reports requests admitted in the window (warm-start
 requests excluded), token-weighted prefix hit, client TTFT percentiles.
 
 ## Isolation and data

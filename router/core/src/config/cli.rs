@@ -1260,6 +1260,15 @@ impl Cli {
             }
         }
         self.symmetric_pd_kv_session_retention = true;
+        // A worker that serves decode now may serve prefill after a role
+        // change, so imported KV keeps the engine's host write policy.
+        self.symmetric_pd_import_cache_policy.get_or_insert(SymmetricPdImportCachePolicy::Retain);
+        if self.symmetric_pd_external_role_control {
+            self.symmetric_pd_role_drain_timeout_secs.get_or_insert(5);
+        }
+        if self.kv_indexer_url.is_some() {
+            self.kv_indexer_timeout_ms.get_or_insert(200);
+        }
         let servicers = self.kv_worker_map.as_deref().is_some_and(|map| map.contains("servicer"));
         if self.kv_indexer_url.is_some() && servicers && self.symmetric_pd_p_select.is_none() {
             self.symmetric_pd_p_select = Some(SymmetricPdPSelect::CostFunction);
@@ -3084,6 +3093,15 @@ mod tests {
         let cost = flex.cost_function.as_ref().unwrap();
         assert_eq!(cost.trade.copy_lambda, 4.6);
         assert!(cost.cost_trace.is_none());
+        assert_eq!(flex.import_cache_policy, SymmetricPdImportCachePolicy::Retain);
+        assert_eq!(c.model.kv_hint.as_ref().unwrap().indexer_timeout_ms, 200);
+        assert!(flex.role_drain_timeout.is_none(), "no external role control");
+
+        let mut roles = with_kv.clone();
+        roles.push("--symmetric-pd-external-role-control");
+        let c = into_config_owned(with_model(&roles)).unwrap();
+        let flex = c.model.symmetric_pd.as_ref().unwrap();
+        assert_eq!(flex.role_drain_timeout, Some(std::time::Duration::from_secs(5)));
 
         let mut given = with_kv.clone();
         given.extend(["--symmetric-pd-p-select", "cache-first", "--pd-late-decode-rule", "d1"]);

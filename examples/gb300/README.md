@@ -1,0 +1,58 @@
+# GLM-5.2 on GB300
+
+The paper's Claude Code experiment: GLM-5.2 (NVFP4) on nine 4-GPU GB300 nodes, one TP4 worker
+per node, EAGLE speculative decoding, the planner changing the P/D split while serving.
+
+| | |
+|---|---|
+| Nodes | 9 × GB300 (4 GPUs each), one RDMA network |
+| Workers | 9 × TP4, starting as 6P3D |
+| Workload | Claude Code traces, 126 concurrent tasks, 5400 s; scored on [1800 s, 5400 s) |
+| Config | [`glm52.yaml`](glm52.yaml) |
+
+## Prerequisites
+
+- The runtime image ([`docker/`](../../docker/README.md)) and GLM-5.2-NVFP4 at the same path on
+  every node (`/models/GLM-5.2-NVFP4` in the config).
+- For `submit.py`: Slurm with [Pyxis](https://github.com/NVIDIA/pyxis).
+
+## Run it with Slurm
+
+```bash
+python examples/gb300/submit.py --account <account> --partition <partition> --image <image>
+```
+
+The job starts `evolving-infra serve` on every node, waits until the router is ready, downloads
+the workload from [Hugging Face](https://huggingface.co/datasets/crmsndu/evolving-infra-traces),
+replays it and writes `runs/<job id>/score.json`. Each node's logs are in `runs/<job id>/<host>/logs/`,
+the planner's decisions in `runs/<job id>/<first host>/planner/role-decisions.jsonl`.
+
+## Run it without Slurm
+
+Run the same command on all nine nodes, inside the image:
+
+```bash
+evolving-infra serve --config examples/gb300/glm52.yaml --hosts <node0>,<node1>,...,<node8> \
+  --planner --prefill-workers 6
+```
+
+Each node finds itself in `--hosts`. The first one also runs the KV directory, the frontend, the router and the planner. When it prints
+`ready`, replay the workload from it as in [benchmarks/replay](../../benchmarks/replay/README.md)
+and score it with `benchmarks/replay/score.py <dir> --skip-s 1800 --window-s 3600`.
+
+## On one node
+
+```bash
+evolving-infra serve --config examples/gb300/glm52-1node.yaml
+```
+
+The node's 4 GPUs become two TP2 workers, one P and one D, and the router listens on port 30900.
+[`glm52-1node.yaml`](glm52-1node.yaml) starts from `glm52.yaml` and fits the model at TP2.
+
+## Results
+
+The paper's run of this experiment:
+
+| Requests/s | Prefix hit | TTFT p50 | TTFT p95 | End-to-end mean | Failed |
+|---:|---:|---:|---:|---:|---:|
+| 5.89 | 96.3 % | 5.0 s | 19.4 s | 12.9 s | 0 |

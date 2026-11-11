@@ -1,0 +1,10 @@
+# GLM-5.2 on one GB300 node: two TP2 workers (1P1D). The weights take 80 % of each GPU at TP2,
+# so the static memory fraction is higher and the batches are smaller than in glm52.yaml.
+base: glm52.yaml
+engine_args:
+  - --mem-fraction-static=0.92
+  - --max-running-requests=64
+  - --chunked-prefill-size=4096
+  - --max-prefill-tokens=4096
+  - --cuda-graph-max-bs-prefill=4096
+  - --cuda-graph-max-bs-decode=64

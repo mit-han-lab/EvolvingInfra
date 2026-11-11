@@ -17,7 +17,7 @@ The engine takes SGLang's server arguments. These are the ones Evolving Infra ad
 | `--disaggregation-mode symmetric` | Any worker can run the prefill or the decode leg. |
 | `--disaggregation-transfer-backend mooncake` | Move KV between workers with Mooncake over RDMA. |
 | `--disaggregation-ib-device JSON` | RDMA device of every GPU, e.g. `{"0": "mlx5_0", ...}`. List all GPUs the worker uses. Peer KV pulls use the same devices. |
-| `--disaggregation-bootstrap-port N` | Base port of the worker's KV transfer side channel. Must match the router's `--symmetric-pd-worker`. |
+| `--disaggregation-bootstrap-port N` | Base port of the worker's KV transfer side channel; it uses two ports per GPU from N, so engines on one node need ranges that do not overlap. Must match the router's `--symmetric-pd-worker`. |
 | `--kv-events-config JSON` | Publish KV store and remove events over ZMQ for the KV directory. |
 | `--enable-metrics`, `--enable-cache-report` | Prometheus metrics and per-request cached-token counts. The router and planner read both. |
 | `--incremental-streaming-output` | Required by the frontend. |
@@ -58,10 +58,10 @@ The features turn on the variables they use, and the engine logs them in one
 | When | Variables turned on |
 |---|---|
 | Late decode (`alloc` or `choose`) | `SGLANG_SYMMETRIC_PD_IMPORT_LOCAL_RESERVE=1`, `SGLANG_SYMMETRIC_PD_IMPORT_BUDGET_FRACTION=1.0` |
-| Symmetric mode | `SGLANG_PREBUILT_NONBLOCKING_H2D`; with the peer KV servicer `SGLANG_PEER_KV_PUSH_FAST`; with the host tier on plain TP `SGLANG_HICACHE_PIPELINED_SYNC` and `SGLANG_HICACHE_SKIP_IDLE_SYNC` |
+| Symmetric mode | `SGLANG_PREBUILT_NONBLOCKING_H2D`, `SGLANG_PREFILL_UNSERIALIZE_LOOP`, `SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=1500`, `SGLANG_DISAGGREGATION_WAITING_TIMEOUT=1500`, `SGLANG_RETRACT_BACKUP_MAX_GB=20`; with the peer KV servicer `SGLANG_PEER_KV_PUSH_FAST`; with the host tier on plain TP `SGLANG_HICACHE_PIPELINED_SYNC` and `SGLANG_HICACHE_SKIP_IDLE_SYNC`; with `--kv-events-config` `SGLANG_KV_EVENTS_LAZY_LOAD_BACK`, `SGLANG_KV_EVENTS_LAZY_FAST_BUILD`, `SGLANG_KV_EVENTS_BATCH_PUBLISH` |
 | Late decode choice | `SGLANG_SYMMETRIC_IMPORT_L2_RESTORE`, `SGLANG_SYMMETRIC_SKIP_REUSED_PREFIX_PUBLICATION`, `SGLANG_SYMMETRIC_PUBLISH_AFTER_RESULT`, `SGLANG_SYMMETRIC_BUDGET_STANDARD_PD`, `SGLANG_SYMMETRIC_LAUNCH_THREAD`, `SGLANG_SYMMETRIC_ADMIT_AFTER_LAUNCH`, `SGLANG_HICACHE_DECODE_CLEAR_CONSUMER`, `SGLANG_DECODE_SELECTION_METRICS`; with retention also `SGLANG_KV_SESSION_ADMIT_TAG` |
 | Prefill work snapshot | `SGLANG_PREFILL_ROUTING_SNAPSHOT`, `SGLANG_SYMMETRIC_ROUTING_SNAPSHOT`, `SGLANG_PREFILL_ROUTING_SNAPSHOT_MAX_RECORDS=256`, `SGLANG_PREFILL_ROUTING_SNAPSHOT_MAX_BYTES=98304`, `SGLANG_LOAD_SNAPSHOT_SLOT_BYTES=131072` |
-| DSA or MLA host dedup | `SGLANG_DSA_HOST_DEDUP_FANOUT=ce_peer` or `SGLANG_MLA_HOST_DEDUP_FANOUT=ce_peer` with `--hicache-io-backend direct --hicache-mem-layout page_first_direct`; on GB300 also `SGLANG_DSA_HOST_DEDUP_LAYER_PARTS=8`, `SGLANG_DSA_HOST_DEDUP_PART_PLAN=hybrid`, `SGLANG_DSA_HOST_DEDUP_STREAM_REDRAW=1`. Set the fan-out variable to `nccl` for the NCCL broadcast with `--hicache-io-backend kernel --hicache-mem-layout page_first`. |
+| DSA or MLA host dedup | `SGLANG_DSA_HOST_DEDUP_FANOUT=ce_peer` or `SGLANG_MLA_HOST_DEDUP_FANOUT=ce_peer` with `--hicache-io-backend direct --hicache-mem-layout page_first_direct`; on GB300 also `SGLANG_DSA_HOST_DEDUP_LAYER_PARTS=8`, `SGLANG_DSA_HOST_DEDUP_PART_PLAN=hybrid`, `SGLANG_DSA_HOST_DEDUP_STREAM_REDRAW=1`; with DSA dedup `SGLANG_DSA_HOST_DEDUP_SHARED_VERIFY=0`. Set the fan-out variable to `nccl` for the NCCL broadcast with `--hicache-io-backend kernel --hicache-mem-layout page_first`. |
 
 A variable turned on this way that the model or the scheduler loop does not support, such as
 the L2 restore on DeepSeek-V4, is turned off again with a log line.
@@ -90,7 +90,7 @@ that is given wins.
 | Prefill placement by predicted time to first token, with peer pulls | `--symmetric-pd-p-select cost-function`, `--co-schedule-trade`, `--co-schedule-uncached-balance`, `--symmetric-pd-pull-hint`, `--symmetric-pd-pull-from-any-holder`, `--kv-pull-scope any`, `--kv-pull-hint-min-incremental-tokens 512`, `--co-schedule-load-poll-ms 100`. On when `--kv-indexer-url` is set and `--kv-worker-map` names the servicers; otherwise `cache-first` |
 | Late decode choice | `--pd-late-decode choose --pd-late-decode-rule fit_req --pd-late-decode-candidates all --pd-late-decode-local off --pd-late-decode-fit-native --pd-native-decode-state` |
 | KV session retention | `--symmetric-pd-kv-session-retention` |
-| Placement basics | `--symmetric-pd-force-split`, `--symmetric-pd-d-select round-robin`, `--symmetric-pd-load-poll-ms 100` |
+| Placement basics | `--symmetric-pd-force-split`, `--symmetric-pd-d-select round-robin`, `--symmetric-pd-load-poll-ms 100`, `--symmetric-pd-import-cache-policy retain` (a D may become a P later, so imported KV follows the host write policy), `--kv-indexer-timeout-ms 200` |
 
 ### Tuning
 

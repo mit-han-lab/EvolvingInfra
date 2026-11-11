@@ -86,12 +86,26 @@ Or install from source:
 
 ```bash
 pip install -e engine                                   # engine
-pip install -e ".[client,frontend,indexer,planner]"     # client, tokenizer service, KV directory, planner
+pip install -e ".[client,frontend,indexer,planner]"     # launcher, client, tokenizer service, KV directory, planner
 (cd router/core && cargo build --release --locked)      # router
 ```
 
-[Quickstart](docs/quickstart.md) starts the stack on one 8-GPU node.
-[Quickstart on GB300](docs/quickstart-gb300.md) runs the paper's configuration on two GB300 nodes.
+Start it on one node:
+
+```bash
+evolving-infra serve --config examples/gb300/glm52-1node.yaml
+```
+
+The node's GPUs become one prefill and one decode worker, and the router serves an
+OpenAI-compatible API on port 30900. To run the paper's experiment on nine GB300 nodes with Slurm:
+
+```bash
+python examples/gb300/submit.py --account <account> --partition <partition> --image <image>
+```
+
+It serves, replays the Claude Code workload and writes the score
+([examples/gb300](examples/gb300/README.md)). [Quickstart](docs/quickstart.md) starts each
+component by hand.
 
 To connect an agent, point its OpenAI client at the router and tag each request with the agent
 and branch it belongs to:
@@ -115,6 +129,7 @@ client.completions.create(
 | [`router/core/`](router/core/README.md) | Rust router (`sgl-router`) |
 | [`router/frontend/`](router/frontend/README.md), [`router/indexer/`](router/indexer/README.md), [`router/client/`](router/client/__init__.py) | Tokenizer service, KV directory, Python client |
 | [`planner/`](planner/README.md) | Planner |
+| [`launch/`](launch/__main__.py), [`examples/`](examples/gb300/README.md) | `evolving-infra serve`, and the paper's experiment as a config |
 | [`benchmarks/`](benchmarks/README.md) | Agent trace replay, run checks, reference results |
 | [`deploy/modal/`](deploy/modal/README.md), [`docker/`](docker/README.md) | Benchmarks on Modal, runtime image |
 

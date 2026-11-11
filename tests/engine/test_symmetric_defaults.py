@@ -28,6 +28,10 @@ LATE_D_CHOOSE = {
 }
 HOST = {
     "SGLANG_PREBUILT_NONBLOCKING_H2D": "1",
+    "SGLANG_PREFILL_UNSERIALIZE_LOOP": "1",
+    "SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT": "1500",
+    "SGLANG_DISAGGREGATION_WAITING_TIMEOUT": "1500",
+    "SGLANG_RETRACT_BACKUP_MAX_GB": "20",
     "SGLANG_HICACHE_PIPELINED_SYNC": "1",
     "SGLANG_HICACHE_SKIP_IDLE_SYNC": "1",
 }
@@ -60,8 +64,18 @@ def cfg(**kw):
 
 def test_symmetric_late_d_choose_turns_on_everything():
     env, fields = sd.plan(cfg(), {})
-    assert env == {**LATE_D_CHOOSE, **HOST, **SNAPSHOT, "SGLANG_DSA_HOST_DEDUP_FANOUT": "ce_peer"}
+    assert env == {**LATE_D_CHOOSE, **HOST, **SNAPSHOT, "SGLANG_DSA_HOST_DEDUP_FANOUT": "ce_peer",
+                   "SGLANG_DSA_HOST_DEDUP_SHARED_VERIFY": "0"}
     assert fields == {"hicache_io_backend": "direct", "hicache_mem_layout": "page_first_direct"}
+
+
+def test_kv_events_publish_lazily_in_batches():
+    env, _ = sd.plan(cfg(kv_events_config='{"publisher": "zmq"}'), {})
+    for name in ("SGLANG_KV_EVENTS_LAZY_LOAD_BACK", "SGLANG_KV_EVENTS_LAZY_FAST_BUILD",
+                 "SGLANG_KV_EVENTS_BATCH_PUBLISH"):
+        assert env[name] == "1"
+    env, _ = sd.plan(cfg(), {})
+    assert "SGLANG_KV_EVENTS_BATCH_PUBLISH" not in env
 
 
 def test_user_settings_win():

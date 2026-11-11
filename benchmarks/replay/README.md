@@ -12,6 +12,7 @@ directory adds what a run through evolving-infra needs on top of the unchanged T
 | `check_inputs.py` | Input check: the workload and `tokenizer.json` match the sha256 its offline validation report attests. |
 | `capture_conformance.py` | Runs Trie's `scripts/sglang_strict_replay_conformance.py` unchanged and keeps every native reply, also on failure. |
 | `checks.py` | Quiet window, steady-state zero failures, monotonic request counters, and steady-window totals. |
+| `score.py` | Score of the scored window over every Trie process's lifecycle file: requests per second, prefix hit, TTFT and end-to-end latency. |
 
 All scripts run with the Trie venv's Python (`/opt/trie-venv/bin/python` in the image), which
 also has the router client SDK (`evolving_infra.router.client`) installed.

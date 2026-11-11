@@ -10,7 +10,10 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["pyyaml>=6"]
+
+[project.scripts]
+evolving-infra = "evolving_infra.launch.__main__:main"
 
 [project.optional-dependencies]
 # Python client SDK for the Router (Agent, Backend, Scheduler).
@@ -45,6 +48,7 @@ packages = [
     "evolving_infra.router.client.scheduler",
     "evolving_infra.router.frontend",
     "evolving_infra.router.indexer",
+    "evolving_infra.launch",
     "evolving_infra.planner",
     "evolving_infra.planner.managers",
     "evolving_infra.planner.observability",
@@ -56,6 +60,7 @@ packages = [
 "evolving_infra.router.client" = "router/client"
 "evolving_infra.router.frontend" = "router/frontend"
 "evolving_infra.router.indexer" = "router/indexer"
+"evolving_infra.launch" = "launch"
 "evolving_infra.planner" = "planner"
 
 [tool.setuptools.package-data]

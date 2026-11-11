@@ -20,15 +20,19 @@ unless the variable is already set (``=0`` keeps a switch off):
   publication after each result, the standard P/D catch-up budget, the launch
   thread, the import walk after the launch), and with
   ``--enable-kv-session-retention`` the branch tag on ADMIT.
-- symmetric: non-blocking host-to-GPU copies at D admission; with the peer
-  KV servicer, range pushes to its index; with HiCache on plain TP, the
-  pipelined and idle-skipping per-step HiCache sync.
+- symmetric: non-blocking host-to-GPU copies at D admission; the unserialized
+  prefill loop (overlap schedule); 1500 s bootstrap and waiting timeouts; a
+  20 GB cap on retract backups in host memory; with the peer KV servicer,
+  range pushes to its index; with HiCache on plain TP, the pipelined and
+  idle-skipping per-step HiCache sync; with ``--kv-events-config``, lazy,
+  merged and batched KV event publication.
 - ``--enable-prefill-work-snapshot``: the prefill routing snapshot that the
   router's cost function reads, sized for long queues.
 - symmetric with ``--enable-dsa-hicache-host-dedup`` or
   ``--enable-mla-hicache-host-dedup``: the copy-engine fan-out (``ce_peer``)
   and the direct host layout it needs. ``SGLANG_DSA_HOST_DEDUP_FANOUT=nccl``
-  (or the MLA word) keeps the NCCL broadcast and the kernel layout.
+  (or the MLA word) keeps the NCCL broadcast and the kernel layout. With DSA
+  dedup, the per-load cross-rank check of the shared pool is off.
 
 A switch that resolution turned on and that a later startup check rejects for
 this model or loop is turned off again with a log line (:func:`refuse`). A
@@ -122,6 +126,12 @@ def plan(cfg: Any, environ: Mapping[str, str]) -> Tuple[Dict[str, str], Dict[str
     if symmetric:
         # Host-tier and transfer paths: the same work in fewer blocking syncs.
         default("SGLANG_PREBUILT_NONBLOCKING_H2D", "1")
+        if overlap:
+            default("SGLANG_PREFILL_UNSERIALIZE_LOOP", "1")
+        # Long agent prompts: a prefill and its transfer can take minutes.
+        default("SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT", "1500")
+        default("SGLANG_DISAGGREGATION_WAITING_TIMEOUT", "1500")
+        default("SGLANG_RETRACT_BACKUP_MAX_GB", "20")
         if getattr(cfg, "enable_peer_kv_servicer", False):
             default("SGLANG_PEER_KV_PUSH_FAST", "1")
         plain_tp = getattr(cfg, "pp_size", 1) == 1 and not getattr(
@@ -143,12 +153,22 @@ def plan(cfg: Any, environ: Mapping[str, str]) -> Tuple[Dict[str, str], Dict[str
         default("SGLANG_PREFILL_ROUTING_SNAPSHOT_MAX_BYTES", "98304")
         default("SGLANG_LOAD_SNAPSHOT_SLOT_BYTES", "131072")
 
+    if symmetric and getattr(cfg, "kv_events_config", None):
+        # Build the load-back events off the admission path, merged, and
+        # publish them once per loop pass. The stream is byte-identical.
+        default("SGLANG_KV_EVENTS_LAZY_LOAD_BACK", "1")
+        default("SGLANG_KV_EVENTS_LAZY_FAST_BUILD", "1")
+        default("SGLANG_KV_EVENTS_BATCH_PUBLISH", "1")
+
     if symmetric:
         layout = (cfg.hicache_io_backend, cfg.hicache_mem_layout)
         for flag, name in _DEDUP_FANOUTS:
             if getattr(cfg, flag, False) and not _user_set(name, environ) and layout in _DEDUP_LAYOUTS:
                 env[name] = "ce_peer"
                 fields.update(hicache_io_backend="direct", hicache_mem_layout="page_first_direct")
+        if getattr(cfg, "enable_dsa_hicache_host_dedup", False):
+            # The per-load cross-rank check of the shared pool (a gloo all-reduce).
+            default("SGLANG_DSA_HOST_DEDUP_SHARED_VERIFY", "0")
     return env, fields
 
 

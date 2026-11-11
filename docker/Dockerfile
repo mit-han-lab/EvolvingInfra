@@ -87,10 +87,12 @@ COPY router/frontend /opt/evolving-infra/router/frontend
 COPY router/indexer /opt/evolving-infra/router/indexer
 COPY router/client /opt/evolving-infra/router/client
 COPY planner /opt/evolving-infra/planner
+COPY launch /opt/evolving-infra/launch
 RUN python3 -m venv /opt/indexer-venv \
  && /opt/indexer-venv/bin/pip install -q "ai-dynamo==${DYNAMO_VERSION}" msgpack pyzmq \
  && /opt/indexer-venv/bin/pip install -q "/opt/evolving-infra[frontend,indexer,planner]" 'fastapi<0.142' \
- && /opt/indexer-venv/bin/python -c 'import dynamo.llm, evolving_infra.router.frontend, evolving_infra.router.indexer, evolving_infra.planner'
+ && /opt/indexer-venv/bin/python -c 'import dynamo.llm, evolving_infra.router.frontend, evolving_infra.router.indexer, evolving_infra.planner, evolving_infra.launch' \
+ && ln -s /opt/indexer-venv/bin/evolving-infra /usr/local/bin/evolving-infra
 
 # ---------------------------------------------------------------- replay client
 # Trie pins transformers 4.57.6, so it gets a venv of its own; the router client SDK beside it serves

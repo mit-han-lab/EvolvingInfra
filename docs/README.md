@@ -34,6 +34,7 @@ host-memory tier.
 
 | Page | Description |
 |---|---|
+| [GLM-5.2 on GB300](../examples/gb300/README.md) | `evolving-infra serve` on one node, and the paper's nine-node experiment with one command |
 | [Quickstart](quickstart.md) | Run the stack on one node and send a request; install from source; benchmarks on Modal |
 | [Quickstart on GB300](quickstart-gb300.md) | The paper's configuration on two GB300 nodes with GLM-5.2 |
 | [Architecture](architecture.md) | Components, request path, repository layout, names kept for compatibility |
