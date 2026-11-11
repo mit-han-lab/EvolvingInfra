@@ -1,6 +1,10 @@
 evolving-infra
 Copyright 2026 The evolving-infra Authors
 
+evolving-infra is licensed under the MIT License (LICENSE). The parts listed below are derived
+from other projects and keep their licenses; the SGLang-derived engine and router core are under
+the Apache License, Version 2.0 (evolving_infra/engine/LICENSE, evolving_infra/router/core/LICENSE).
+
 This product includes software derived from SGLang
 (https://github.com/sgl-project/sglang), Copyright 2023-2026 The SGLang Authors,
 licensed under the Apache License, Version 2.0:

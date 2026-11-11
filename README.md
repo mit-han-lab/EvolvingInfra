@@ -23,7 +23,7 @@ Agent-Adaptive LLM Serving at Scale
   <a href="https://arxiv.org/abs/2611.12304"><img src="https://img.shields.io/badge/arXiv-2611.12304-b31b1b.svg" alt="Paper on arXiv"></a>
   <a href="docs/README.md"><img src="https://img.shields.io/badge/Docs-evolving--infra-6f42c1.svg" alt="Documentation"></a>
   <a href="https://huggingface.co/datasets/crmsndu/evolving-infra-traces"><img src="https://img.shields.io/badge/Traces-Hugging_Face-FFD21E.svg?logo=huggingface&logoColor=FFD21E" alt="Agent traces on Hugging Face"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green.svg" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"></a>
 </p>
 
 > [!TIP]
@@ -160,5 +160,7 @@ If you use Evolving Infra, please cite the [paper](https://arxiv.org/abs/2611.12
 
 ## License
 
-Apache License 2.0 ([LICENSE](LICENSE)). The engine and the router core are derived from SGLang
-at upstream commit `9a489f8d2f`; [NOTICE](NOTICE) lists every included third-party work.
+MIT ([LICENSE](LICENSE)). The engine (`evolving_infra/engine/`) and the router core
+(`evolving_infra/router/core/`) are derived from SGLang at upstream commit `9a489f8d2f` and, with
+Trie (`benchmarks/trie/`), stay under the Apache License 2.0 in their own LICENSE files;
+[NOTICE](NOTICE) lists every included third-party work.

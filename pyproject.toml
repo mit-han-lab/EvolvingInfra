@@ -7,7 +7,7 @@ name = "evolving-infra"
 version = "0.1.0"
 description = "Router frontend, KV indexer, client SDK and P/D planner for decoupled, agent-aware LLM serving"
 readme = "README.md"
-license = "Apache-2.0"
+license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 dependencies = ["pyyaml>=6"]
