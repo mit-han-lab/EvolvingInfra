@@ -9,6 +9,10 @@ Agent-Adaptive LLM Serving at Scale
 </h3>
 
 <p align="center">
+  <img src="docs/assets/affiliations.svg" width="860" alt="Georgia Institute of Technology, University of Illinois Urbana-Champaign, University of California, Berkeley, NVIDIA, OpenAI, Massachusetts Institute of Technology">
+</p>
+
+<p align="center">
 | <a href="https://inference-rsi.com/"><b>Website</b></a> | <a href="https://arxiv.org/abs/2611.12304"><b>Paper</b></a> | <b>Wiki</b> (coming soon) |
 </p>
 

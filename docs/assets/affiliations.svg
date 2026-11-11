@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="48" viewBox="0 0 860 48" role="img" aria-label="Georgia Institute of Technology, University of Illinois Urbana-Champaign, University of California, Berkeley, NVIDIA, OpenAI, Massachusetts Institute of Technology">
+  <title>Georgia Institute of Technology, University of Illinois Urbana-Champaign, University of California, Berkeley, NVIDIA, OpenAI, Massachusetts Institute of Technology</title>
+  <defs>
+    <linearGradient id="fade" x1="0" x2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="0.08" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="0.92" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <mask id="edges"><rect width="860" height="48" fill="url(#fade)"/></mask>
+  </defs>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+           font-size: 18px; font-weight: 600; fill: #8b949e; text-anchor: middle; }
+    .dot { font-weight: 400; }
+  </style>
+  <g mask="url(#edges)">
+    <g>
+    <text x="149" y="30">Georgia Institute of Technology</text>
+    <text x="343" y="30" class="dot">·</text>
+    <text x="575" y="30">University of Illinois Urbana-Champaign</text>
+    <text x="807" y="30" class="dot">·</text>
+    <text x="1015" y="30">University of California, Berkeley</text>
+    <text x="1223" y="30" class="dot">·</text>
+    <text x="1297" y="30">NVIDIA</text>
+    <text x="1371" y="30" class="dot">·</text>
+    <text x="1445" y="30">OpenAI</text>
+    <text x="1519" y="30" class="dot">·</text>
+    <text x="1741" y="30">Massachusetts Institute of Technology</text>
+    <text x="1964" y="30" class="dot">·</text>
+    <text x="2158" y="30">Georgia Institute of Technology</text>
+    <text x="2352" y="30" class="dot">·</text>
+    <text x="2584" y="30">University of Illinois Urbana-Champaign</text>
+    <text x="2816" y="30" class="dot">·</text>
+    <text x="3024" y="30">University of California, Berkeley</text>
+    <text x="3232" y="30" class="dot">·</text>
+    <text x="3306" y="30">NVIDIA</text>
+    <text x="3380" y="30" class="dot">·</text>
+    <text x="3454" y="30">OpenAI</text>
+    <text x="3528" y="30" class="dot">·</text>
+    <text x="3750" y="30">Massachusetts Institute of Technology</text>
+    <text x="3973" y="30" class="dot">·</text>
+    <animateTransform attributeName="transform" type="translate" from="0 0" to="-2009 0" dur="28s" repeatCount="indefinite"/>
+    </g>
+  </g>
+</svg>
