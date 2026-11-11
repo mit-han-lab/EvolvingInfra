@@ -10,6 +10,7 @@ Agent-Adaptive LLM Serving at Scale
 
 <p align="center">
   <img src="docs/assets/affiliations.svg" width="860" alt="Georgia Institute of Technology, University of Illinois Urbana-Champaign, University of California, Berkeley, NVIDIA, OpenAI, Massachusetts Institute of Technology">
+  <br><sub>Corresponding author: <a href="mailto:hao.kang.sys@gmail.com">hao.kang.sys@gmail.com</a></sub>
 </p>
 
 <p align="center">
