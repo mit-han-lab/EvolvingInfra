@@ -58,12 +58,12 @@ pub struct AppContext {
     /// hold queue, marks); `Some` exactly when `--policy symmetric_pd`. The
     /// chat/completions routes place through `SymmetricPdRuntime::admit` and
     /// `POST /symmetric_pd/place` serves an external ingress.
-    pub symmetric_pd: Option<Arc<crate::symmetric_pd::SymmetricPdRuntime>>,
+    pub symmetric_pd: Option<Arc<crate::scheduler::SymmetricPdRuntime>>,
     /// Traditional-PD per-request decision replay table; `Some` exactly when
     /// `--pd-decision-replay` is configured (`ModelConfig::pd_decision_replay`).
     /// The chat/completions routes pin (prefill, decode) from it before
     /// falling back to `Policy::select` + `decode_select`.
-    pub pd_replay: Option<Arc<crate::symmetric_pd::DecisionReplay>>,
+    pub pd_replay: Option<Arc<crate::scheduler::DecisionReplay>>,
     pub prepared_config: Option<crate::backend::execution::PreparedConfig>,
     pub executions: Arc<crate::backend::execution::Executions>,
     /// Completed-request totals for the external role controller; `Some`
@@ -194,7 +194,7 @@ impl AppContext {
         // symmetric P/D: the indexer is optional (placement degrades to
         // load/role only); the runtime reuses the kv-hint indexer config.
         let symmetric_pd = config.model.symmetric_pd.as_ref().map(|f| {
-            crate::symmetric_pd::SymmetricPdRuntime::spawn(
+            crate::scheduler::SymmetricPdRuntime::spawn(
                 f.clone(),
                 config.model.kv_hint.as_ref(),
                 Arc::clone(&registry),
@@ -205,7 +205,7 @@ impl AppContext {
         // error for a controlled experiment, so fail loudly at startup.
         let pd_replay = config.model.pd_decision_replay.as_ref().map(|r| {
             Arc::new(
-                crate::symmetric_pd::DecisionReplay::load(&r.table)
+                crate::scheduler::DecisionReplay::load(&r.table)
                     .unwrap_or_else(|e| panic!("--pd-decision-replay: {e}")),
             )
         });

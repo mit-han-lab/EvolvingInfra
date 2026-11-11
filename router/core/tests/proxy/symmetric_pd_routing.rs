@@ -25,7 +25,7 @@ use sgl_router::config::{
     PolicyKind, ProxyConfig, ServerConfig, StaticUrlsDiscoveryConfig,
 };
 use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
-use sgl_router::symmetric_pd::RoleWeight;
+use sgl_router::scheduler::RoleWeight;
 use sgl_router::policies::factory::build_registry_with_defaults;
 use sgl_router::proxy::Proxy;
 use sgl_router::server::app::build_router;

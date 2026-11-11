@@ -143,6 +143,24 @@ impl Drop for Query {
     }
 }
 
+/// Log the outcome of one progress query of `worker` (target
+/// `load_refresh`): unchanged progress and an applied reply at debug, any
+/// other error at warn.
+pub(crate) fn log_progress_result<T>(worker: &str, result: &anyhow::Result<T>, elapsed_ms: f64) {
+    if let Err(error) = result {
+        if error.is::<UnchangedProgress>() {
+            tracing::debug!(target: "load_refresh", worker = %worker, elapsed_ms,
+                "progress unchanged; retaining reservations");
+        } else {
+            tracing::warn!(target: "load_refresh", worker = %worker, %error, elapsed_ms,
+                "progress query failed; retaining reservations");
+        }
+    } else {
+        tracing::debug!(target: "load_refresh", worker = %worker, elapsed_ms,
+            "progress query applied");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

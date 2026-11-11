@@ -704,26 +704,7 @@ impl CoScheduler {
                 );
             }
             if trade.is_auto() {
-                use crate::scheduler::co_schedule::{TradeAutoQ, TradeLambdaMode, TradeRateMode};
-                let lambda = match trade.copy_lambda_mode {
-                    TradeLambdaMode::Auto { q, mu, min, max } => format!(
-                        "lambda = clamp(mu*q*R/R_hat, min, max) with q {} ({}), mu = {mu}, \
-                         min = {min}, max = {max}, fallback lambda = {}",
-                        q.as_str(),
-                        match q {
-                            TradeAutoQ::Sat => "N_active/n_P*busy",
-                            TradeAutoQ::Inflight => "1 + mean in-flight requests per P",
-                        },
-                        trade.copy_lambda,
-                    ),
-                    TradeLambdaMode::Fixed => format!("lambda fixed = {}", trade.copy_lambda),
-                };
-                let rate = match trade.rate_mode {
-                    TradeRateMode::Auto => {
-                        format!("R = R_hat (fallback R = {})", trade.rate_tokens_per_s)
-                    }
-                    TradeRateMode::Fixed => format!("R fixed = {}", trade.rate_tokens_per_s),
-                };
+                let (lambda, rate) = trade.auto_description();
                 let (tau, idle) = (trade.auto_tau_s, trade.auto_session_idle_s);
                 tracing::info!(
                     target: "co_sched",
@@ -1205,18 +1186,7 @@ impl CoScheduler {
                     Ok::<_, anyhow::Error>(cursor)
                 }.await;
                 let elapsed_ms = query.sent_at.elapsed().as_secs_f64() * 1000.0;
-                if let Err(error) = &result {
-                    if error.is::<crate::load_refresh::UnchangedProgress>() {
-                        tracing::debug!(target: "load_refresh", worker = %worker.url, elapsed_ms,
-                            "progress unchanged; retaining reservations");
-                    } else {
-                        tracing::warn!(target: "load_refresh", worker = %worker.url, %error, elapsed_ms,
-                            "progress query failed; retaining reservations");
-                    }
-                } else {
-                    tracing::debug!(target: "load_refresh", worker = %worker.url, elapsed_ms,
-                        "progress query applied");
-                }
+                crate::load_refresh::log_progress_result(&worker.url, &result, elapsed_ms);
                 let applied = result.is_ok();
                 query.finish(result.ok(), Instant::now());
                 if applied && sched.gwq.is_some() {
@@ -2896,7 +2866,7 @@ pub(crate) async fn fetch_progress_poll(
         (false, true) => "core,queues,prefill_work,host_room",
         (true, true) => "core,queues,prefill_work,prefill_routing,host_room",
     };
-    let value: Value = client
+    let mut value: Value = client
         .get(format!("{}/v1/loads", base.trim_end_matches('/')))
         .query(&[("include", include)])
         .send()
@@ -2905,8 +2875,8 @@ pub(crate) async fn fetch_progress_poll(
         .json()
         .await?;
     let loads = value
-        .get("loads")
-        .and_then(Value::as_array)
+        .get_mut("loads")
+        .and_then(Value::as_array_mut)
         .ok_or_else(|| anyhow::anyhow!("missing loads[]"))?;
     // TP shares one scheduler RID namespace. Supporting DP requires explicit
     // per-rank cursors and routing; never silently take an arbitrary rank.
@@ -2914,7 +2884,7 @@ pub(crate) async fn fetch_progress_poll(
         loads.len() == 1,
         "uncached balance requires DP=1 per worker"
     );
-    let mut load = loads[0].clone();
+    let mut load = loads.swap_remove(0);
     let progress = load
         .as_object_mut()
         .and_then(|row| row.remove("prefill_work"))

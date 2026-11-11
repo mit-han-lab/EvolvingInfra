@@ -60,7 +60,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::co_schedule::{
-    trade_pull_tokens, TradeAutoQ, TradeLambdaMode, TradePullPrice, TradeRateMode, TradeWait,
+    trade_pull_tokens, TradeLambdaMode, TradePullPrice, TradeWait,
     TRADE_MIN_PULL_TOKENS,
 };
 use super::{SymmetricPdError, PlaceInput};
@@ -547,18 +547,7 @@ impl CostFunction {
                 Some(tokio::spawn(async move {
                     let result = cf.poll_progress(&worker, &query).await;
                     let elapsed_ms = query.sent_at.elapsed().as_secs_f64() * 1000.0;
-                    if let Err(error) = &result {
-                        if error.is::<crate::load_refresh::UnchangedProgress>() {
-                            tracing::debug!(target: "load_refresh", worker = %worker.url,
-                                elapsed_ms, "progress unchanged; retaining reservations");
-                        } else {
-                            tracing::warn!(target: "load_refresh", worker = %worker.url, %error,
-                                elapsed_ms, "progress query failed; retaining reservations");
-                        }
-                    } else {
-                        tracing::debug!(target: "load_refresh", worker = %worker.url, elapsed_ms,
-                            "progress query applied");
-                    }
+                    crate::load_refresh::log_progress_result(&worker.url, &result, elapsed_ms);
                     query.finish(result.ok(), Instant::now());
                 }))
             })
@@ -725,16 +714,21 @@ fn restrict_to_pool(answer: &IndexerAnswer, pool: &[Arc<Worker>]) -> IndexerAnsw
     }
 }
 
-/// The decision line of one reservation (target `symmetric_pd`).
-fn log_decision_line(input: &PlaceInput, selected: &Candidate, decision: &Value) {
-    // `Value` inside the macro would resolve to tracing's field trait.
-    let source_worker = selected
+/// The `source_worker_id` of the P-leg's hint, `-` without one.
+fn hint_source_worker(selected: &Candidate) -> String {
+    selected
         .hint
         .as_ref()
         .and_then(|h| h.get("source_worker_id"))
         .and_then(Value::as_str)
         .unwrap_or("-")
-        .to_string();
+        .to_string()
+}
+
+/// The decision line of one reservation (target `symmetric_pd`).
+fn log_decision_line(input: &PlaceInput, selected: &Candidate, decision: &Value) {
+    // `Value` inside the macro would resolve to tracing's field trait.
+    let source_worker = hint_source_worker(selected);
     tracing::info!(
         target: "symmetric_pd",
         rid = input.rid.as_deref().unwrap_or("-"),
@@ -766,13 +760,7 @@ fn log_pull_source(
     if !cfg.pull_from_any_holder {
         return;
     }
-    let source_worker = selected
-        .hint
-        .as_ref()
-        .and_then(|h| h.get("source_worker_id"))
-        .and_then(Value::as_str)
-        .unwrap_or("-")
-        .to_string();
+    let source_worker = hint_source_worker(selected);
     tracing::info!(
         target: "symmetric_pd",
         rid = input.rid.as_deref().unwrap_or("-"),
@@ -910,25 +898,7 @@ fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_
         );
     }
     if trade.is_auto() {
-        let lambda = match trade.copy_lambda_mode {
-            TradeLambdaMode::Auto { q, mu, min, max } => format!(
-                "lambda = clamp(mu*q*R/R_hat, min, max) with q {} ({}), mu = {mu}, \
-                 min = {min}, max = {max}, fallback lambda = {}",
-                q.as_str(),
-                match q {
-                    TradeAutoQ::Sat => "N_active/n_P*busy",
-                    TradeAutoQ::Inflight => "1 + mean in-flight requests per P",
-                },
-                trade.copy_lambda,
-            ),
-            TradeLambdaMode::Fixed => format!("lambda fixed = {}", trade.copy_lambda),
-        };
-        let rate = match trade.rate_mode {
-            TradeRateMode::Auto => {
-                format!("R = R_hat (fallback R = {})", trade.rate_tokens_per_s)
-            }
-            TradeRateMode::Fixed => format!("R fixed = {}", trade.rate_tokens_per_s),
-        };
+        let (lambda, rate) = trade.auto_description();
         let (tau, idle) = (trade.auto_tau_s, trade.auto_session_idle_s);
         tracing::info!(
             target: "symmetric_pd",

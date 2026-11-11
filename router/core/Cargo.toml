@@ -23,15 +23,12 @@ unused_qualifications = "warn"
 
 [dependencies]
 # Dynamo crates — pinned by SHA. Bumps are manual PRs.
-dynamo-protocols = { git = "https://github.com/ai-dynamo/dynamo", rev = "1efdd4dcb901caeae636131321094090d252c8d6" }
 dynamo-tokenizers = { git = "https://github.com/ai-dynamo/dynamo", rev = "1efdd4dcb901caeae636131321094090d252c8d6" }
-dynamo-parsers = { git = "https://github.com/ai-dynamo/dynamo", rev = "1efdd4dcb901caeae636131321094090d252c8d6" }
 
 # Async runtime + http
 tokio = { version = "1.42", features = ["full"] }
 axum = { version = "0.8", features = ["macros", "tracing"] }
 tower = { version = "0.5", features = ["full"] }
-tower-http = { version = "0.6", features = ["trace", "compression-gzip", "cors", "timeout", "request-id"] }
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
 sgl-kv-indexer = { path = "sgl-kv-indexer" }
 
@@ -76,7 +73,6 @@ uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"
 rmp-serde = "1"
 sha2 = "0.10"
-blake3 = "=1.8.7"
 url = "2"
 zeromq = { version = "0.6", default-features = false, features = ["tokio-runtime", "tcp-transport"] }
 

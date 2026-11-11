@@ -44,6 +44,7 @@ use crate::policies::kv_events::{
     compute_block_hashes, compute_block_hashes_bigram, compute_block_hashes_bigram_salted,
     compute_block_hashes_salted, BlockSizeOracle, HashTree,
 };
+use crate::policies::load_based::LoadBasedPolicy;
 use crate::policies::{request_tokens_for, Policy, SelectionContext};
 use crate::server::metrics::MetricsRegistry;
 use crate::tokenizer::TokenizerRegistry;
@@ -111,16 +112,6 @@ impl CacheAwareZmqPolicy {
         self
     }
 
-    /// Lowest-load worker — ties broken by stable iteration order (which
-    /// is the order the registry returned, i.e. dashmap-undefined). For
-    /// production traffic the ties are rare; tests pin the load skew.
-    fn pick_min_load(workers: &[Arc<Worker>]) -> Option<Arc<Worker>> {
-        workers
-            .iter()
-            .min_by_key(|w| w.active_load())
-            .map(Arc::clone)
-    }
-
     /// Detect load imbalance. Returns `true` when the spread between max
     /// and min load is large enough that cache-aware routing would dump
     /// even more on the hot worker.
@@ -185,7 +176,7 @@ impl Policy for CacheAwareZmqPolicy {
         // 1. Load-imbalance fast-path: even the best cache hit gets
         //    dropped in favour of evening out load.
         if self.is_imbalanced(workers) {
-            return Self::pick_min_load(workers);
+            return LoadBasedPolicy::pick_min_load(workers);
         }
 
         // An external signal is authoritative: an empty/unusable result
@@ -193,7 +184,7 @@ impl Policy for CacheAwareZmqPolicy {
         if let Some(signal) = ctx.external_prefix() {
             return self
                 .select_external(workers, ctx, signal)
-                .or_else(|| Self::pick_min_load(workers));
+                .or_else(|| LoadBasedPolicy::pick_min_load(workers));
         }
 
         // 2. Routing tokens. Prefer the ids computed once at ingress; fall
@@ -212,13 +203,13 @@ impl Policy for CacheAwareZmqPolicy {
             _ => {
                 let body = match ctx.request_body() {
                     Some(b) if !b.is_empty() => b,
-                    _ => return Self::pick_min_load(workers),
+                    _ => return LoadBasedPolicy::pick_min_load(workers),
                 };
                 let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-                    return Self::pick_min_load(workers);
+                    return LoadBasedPolicy::pick_min_load(workers);
                 };
                 let Some(rt) = request_tokens_for(&self.tokenizers, ctx.model(), &value) else {
-                    return Self::pick_min_load(workers);
+                    return LoadBasedPolicy::pick_min_load(workers);
                 };
                 fallback_salt = crate::kv_hint::extract_cache_salt(&value).map(str::to_owned);
                 fallback_ids = rt.ids;
@@ -237,7 +228,7 @@ impl Policy for CacheAwareZmqPolicy {
                 model = %ctx.model(),
                 "cache-aware-zmq: block size unknown (no worker page_size yet), falling back to min-load",
             );
-            return Self::pick_min_load(workers);
+            return LoadBasedPolicy::pick_min_load(workers);
         };
         // EAGLE-family workers hash KV blocks over token bigrams; the query
         // hashes must match the worker's stored hashes or the tree lookup
@@ -254,7 +245,7 @@ impl Policy for CacheAwareZmqPolicy {
             (false, None) => compute_block_hashes(tokens, bs),
         };
         if block_hashes.is_empty() {
-            return Self::pick_min_load(workers);
+            return LoadBasedPolicy::pick_min_load(workers);
         }
         let matched = self.tree.match_prefix(None, &block_hashes);
         let match_rate = matched.matched_blocks as f32 / block_hashes.len() as f32;
@@ -283,7 +274,7 @@ impl Policy for CacheAwareZmqPolicy {
                 cache_threshold = self.config.cache_threshold,
                 "cache-aware-zmq: overlap below threshold, falling back to min-load",
             );
-            return Self::pick_min_load(workers);
+            return LoadBasedPolicy::pick_min_load(workers);
         }
         // Among workers in the matched set, pick the lowest-load one.
         let matched_urls: std::collections::HashSet<&str> =
@@ -293,7 +284,7 @@ impl Policy for CacheAwareZmqPolicy {
             .filter(|w| matched_urls.contains(w.url.as_str()))
             .min_by_key(|w| w.active_load())
             .map(Arc::clone);
-        let chosen = best_matched.or_else(|| Self::pick_min_load(workers));
+        let chosen = best_matched.or_else(|| LoadBasedPolicy::pick_min_load(workers));
         if let Some(w) = &chosen {
             tracing::debug!(
                 model = %ctx.model(),

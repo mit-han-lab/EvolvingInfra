@@ -22,12 +22,15 @@
 //! instead of `bootstrap_room`.
 
 use crate::config::PolicyKind;
-use crate::symmetric_pd::placement::{
+use crate::scheduler::placement::{
     d_select_name, p_reason_name, TERM_BACKLOG, TERM_DECODE_LOAD, TERM_D_SELECT, TERM_HIT_TOKENS,
     TERM_P_REASON, TERM_REUSE_GAIN, TERM_ROLE_PEN_D, TERM_ROLE_PEN_P, TERM_SCORE, TERM_XFER_COST,
 };
-use crate::symmetric_pd::Decision;
+use crate::scheduler::Decision;
 use crate::policies::decode_tokens::DecodeTokenLog;
+use crate::server::error::ApiError;
+use axum::body::Body;
+use axum::http::Response;
 use serde_json::Value;
 
 pub(crate) struct RoutingDecision<'a> {
@@ -196,7 +199,7 @@ pub(crate) fn log_routing_decision(r: &RoutingDecision<'_>) {
 #[derive(Clone)]
 pub(crate) enum AdmissionLedger {
     Co(crate::co_schedule::LedgerHandle),
-    Flex(crate::symmetric_pd::LedgerHandle),
+    Flex(crate::scheduler::LedgerHandle),
 }
 
 impl AdmissionLedger {
@@ -204,6 +207,38 @@ impl AdmissionLedger {
         match self {
             AdmissionLedger::Co(l) => l.retire(),
             AdmissionLedger::Flex(l) => l.retire(),
+        }
+    }
+}
+
+/// Settles the prefill leg's accounting once its forward returned: closes the
+/// cost reservation (finished with the response outcome, unknown on a
+/// transport error) and releases the admission ledger (a symmetric_pd handle
+/// is marked unknown on a transport error, retired otherwise).
+pub(crate) fn settle_prefill_leg(
+    cost: Option<&mut crate::cost_balance::Reservation>,
+    ledger: Option<AdmissionLedger>,
+    result: &Result<Response<Body>, ApiError>,
+) {
+    if let Some(cost) = cost {
+        let accounted = match result {
+            Ok(response) => cost.finish(if response.status().is_success() {
+                "prefill_response_success"
+            } else if crate::proxy::is_reader_gone(result) {
+                crate::proxy::READER_GONE_FINISH_REASON
+            } else {
+                "prefill_response_error"
+            }),
+            Err(error) => cost.mark_unknown(&format!("prefill_transport_error: {error}")),
+        };
+        if let Err(error) = accounted {
+            tracing::error!(target: "cost_balance", %error, "cost lifecycle observation failed");
+        }
+    }
+    if let Some(ledger) = ledger {
+        match (result, ledger) {
+            (Err(_), AdmissionLedger::Flex(handle)) => handle.mark_unknown(),
+            (_, ledger) => ledger.retire(),
         }
     }
 }

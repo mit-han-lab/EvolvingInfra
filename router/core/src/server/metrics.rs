@@ -896,7 +896,7 @@ pub fn render_decode_token_charges(rows: &[DecodeChargeSnapshot]) -> String {
     out
 }
 
-fn escape_label(s: &str) -> String {
+pub(crate) fn escape_label(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

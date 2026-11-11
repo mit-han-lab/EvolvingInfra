@@ -57,7 +57,6 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::scheduler::co_schedule::TradeWaitTerms;
 
@@ -433,14 +432,7 @@ pub fn params_from_json(data: &[u8]) -> Result<OlpParams, String> {
 pub fn load_params(path: &Path) -> Result<(OlpParams, String), String> {
     let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let params = params_from_json(&data).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok((params, hex_sha256(&data)))
-}
-
-fn hex_sha256(data: &[u8]) -> String {
-    Sha256::digest(data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    Ok((params, crate::sha256_hex(&data)))
 }
 
 /// The OLP configuration of a cost function (`SymmetricPdCostFunctionConfig::olp`).
@@ -2504,7 +2496,7 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let (p, sha) = load_params(&path).unwrap();
         assert_eq!(p.step_s, 30.0);
-        assert_eq!(sha, hex_sha256(text));
+        assert_eq!(sha, crate::sha256_hex(text));
         assert_eq!(sha.len(), 64);
         assert!(load_params(&dir.path().join("missing.json")).is_err());
         // The parameters round-trip through the trace form.

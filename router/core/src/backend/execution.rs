@@ -11,7 +11,7 @@ use crate::{
     backend::sglang::request::prepared_target,
     backend::state::{DecodeReservation, LedgerHandle},
     backend::workload::{CompletedWorkload, RequestSample},
-    symmetric_pd::{Decision, PlaceInput},
+    scheduler::{Decision, PlaceInput},
 };
 // Compatibility export; the wire protocol itself belongs to the SGLang adapter.
 pub use crate::backend::sglang::request::cancel_engines;

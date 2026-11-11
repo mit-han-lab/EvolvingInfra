@@ -77,6 +77,7 @@ use crate::health::circuit_breaker::CircuitBreaker;
 use crate::late_fit::{DecodeCapacityStore, FitReservations, LateCharge};
 use crate::policies::decode_po2_smg::SmgPowerOfTwo;
 use crate::policies::decode_tokens::{DecodeTokenBalancer, TokenRule};
+use crate::server::metrics::escape_label;
 use crate::workers::{LateDWorkerInfo, Worker, WorkerRegistry};
 
 /// Link protocol version (`v` in every message and in the `late_d` fields).
@@ -676,12 +677,6 @@ pub fn settle_unused_probe(breaker: &CircuitBreaker) {
 
 fn get(c: &AtomicU64) -> u64 {
     c.load(Ordering::Relaxed)
-}
-
-fn escape_label(s: &str) -> String {
-    s.replace('\\', r"\\")
-        .replace('"', r#"\""#)
-        .replace('\n', r"\n")
 }
 
 /// Process-wide late-D series that exist without a [`LateBind`] (packed
@@ -1583,7 +1578,7 @@ impl LateBind {
                     tokens,
                     entry.key,
                     input_tokens,
-                    &self.capacity.snapshot(),
+                    &*self.capacity.snapshot(),
                     Duration::from_millis(self.config.fit_state_max_age_ms),
                 )?;
                 if !fit {

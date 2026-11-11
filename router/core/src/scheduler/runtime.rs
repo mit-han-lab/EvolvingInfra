@@ -455,6 +455,7 @@ impl DecisionReplay {
     /// # Outputs
     /// Relaxed atomic snapshots of `(hit, unknown, exhausted, no_key)` counts; `unknown` also
     /// includes unmatched lengths.
+    #[cfg(test)]
     pub fn counters(&self) -> (u64, u64, u64, u64) {
         (
             self.hits.load(Ordering::Relaxed),
@@ -669,13 +670,6 @@ impl SymmetricPdRuntime {
         self.cost_function.is_some()
     }
 
-    /// The cost function takes its copy price or R from the router's
-    /// measurements (`auto`); the routes then pass the session identity
-    /// ([`PlaceInput::trade_session`]).
-    pub fn cost_function_auto(&self) -> bool {
-        self.cost_function.as_ref().is_some_and(|cf| cf.is_auto())
-    }
-
     /// The routes pass the session identity ([`PlaceInput::trade_session`]):
     /// the cost function's copy price or R `auto`, or
     /// `--symmetric-pd-trace-session-moves`.
@@ -735,19 +729,6 @@ impl SymmetricPdRuntime {
         self.replay
             .as_ref()
             .map(|_| self.cfg.decision_replay_header.as_str())
-    }
-
-    /// Decision-replay counters `(hit, unknown_key, exhausted, no_key)`.
-    /// Expose replay statistics only when replay is configured.
-    ///
-    /// # Inputs
-    /// `self`: initialized runtime.
-    ///
-    /// # Outputs
-    /// `Some((hit, unknown, exhausted, no_key))`, or `None` when replay is disabled; no cursors
-    /// advance.
-    pub fn replay_counters(&self) -> Option<(u64, u64, u64, u64)> {
-        self.replay.as_ref().map(DecisionReplay::counters)
     }
 
     /// Fresh transfer id (u64 in `[0, 2^63)`, like `bootstrap_room` was).
@@ -1101,7 +1082,7 @@ impl SymmetricPdRuntime {
     /// Query cache state, atomically select/reserve P work, and construct dispatch metadata.
     ///
     /// # Inputs
-    /// `self`: runtime, Backend and policy; `_self_arc`: retained compatibility argument
+    /// `self`: runtime, Backend and policy
     /// (unused); `input`: request metadata and optional cache lookup keys.
     ///
     /// # Outputs
@@ -1111,7 +1092,6 @@ impl SymmetricPdRuntime {
     /// may wait up to the configured deadline before forced placement.
     pub async fn admit(
         &self,
-        _self_arc: &Arc<Self>,
         input: PlaceInput,
     ) -> Result<Decision, SymmetricPdError> {
         let arrived = Instant::now();
@@ -1245,6 +1225,9 @@ impl SymmetricPdRuntime {
             };
             // Snapshot, choose and reserve are one critical section. No
             // network await is allowed while Backend state is locked.
+            let hashes = input.hashes.clone().unwrap_or_default();
+            let session_id = input.session_id.clone();
+            let rid = input.rid.clone();
             let attempt = {
                 let mut state = self.backend.state.lock();
                 let loads = state.loads(weights.workers.keys());
@@ -1261,11 +1244,11 @@ impl SymmetricPdRuntime {
                     let transfer_seed = self.mint_transfer_seed();
                     let pin = pin.clone();
                     let req = PlacementRequest {
-                        hashes: input.hashes.clone().unwrap_or_default(),
+                        hashes,
                         prompt_len,
-                        session_id: input.session_id.clone(),
+                        session_id,
                         turn: input.turn,
-                        rid: input.rid.clone(),
+                        rid,
                         transfer_seed,
                         pin,
                     };
@@ -1371,13 +1354,13 @@ impl SymmetricPdRuntime {
     /// Create a raw-token reservation through the compatibility API.
     ///
     /// # Inputs
-    /// `self`: Backend state; `_self_arc`: unused compatibility argument; `worker`: target URL;
+    /// `self`: Backend state; `worker`: target URL;
     /// `tokens`: uncached work to reserve.
     ///
     /// # Outputs
     /// A `LedgerHandle` for the newly reserved work; callers manage its dispatch/retirement
     /// lifecycle.
-    pub fn account(&self, _self_arc: &Arc<Self>, worker: &str, tokens: u64) -> LedgerHandle {
+    pub fn account(&self, worker: &str, tokens: u64) -> LedgerHandle {
         self.backend.state.lock().reserve(worker, tokens)
     }
 
@@ -1589,7 +1572,7 @@ impl SymmetricPdRuntime {
     /// Return a dispatch plan for the legacy external-ingress placement endpoint.
     ///
     /// # Inputs
-    /// `self`: runtime/Backend; `_self_arc`: unused compatibility argument; `req`: input
+    /// `self`: runtime/Backend; `req`: input
     /// descriptors and optional force-split, accounting, and engine-route overrides.
     ///
     /// # Outputs
@@ -1599,7 +1582,6 @@ impl SymmetricPdRuntime {
     /// completion callback. It does not dispatch generation.
     pub async fn place_http(
         &self,
-        _self_arc: &Arc<Self>,
         req: PlaceHttpRequest,
     ) -> Result<PlaceHttpResponse, SymmetricPdError> {
         // The cost ledger needs each request's dispatch and end; this API
@@ -2278,7 +2260,6 @@ mod tests {
         // A large prompt must not consume the newly generated suffix budget.
         let decision = rt
             .admit(
-                &rt,
                 PlaceInput {
                     prompt_len: 131_072,
                     rid: Some("stable-request".into()),
@@ -2357,7 +2338,6 @@ mod tests {
         let rt = SymmetricPdRuntime::spawn(cfg, None, reg, model());
         let error = rt
             .admit(
-                &rt,
                 PlaceInput {
                     prompt_len: 4096,
                     ..Default::default()
@@ -2570,7 +2550,7 @@ mod tests {
             rid: Some("r1".into()),
             ..Default::default()
         };
-        let d = rt.admit(&rt, input).await.unwrap();
+        let d = rt.admit(input).await.unwrap();
         assert_eq!(d.p_worker.url, "http://10.0.0.1:30000");
         assert_eq!(d.d_worker.url, "http://10.0.0.2:30000");
         assert_eq!(d.branch(), "split");
@@ -2652,7 +2632,6 @@ mod tests {
         let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), None, reg, model());
         let d = rt
             .admit(
-                &rt,
                 PlaceInput {
                     prompt_len: 100,
                     ..Default::default()
@@ -2690,7 +2669,6 @@ mod tests {
         let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), None, reg, model());
         let err = rt
             .admit(
-                &rt,
                 PlaceInput {
                     prompt_len: 64,
                     ..Default::default()
@@ -2726,11 +2704,10 @@ mod tests {
         };
         let rt = SymmetricPdRuntime::spawn(cfg, None, reg, model());
         // Saturate the only P-leg candidate.
-        let _h = rt.account(&rt, "http://10.0.0.1:30000", 5000);
+        let _h = rt.account("http://10.0.0.1:30000", 5000);
         let start = Instant::now();
         let d = rt
             .admit(
-                &rt,
                 PlaceInput {
                     prompt_len: 10,
                     ..Default::default()
@@ -2770,7 +2747,7 @@ mod tests {
             ..Default::default()
         };
         let rt = SymmetricPdRuntime::spawn(cfg, None, reg, model());
-        let h = rt.account(&rt, "http://10.0.0.1:30000", 5000);
+        let h = rt.account("http://10.0.0.1:30000", 5000);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
             h.retire();
@@ -2778,7 +2755,6 @@ mod tests {
         let start = Instant::now();
         let d = rt
             .admit(
-                &rt,
                 PlaceInput {
                     prompt_len: 10,
                     ..Default::default()
@@ -2811,10 +2787,10 @@ mod tests {
             sym(1.0, 1.0),
         )]);
         let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), None, reg, model());
-        let old = rt.account(&rt, "http://10.0.0.1:30000", 700);
+        let old = rt.account("http://10.0.0.1:30000", 700);
         old.mark_dispatched();
         let sent_at = Instant::now();
-        let _new = rt.account(&rt, "http://10.0.0.1:30000", 50);
+        let _new = rt.account("http://10.0.0.1:30000", 50);
         rt.apply_poll("http://10.0.0.1:30000", 300, 7, 2, sent_at);
         let load = rt
             .loads(["http://10.0.0.1:30000"])
@@ -2991,7 +2967,6 @@ mod tests {
         let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), None, reg, model());
         let resp = rt
             .place_http(
-                &rt,
                 PlaceHttpRequest {
                     input_ids: Some(vec![1, 2, 3]),
                     session_id: Some("s".into()),
@@ -3052,7 +3027,6 @@ mod tests {
         let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), None, reg, model());
         let resp = rt
             .place_http(
-                &rt,
                 PlaceHttpRequest {
                     prompt_len: Some(10),
                     account: Some(false),
@@ -3068,7 +3042,6 @@ mod tests {
         assert_eq!(resp.marks, Marks::default());
         let resp = rt
             .place_http(
-                &rt,
                 PlaceHttpRequest {
                     prompt_len: Some(10),
                     force_split: Some(true),
@@ -3146,7 +3119,6 @@ mod tests {
                         for _ in 0..32 {
                             decisions.push(
                                 rt.admit(
-                                    &rt,
                                     PlaceInput {
                                         prompt_len: 1024,
                                         ..Default::default()
@@ -3297,7 +3269,6 @@ mod tests {
                             for _ in 0..16 {
                                 decisions.push(
                                     rt.admit(
-                                        &rt,
                                         PlaceInput {
                                             prompt_len: 1024,
                                             ..Default::default()
@@ -3334,7 +3305,6 @@ mod tests {
             .unwrap();
         let reply = runtime
             .block_on(rt.place_http(
-                &rt,
                 PlaceHttpRequest {
                     prompt_len: Some(1024),
                     ..Default::default()
@@ -3401,7 +3371,6 @@ mod tests {
             .build()
             .unwrap();
         let result = runtime.block_on(rt.admit(
-            &rt,
             PlaceInput {
                 prompt_len: 1024,
                 ..Default::default()
@@ -3485,7 +3454,6 @@ mod tests {
             .unwrap();
         let first = runtime
             .block_on(rt.admit(
-                &rt,
                 PlaceInput {
                     prompt_len: 1024,
                     ..Default::default()
@@ -3495,7 +3463,6 @@ mod tests {
         assert_eq!(first.p_worker.url, "http://p1");
         let second = runtime
             .block_on(rt.admit(
-                &rt,
                 PlaceInput {
                     prompt_len: 1024,
                     ..Default::default()
@@ -3547,13 +3514,12 @@ mod tests {
         let p_urls = ["http://10.0.0.1:30000", "http://10.0.0.2:30000", "http://10.0.0.3:30000"];
         let _held: Vec<LedgerHandle> = p_urls
             .iter()
-            .map(|p| rt.account(&rt, p, 1_000_000))
+            .map(|p| rt.account(p, 1_000_000))
             .collect();
         let tokens: Vec<u32> = (0..200).collect();
         let start = Instant::now();
         let first = rt
             .admit(
-                &rt,
                 PlaceInput {
                     tokens: Some(tokens.clone()),
                     prompt_len: 200,
@@ -3591,7 +3557,6 @@ mod tests {
         let longer: Vec<u32> = (0..240).collect();
         let second = rt
             .admit(
-                &rt,
                 PlaceInput {
                     tokens: Some(longer.clone()),
                     prompt_len: 240,
@@ -3626,11 +3591,10 @@ mod tests {
             "http://10.0.0.3:30000",
         ]
         .iter()
-        .map(|p| rt.account(&rt, p, 1_000_000))
+        .map(|p| rt.account(p, 1_000_000))
         .collect();
         let d = rt
             .admit(
-                &rt,
                 PlaceInput {
                     prompt_len: 10,
                     ..Default::default()
@@ -3764,7 +3728,7 @@ mod tests {
             rid: rid.map(str::to_string),
             ..Default::default()
         };
-        rt.admit(rt, input).await
+        rt.admit(input).await
     }
 
     #[tokio::test]
@@ -4062,7 +4026,7 @@ mod tests {
             e3_session: Some(session.into()),
             ..Default::default()
         };
-        rt.admit(rt, input).await.unwrap()
+        rt.admit(input).await.unwrap()
     }
 
     /// The trade decision of the reserve event of `rid`.

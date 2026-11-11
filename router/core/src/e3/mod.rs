@@ -113,11 +113,6 @@ pub const RX_MIN: u64 = 30;
 /// Receipt line: the idle shift is the median residual of this many latest
 /// samples.
 pub const RX_SHIFT_SAMPLES: usize = 500;
-/// Production rule `rx2`: a receipt sample becomes usable this
-/// long after the request's prefill completion (the router learns the
-/// receipt from the `request_complete` timeline sample; 0.3 s is about the
-/// median snapshot age).
-pub const RX_OBS_DELAY_S: f64 = 0.3;
 /// Online refit grid (s): one fit per (P worker, step of this length).
 pub const STEP_S: f64 = 60.0;
 /// Online fits use the samples of this window (s) before the step start.

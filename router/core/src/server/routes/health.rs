@@ -118,12 +118,12 @@ mod tests {
     #[tokio::test]
     async fn readyz_symmetric_pd_requires_a_capable_pair() {
         use crate::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
-        use crate::symmetric_pd::RoleWeight;
+        use crate::scheduler::RoleWeight;
         use crate::workers::SymmetricPdWorkerInfo;
         let mut ctx = AppContext::stub();
         ctx.config.model.policy = crate::config::PolicyKind::SymmetricPd;
         ctx.config.model.symmetric_pd = Some(crate::config::SymmetricPdConfig::default());
-        ctx.symmetric_pd = Some(crate::symmetric_pd::SymmetricPdRuntime::spawn(
+        ctx.symmetric_pd = Some(crate::scheduler::SymmetricPdRuntime::spawn(
             crate::config::SymmetricPdConfig::default(),
             None,
             Arc::clone(&ctx.registry),

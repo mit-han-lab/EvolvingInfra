@@ -120,13 +120,6 @@ impl WorkerIntrospector {
         Self { client }
     }
 
-    /// Reuse a caller-owned `reqwest::Client`. Useful in tests that want
-    /// to assert request shape via a fake HTTP transport, or to share a
-    /// connection pool across components.
-    pub fn with_client(client: reqwest::Client) -> Self {
-        Self { client }
-    }
-
     /// Fetch `/model_info` and `/server_info` for the worker, concurrently.
     /// Never returns an error: any failure is logged at `warn!` and yields
     /// `None` for the fields that request carried. Callers register the

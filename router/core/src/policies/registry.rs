@@ -331,6 +331,20 @@ pub fn select_decode_with_affinity(
     candidates.iter().min_by_key(|w| w.active_load()).cloned()
 }
 
+/// The candidates whose breaker would allow a request, or all candidates
+/// when none would.
+fn healthy_or_all(candidates: &[Arc<Worker>]) -> Vec<&Arc<Worker>> {
+    let healthy: Vec<&Arc<Worker>> = candidates
+        .iter()
+        .filter(|w| w.breaker.would_allow())
+        .collect();
+    if healthy.is_empty() {
+        candidates.iter().collect()
+    } else {
+        healthy
+    }
+}
+
 /// Per-request power-of-two decode selection: sample two distinct
 /// candidates from the closed-breaker subset and take the lower
 /// `active_load` (same sampling scheme as
@@ -346,15 +360,7 @@ pub fn select_decode_po2(candidates: &[Arc<Worker>]) -> Option<Arc<Worker>> {
     if candidates.is_empty() {
         return None;
     }
-    let healthy: Vec<&Arc<Worker>> = candidates
-        .iter()
-        .filter(|w| w.breaker.would_allow())
-        .collect();
-    let pool: Vec<&Arc<Worker>> = if healthy.is_empty() {
-        candidates.iter().collect()
-    } else {
-        healthy
-    };
+    let pool = healthy_or_all(candidates);
     match pool.len() {
         1 => Some(Arc::clone(pool[0])),
         len => {
@@ -384,15 +390,7 @@ pub fn select_decode_round_robin(candidates: &[Arc<Worker>]) -> Option<Arc<Worke
     if candidates.is_empty() {
         return None;
     }
-    let healthy: Vec<&Arc<Worker>> = candidates
-        .iter()
-        .filter(|w| w.breaker.would_allow())
-        .collect();
-    let pool: Vec<&Arc<Worker>> = if healthy.is_empty() {
-        candidates.iter().collect()
-    } else {
-        healthy
-    };
+    let pool = healthy_or_all(candidates);
     let n = DECODE_RR_CURSOR.fetch_add(1, Ordering::Relaxed);
     Some(Arc::clone(pool[n % pool.len()]))
 }
