@@ -13,13 +13,23 @@ same steps.
 
 ## Prebuilt image
 
+`docker.io/weili0234/evolving-infra:v0.1.0` is one tag for both architectures
+(index `sha256:e0038c04e3fc8f21042ac1eaa05d911b4d24c6b529d5747b2aaff39d424395bf`); `docker pull`
+picks the one of the host.
+
 | Architecture | Image | Source |
 |---|---|---|
-| x86_64 (H200, B300) | `docker.io/weili0234/evolving-infra@sha256:6a50d6ba748419b7f93975478967e159dabf6e5a25f3961853d999c5518f529b` | `d347048` |
+| x86_64 (H200, B300) | `docker.io/weili0234/evolving-infra@sha256:55a40438be30bb3ccf3d5b9211cd9d110c8b355c56f8f8d59ae105a55563fe0a` | `67b4761` |
+| aarch64 (GB300) | `docker.io/weili0234/evolving-infra@sha256:f29e1a3f4189fee9ca612332cb969c43e9e8a3c8e5ecf8a8807d4304dd3384bb` | `ce30732` |
 
-`docker/build_and_push.sh` builds and pushes it from a committed revision (`git archive`, so
-local files never enter the image) and prints the digest; pin the digest, not the tag. Build each
-architecture on a host of that architecture.
+`docker/build_and_push.sh` builds and pushes one architecture from a committed revision
+(`git archive`, so local files never enter the image) and prints the digest; build each
+architecture on a host of that architecture. To publish both under one tag:
+
+```bash
+docker buildx imagetools create -t docker.io/weili0234/evolving-infra:<tag> \
+  docker.io/weili0234/evolving-infra:<sha12>-amd64 docker.io/weili0234/evolving-infra:<sha12>-arm64
+```
 
 ## Base image
 

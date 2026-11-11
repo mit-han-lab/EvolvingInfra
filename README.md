@@ -69,13 +69,13 @@ uses it. [Architecture](docs/architecture.md) describes the request path.
 
 Evolving Infra runs DeepSeek-V4-Flash, GLM-5.2 and Kimi-K2.6 on NVIDIA H200, B300 and GB300
 ([models and hardware](docs/README.md#models-and-hardware)). The runtime image has every
-component. Pull the prebuilt x86_64 image (H200, B300):
+component. Pull the prebuilt image (x86_64 for H200 and B300, aarch64 for GB300):
 
 ```bash
-docker pull docker.io/weili0234/evolving-infra@sha256:6a50d6ba748419b7f93975478967e159dabf6e5a25f3961853d999c5518f529b
+docker pull docker.io/weili0234/evolving-infra:v0.1.0
 ```
 
-or build it (x86_64 or aarch64, e.g. GB300):
+or build it:
 
 ```bash
 git clone https://github.com/mit-han-lab/EvolvingInfra.git

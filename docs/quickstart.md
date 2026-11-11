@@ -10,8 +10,8 @@ router. Worker `w0` (GPUs 0–3) starts as prefill (P), `w1` (GPUs 4–7) as dec
 - The runtime image, which has every component installed:
 
   ```bash
-  docker pull docker.io/weili0234/evolving-infra@sha256:6a50d6ba748419b7f93975478967e159dabf6e5a25f3961853d999c5518f529b
-  docker tag docker.io/weili0234/evolving-infra@sha256:6a50d6ba748419b7f93975478967e159dabf6e5a25f3961853d999c5518f529b evolving-infra
+  docker pull docker.io/weili0234/evolving-infra:v0.1.0
+  docker tag docker.io/weili0234/evolving-infra:v0.1.0 evolving-infra
   git clone https://github.com/mit-han-lab/EvolvingInfra.git && cd EvolvingInfra
   docker run --gpus all --network host --ipc host --device /dev/infiniband \
     -v /models:/models -it evolving-infra bash
