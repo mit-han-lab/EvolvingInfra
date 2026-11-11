@@ -46,6 +46,11 @@ Results of the paper's runs on [1800 s, 5400 s), two runs per setting:
 The planner leaves one to four prefill workers. The first run at 256 agents had 572 failed
 requests; the others had none.
 
+The 224-agent experiment run from this repository with `slurm/submit.py --benchmark putnam`
+scored 8.94 requests/s on the same window with no failed request: prefix hit 98.6 %, TTFT
+p50 1.1 s, p95 4.5 s, end-to-end mean 14.3 s. The planner went from 6P3D to 2P7D at 1825 s,
+to 1P8D at 2428 s and back to 2P7D at 4841 s.
+
 ## Another model
 
 The messages are text: replay the file as it is. Prompt token counts follow the model's
