@@ -10,7 +10,8 @@ def served_experts(urls, timeout=None):
     """Routed experts and experts per token of the one model all engines serve.
 
     Each engine's `/model_info` names its model path; the counts come from that
-    model's config.json, which must be readable at the same path on this host.
+    model's config.json (its `text_config` for a multimodal model), which must be readable at
+    the same path on this host.
     """
     counts = set()
     timeout = envs.EVOLVING_INFRA_PLANNER_MODEL_INFO_TIMEOUT_SECS if timeout is None else timeout
@@ -18,6 +19,8 @@ def served_experts(urls, timeout=None):
         with open_url(url.rstrip('/') + '/model_info', timeout) as response:
             path = Path(json.load(response)['model_path'])
         config = json.loads((path / 'config.json').read_text())
+        if 'n_routed_experts' not in config:  # a multimodal model keeps the language model's settings apart
+            config = config.get('text_config') or config
         counts.add((config['n_routed_experts'], config['num_experts_per_tok']))
     if len(counts) != 1:
         raise ValueError('Engines do not serve one expert configuration: ' + repr(counts))

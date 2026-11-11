@@ -274,6 +274,9 @@ class ServedExpertsTests(unittest.TestCase):
                 model=Path(td)/name;model.mkdir()
                 (model/'config.json').write_text(json.dumps(dict(n_routed_experts=experts,num_experts_per_tok=top_k)))
                 paths[f'/{name}/model_info']=str(model)
+            model=Path(td)/'vision';model.mkdir()  # a multimodal model: the counts are under text_config
+            (model/'config.json').write_text(json.dumps(dict(text_config=dict(n_routed_experts=384,num_experts_per_tok=8))))
+            paths['/vision/model_info']=str(model)
             class Engines(http.server.BaseHTTPRequestHandler):
                 def do_GET(self):
                     self.send_response(200);self.end_headers()
@@ -284,6 +287,7 @@ class ServedExpertsTests(unittest.TestCase):
             url=f'http://127.0.0.1:{server.server_port}/'
             try:
                 self.assertEqual(served_experts([url+'a',url+'b']),(256,8))
+                self.assertEqual(served_experts([url+'vision']),(384,8))
                 with self.assertRaisesRegex(ValueError,'one expert configuration'):
                     served_experts([url+'a',url+'c'])
             finally:server.shutdown()
