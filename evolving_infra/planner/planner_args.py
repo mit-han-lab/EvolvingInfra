@@ -71,7 +71,7 @@ class PlannerArgs:
 
     # ------------------------------------------------------------------------------------------- cold start
     cold_start_stable_change: A[float, Arg(
-        "The cold start is over when the cached share of two consecutive slices differs by at most this "
+        "The cold start is over when the cached share of a slice is at most this above the previous slice's "
         "(0.003 is 0.3 percentage points).")] = .003
     cold_start_max_wait_secs: A[float, Arg(
         "Learning starts at the latest this long after the first completed request.")] = 1800.

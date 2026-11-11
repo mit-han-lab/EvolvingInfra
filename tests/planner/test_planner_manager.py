@@ -251,16 +251,16 @@ def test_waits_for_traffic_before_the_cold_start(tmp_path, monkeypatch):
     assert started["monotonic"] >= 1000 + 3600 + 5 * 60
 
 
-def test_unsettled_cache_share_starts_learning_after_the_maximum_wait(tmp_path, monkeypatch):
+def test_rising_cache_share_starts_learning_after_the_maximum_wait(tmp_path, monkeypatch):
     env = Env(tmp_path, monkeypatch)
     global CACHED
     original = env.router.advance
 
-    def jittered():  # the cached share alternates by about 10 points every slice: it never settles
+    def rising():  # the cached share rises by more than 0.3 points every slice: the cache never fills
         global CACHED
-        CACHED = 40000 if int((env.clock.m - 1003) // 60) % 2 else 20000
+        CACHED = 1000 + 1500 * int((env.clock.m - 1003) // 60)
         original()
-    env.router.advance = jittered
+    env.router.advance = rising
     try:
         env.drive(1000 + 1900)
     finally:

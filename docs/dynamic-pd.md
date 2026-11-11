@@ -27,8 +27,8 @@ request is dropped.
 The planner (`python -m evolving_infra.planner control`) runs in three phases:
 
 - **Cold start.** From the first completed request it computes, every minute, the share of input
-  tokens served from cache. When two consecutive minutes differ by at most 0.3 percentage points, the
-  cold start is over. A minute with no cache hit at all does not count, and learning starts anyway
+  tokens served from cache. When a minute's share is at most 0.3 percentage points above the previous
+  minute's, the share has stopped rising and the cold start is over. A minute with no cache hit at all does not count, and learning starts anyway
   30 minutes after the first completed request (`--cold-start-max-wait-secs`). With a wait of 1 s
   learning starts at the first completed request and covers the cold start; the paper's runs
   did this, and [`examples/gb300`](../examples/gb300/README.md) sets it.
@@ -134,7 +134,7 @@ python -m evolving_infra.planner control --config planner.json --decision-period
 | `--transition-hold-max-secs` | 5 | Longest wait of a decision while requests of a worker's old role still run; a drain is always waited for. |
 | `--observation-gap-max-secs` | 15 | A decision is skipped when two router reads within its interval are further apart. |
 | `--disable-prefill-observation` | off | Keep the learning-interval packing and restore ratio instead of measuring them before each decision. |
-| `--cold-start-stable-change` | 0.003 | The cold start is over when the cached share of two consecutive slices differs by at most this (0.3 percentage points). |
+| `--cold-start-stable-change` | 0.003 | The cold start is over when the cached share of a slice is at most this above the previous slice's (0.3 percentage points). |
 | `--cold-start-max-wait-secs` | 1800 | Learning starts at the latest this long after the first completed request. |
 | `--router-poll-interval-secs` | 3 | Interval between two reads of the router. |
 | `--restore-scrape-interval-secs` | 3 | Interval between two scrapes of the prefill workers' restored-token counters. |

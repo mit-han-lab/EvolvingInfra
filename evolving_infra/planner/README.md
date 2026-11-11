@@ -87,8 +87,9 @@ times the slowest one.
 
 1. **Cold start.** From the first completed request, the planner computes for every 60-second
    slice (`--slice-secs`) the share of input tokens served from cache. The cold start is over when
-   two consecutive slices differ by at most 0.3 percentage points
-   (`--cold-start-stable-change`); a slice with no cache hit does not count. Learning starts
+   a slice's share is at most 0.3 percentage points above the previous slice's
+   (`--cold-start-stable-change`): the share has stopped rising. A slice with no cache hit does
+   not count. Learning starts
    anyway 1800 seconds after the first completed request (`--cold-start-max-wait-secs`).
 2. **Learning** (1800 seconds, `--learning-secs`). Every worker serves in its initial role. The
    planner copies the engines' scheduler traces from each host's trace server, checks the host

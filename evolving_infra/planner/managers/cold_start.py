@@ -1,12 +1,13 @@
-"""When the cold start is over: the share of input tokens served from cache stops changing.
+"""When the cold start is over: the share of input tokens served from cache stops rising.
 
 From the first observation with completed requests on, the router's completed-usage counters are cut into slices
 (``--slice-secs``, one minute by default) at the controller's observations. A slice's cached share is 1 - uncached /
 input tokens of the requests that completed in it. The cold start is over at the end of the first slice whose share
-differs from the previous slice's by at most ``--cold-start-stable-change`` (0.3 percentage points by default). A
-slice without a completed request, or without any cached token, does not count and breaks the comparison: a share that
-stays at 0 % is the cold start itself (in a GLM-5.2 Claude Code run on nine GB300 nodes the first two minutes both
-served 0 % from cache, and the share settled at the end of minute 12, 0.19 points from minute 11). Learning starts
+is at most ``--cold-start-stable-change`` (0.3 percentage points by default) above the previous slice's: while the
+cache fills the share rises every slice, and once it is warm the share moves up and down by more than that (in two
+GLM-5.2 Claude Code runs on nine GB300 nodes, by 0.1 to 4.4 points a minute around 95 %; the share first fell in
+minute 6 with 90 agents and in minute 8 with 126). A slice without a completed request, or without any cached token,
+does not count and breaks the comparison: a share that stays at 0 % is the cold start itself. Learning starts
 anyway ``--cold-start-max-wait-secs`` after the first completed request, so a workload whose share never settles is
 still planned for. A router restart (the counters start again from zero) restarts the detection.
 """
@@ -50,7 +51,7 @@ class ColdStart:
         change = None if share is None or self.previous is None else share - self.previous
         record = dict(start=self.boundary_at, end=at, requests=requests, cached_share=share, change=change)
         self.boundary_at, self.boundary, self.previous = at, completed, share
-        if change is not None and abs(change) <= self.stable_change:
+        if change is not None and change <= self.stable_change:
             self.done = dict(reason="cache_share_stable", waited_s=at - self.first_at, cached_share=share,
                              change=change, stable_change=self.stable_change)
         return record
