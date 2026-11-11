@@ -29,6 +29,44 @@ def test_block_tokens_are_deterministic_per_block_and_cycle() -> None:
     assert BlockTokens(dict(SPEC, seed=1)).tokens([[0, 3]]) != t
 
 
+def test_a_trace_without_a_pool_draws_from_the_tokenizer(tmp_path) -> None:
+    from trie.blocks import pool_from_tokenizer
+
+    vocab = {f"t{i}": i for i in range(100, 170)}
+    (tmp_path / "tokenizer.json").write_text(json.dumps({
+        "model": {"vocab": vocab}, "added_tokens": [{"id": 164}, {"id": 165}]}))
+    (tmp_path / "config.json").write_text(json.dumps({"eos_token_id": [166, 167], "pad_token_id": 168,
+                                                      "bos_token_id": None, "vocab_size": 169}))
+    pool = pool_from_tokenizer(tmp_path)
+    assert pool == SPEC["pool"], "added, special and out-of-range ids are excluded"
+    portable = {k: v for k, v in SPEC.items() if k != "pool"}
+    assert BlockTokens(portable, pool=pool).tokens([[0, 3]]) == BlockTokens(SPEC).tokens([[0, 3]])
+    assert BlockTokens(SPEC, pool=[1, 2]).tokens([[0, 3]]) == BlockTokens(SPEC).tokens([[0, 3]]), "its own pool wins"
+    with pytest.raises(ValueError, match="no block_tokens.pool"):
+        BlockTokens(portable)
+
+
+def test_portable_blocks_script_drops_only_the_pool(tmp_path) -> None:
+    import importlib.util
+
+    path = Path(__file__).parents[1] / "scripts" / "portable_blocks.py"
+    spec = importlib.util.spec_from_file_location("portable_blocks", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    row = {"schema_version": 3, "traces": [{"events": [{"type": "generate", "recorded_prompt_block_runs": [[0, 2]]}],
+                                            "metadata": {"block_tokens": dict(SPEC)}}],
+           "metadata": {"block_tokens": dict(SPEC), "strict_conversion": {"target_tokenizer": {"path": "/m"}, "seed": "s"}}}
+    source, target = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    source.write_text(json.dumps(row) + "\n")
+    module.main(str(source), str(target))
+    out = json.loads(target.read_text())
+    expected = json.loads(json.dumps(row))
+    for holder in (expected["metadata"], expected["traces"][0]["metadata"]):
+        del holder["block_tokens"]["pool"]
+    del expected["metadata"]["strict_conversion"]["target_tokenizer"]
+    assert out == expected
+
+
 def test_block_tokens_cover_the_pool_evenly() -> None:
     spec = dict(SPEC, block_size=64, pool=list(range(1000, 1016)))
     counts = {}
@@ -140,6 +178,24 @@ def test_strict_replay_expands_block_runs_without_a_tokenizer() -> None:
     assert p1 == expand.tokens([[0, 3]]) and o1 == expand.tokens([[3, 2]], 6)
     assert p2 == expand.tokens([[0, 6]]) and o2 == expand.tokens([[100, 1]], 2)
     assert p2[: len(p1) + len(o1)] == p1 + o1
+
+
+def test_strict_replay_of_a_trace_without_a_pool_uses_the_tokenizer_directory(tmp_path) -> None:
+    (tmp_path / "tokenizer.json").write_text(json.dumps(
+        {"model": {"vocab": {f"t{i}": i for i in SPEC["pool"]}}, "added_tokens": []}))
+    portable = _chained_trace()
+    portable.metadata["block_tokens"] = {k: v for k, v in SPEC.items() if k != "pool"}
+    client = EchoClient()
+    client._tokenizer_model = str(tmp_path)
+    result = asyncio.run(client.run([portable], concurrency=1, duration=5.0,
+                                    replay_once=True, drain_timeout=5.0, strict_replay=True))
+    assert result.failed_requests == 0 and client._tokenizer_manager is None
+    expand = BlockTokens(SPEC)
+    assert [p for p, _ in client.sent] == [expand.tokens([[0, 3]]), expand.tokens([[0, 6]])]
+
+    missing = EchoClient()
+    with pytest.raises(ValueError, match="not bound to a model"):
+        missing._block_pool(portable.block_spec)
 
 
 def test_server_prompt_mismatch_fails_the_trace() -> None:

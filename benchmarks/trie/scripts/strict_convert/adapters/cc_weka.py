@@ -55,6 +55,7 @@ from typing import Any, Iterator
 import numpy as np
 
 from strict_convert.adapters._weka_chains import detect_agent_chains, request_end
+from strict_convert._vendor import bootstrap
 
 BLOCK_TOKENS = 64
 DEFAULT_SEED = "cc-weka-v1"
@@ -253,21 +254,12 @@ def _place(child: Chain, parent: Chain) -> None:
 
 
 def allowed_token_ids(tokenizer_dir: str) -> np.ndarray:
-    """Regular vocabulary IDs: everything except added and special tokens."""
-    data = json.loads((Path(tokenizer_dir) / "tokenizer.json").read_text())
-    vocab = data["model"]["vocab"]
-    ids = set(vocab.values() if isinstance(vocab, dict) else range(len(vocab)))
-    ids -= {token["id"] for token in data.get("added_tokens", [])}
-    # Some models declare PAD/BOS/EOS only in config.json, not added_tokens.
-    config_path = Path(tokenizer_dir) / "config.json"
-    if config_path.is_file():
-        config = json.loads(config_path.read_text())
-        for name in ("pad_token_id", "bos_token_id", "eos_token_id"):
-            value = config.get(name)
-            ids.difference_update(value if isinstance(value, list) else [value])
-        if "vocab_size" in config:
-            ids = {token for token in ids if 0 <= token < config["vocab_size"]}
-    return np.array(sorted(ids), dtype=np.int64)
+    """Regular vocabulary IDs: everything except added and special tokens. The replay client
+    draws the same pool for a trace that carries none (``trie.blocks.pool_from_tokenizer``)."""
+    bootstrap()
+    from trie.blocks import pool_from_tokenizer
+
+    return np.array(pool_from_tokenizer(tokenizer_dir), dtype=np.int64)
 
 
 def block_seed(seed: str, session_id: str) -> int:

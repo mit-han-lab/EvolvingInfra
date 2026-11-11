@@ -14,6 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from itertools import chain, cycle
 from pathlib import Path
+
+import numpy as np
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
@@ -34,7 +36,7 @@ from openai.types.completion_usage import CompletionUsage
 from rich.live import Live
 
 from trie.actual_output_context import ActualOutputContext
-from trie.blocks import BlockTokens
+from trie.blocks import BlockTokens, pool_from_tokenizer
 from trie.benchmark_boundary import (
     BenchmarkBoundary,
     BenchmarkCancellationTimeout,
@@ -400,6 +402,7 @@ class Client:
     _stream_interval: int = 1
     _replay_output_mode: str = "forced"
     _replay_context_mode: str = "recorded"
+    _tokenizer_block_pool = None  # the vocabulary pool for block traces without their own
     _migration_limit: int = 0
     # Class-level default so duck-typed test doubles that skip __init__ still
     # resolve the attribute; __init__ overwrites it per instance.
@@ -581,6 +584,21 @@ class Client:
                     delay_s=self._strict_replay_connect_retry_delay_s,
                 )
                 await asyncio.sleep(self._strict_replay_connect_retry_delay_s)
+
+    def _block_pool(self, spec: dict[str, Any]):
+        """The pool of a block trace that carries none: the regular vocabulary of
+        ``tokenizer_model`` (a model directory), read once."""
+        if spec.get("pool") is not None:
+            return None
+        if self._tokenizer_block_pool is None:
+            directory = Path(self._tokenizer_model or "")
+            if not (directory / "tokenizer.json").is_file():
+                raise ValueError(
+                    "this trace is not bound to a model: set tokenizer_model to the directory "
+                    "of the model being served (it must hold tokenizer.json)"
+                )
+            self._tokenizer_block_pool = np.asarray(pool_from_tokenizer(directory), dtype=np.int64)
+        return self._tokenizer_block_pool
 
     def _require_tokenizer_manager(self, purpose: str) -> "TokenizerManager":
         if self._tokenizer_manager is not None:
@@ -1446,7 +1464,7 @@ class Client:
         # them is re-sent as a one-token warmup before the first generate after
         # the cut, which then waits at most the recorded time left after it.
         block_tokens = (
-            BlockTokens(trace.block_spec, replay_cycle_id)
+            BlockTokens(trace.block_spec, replay_cycle_id, self._block_pool(trace.block_spec))
             if strict_replay and trace.block_spec is not None
             else None
         )

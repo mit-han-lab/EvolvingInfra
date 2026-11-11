@@ -8,6 +8,7 @@
 
 The agent traces used in the paper are on Hugging Face:
 [crmsndu/evolving-infra-traces](https://huggingface.co/datasets/crmsndu/evolving-infra-traces).
+[Workloads](workloads.md) describes each file, how to replay it, and how to run it on another model.
 
 ```bash
 hf download crmsndu/evolving-infra-traces --repo-type dataset --local-dir traces
