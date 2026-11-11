@@ -81,9 +81,10 @@ Skills live in `skills/`. To use one, read its `SKILL.md` and follow it.
 | [`run-benchmark`](skills/run-benchmark/SKILL.md) | `examples/`, `benchmarks/` | run the paper's replay benchmark, score it and compare it with the reference |
 | [`debug-run`](skills/debug-run/SKILL.md) | repository, read-only | find why a run did not start, failed a request, or scored below the reference |
 
-Each skill states its scope, its inputs and what it returns. Commands that reproduce the paper
-are exact; for anything that depends on your model, GPU or cluster, the skill says how to
-work it out.
+Each skill follows [`skills/SKILL_TEMPLATE.md`](skills/SKILL_TEMPLATE.md): its scope (what it
+reads, writes, never changes, and does outside the repository), its inputs, numbered steps that
+each end with a check, and what it returns. Commands that reproduce the paper are exact; for
+anything that depends on your model, GPU or cluster, the skill says how to work it out.
 
 ## 5. Component guides
 

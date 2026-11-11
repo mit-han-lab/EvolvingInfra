@@ -5,19 +5,32 @@ description: Run the paper's replay benchmark on Evolving Infra, score it and co
 
 # Run the replay benchmark
 
-**Scope**: `examples/`, `benchmarks/`. Runs and scores; changes no code and no
-replay setting of the reference.
-**Inputs**: the workload ([`claude-code`](../../benchmarks/claude-code/README.md),
-[`putnam`](../../benchmarks/putnam/README.md) or
-[`osworld`](../../benchmarks/osworld/README.md)), a config
-([`examples/gb300/glm52.yaml`](../../examples/gb300/glm52.yaml) for the paper's Claude Code
-experiment), the cluster (Slurm account, partition, the runtime image),
-and what the result is compared with.
-**Returns**: the score table with its windows, the planner's switch times, whether the run is
-valid, and the comparison.
+Run one of the paper's replay benchmarks on Evolving Infra, score it, and compare it with the
+reference results.
 
-A full run holds nine GPU nodes for about two hours (20 minutes to start, 90 minutes of
-replay). Confirm with the owner before submitting.
+## Scope
+
+- **Reads**: `benchmarks/`, `examples/`: the workload's README and `AGENTS.md`, the configs and
+  `examples/slurm/submit.py`.
+- **Writes**: the run directory under `--output-dir`; nothing in the repository.
+- **Never changes**: `evolving_infra/`, `benchmarks/`: a benchmark measures the code as it is,
+  and a run with a replay setting other than the reference's does not compare with it.
+- **Outside the repository**: submits a Slurm job that holds nine GPU nodes for about two
+  hours (20 minutes to start, 90 minutes of replay). Confirm with the owner before submitting.
+
+## Inputs
+
+- The workload: [`claude-code`](../../benchmarks/claude-code/README.md),
+  [`putnam`](../../benchmarks/putnam/README.md) or
+  [`osworld`](../../benchmarks/osworld/README.md).
+- A config: [`examples/gb300/glm52.yaml`](../../examples/gb300/glm52.yaml) for the paper's
+  Claude Code experiment.
+- The cluster: Slurm account, partition, the runtime image.
+- What the result is compared with.
+
+## Steps
+
+### 1. Submit
 
 Read the workload's README and `AGENTS.md` first: they give the paper's setup, its results and
 the rules of that workload. `submit.py --benchmark <name>` runs a benchmark of the config as
@@ -25,8 +38,6 @@ one job: `claude-code` (the default) and `putnam` in `examples/gb300/glm52.yaml`
 has no benchmark entry: start the stack with the [`serve`](../serve/SKILL.md) skill, write
 the shards as its README says, run one replay process per shard on the host that runs the
 router, then score and compare as in steps 3 and 4.
-
-## 1. Submit
 
 ```bash
 python examples/slurm/submit.py --config <config> --account <a> --partition <p> --image <image> \
@@ -41,7 +52,10 @@ can also stay in a copy of the config (`slurm:` section). Without Slurm: start t
 the [`serve`](../serve/SKILL.md) skill, then run the replay and scoring commands of the dry
 run on the host that runs the router.
 
-## 2. Watch
+**Check**: the dry run shows the `#SBATCH` line, the model mounted at the config's `model`
+path, and the `run_trie.py` command; the submission prints a job ID.
+
+### 2. Watch
 
 Under `<output dir>/<job id>/`: `serve.log` (ends with `ready: ... (9 workers, 6P3D)`), one
 directory per host with `logs/<process>.log`, `bench.log` (the replay client), and at the end
@@ -50,7 +64,10 @@ planner ("the head" below). The job stops the stack when the replay ends, so `sr
 Killed` lines at the end of `serve.log` are the normal stop. If `serve.log` shows
 `<name> exited` or the job ends early, use the [`debug-run`](../debug-run/SKILL.md) skill.
 
-## 3. Read the result
+**Check**: `serve.log` shows `ready: ... (9 workers, 6P3D)` and `score.json` exists when the
+job ends.
+
+### 3. Read the result
 
 ```bash
 cat <run>/score.json                                           # the scored window [warmup, duration)
@@ -66,7 +83,10 @@ The run is valid when all of these hold:
 
 `cache_hit` is the prefix hit: cached prompt tokens over prompt tokens.
 
-## 4. Compare
+**Check**: all three conditions above hold. Otherwise the run is not valid: report why and do
+not compare it.
+
+### 4. Compare
 
 The reference is in [`examples/gb300/README.md`](../../examples/gb300/README.md): the
 whole-window result, the reference run's switch times, and its result on a window of each
@@ -85,7 +105,9 @@ P/D split.
    the whole window and on the 6P3D window. For a larger gap on a like-for-like window, use
    "Slower than the reference" in [`debug-run`](../debug-run/SKILL.md) before concluding.
 
-## 5. Report
+**Check**: both runs are compared on the same window and the same P/D split.
+
+## Returns
 
 One line with the setup (model, nodes, starting split, workload, concurrency), then a table
 with a row per window for the run and the reference: window, split, requests per second,

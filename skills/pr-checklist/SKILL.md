@@ -1,19 +1,35 @@
 ---
 name: pr-checklist
-description: Check an Evolving Infra change and its pull request description against the project's contribution rules. Use before opening a pull request (drafts included, e.g. `gh pr create`), before pushing review fixes, or to review someone else's pull request.
+description: Check an Evolving Infra change and its pull request description against the project's contribution rules. Use when about to open a pull request (drafts included, e.g. `gh pr create`), before pushing review fixes, or when reviewing someone else's pull request.
 ---
 
 # PR Checklist
 
-**Scope**: repository. Reads the whole diff; writes the pull request description and the
-transcript, and as the author also the fixes for what fails.
-**Inputs**: a branch (or an open pull request), and the person who owns it.
-**Returns**: a report with one entry per section below (passes, fails, could not verify),
-the follow-up work, the decisions that are the owner's, and the filled pull request
-description. As the author, fix what fails and open the pull request only when every section
-passes. As a reviewer, report; do not change the branch.
+Check a change and its pull request description against the contribution rules of
+[`AGENTS.md`](../../AGENTS.md), and fill the description. As the author, fix what fails and
+open the pull request only when every step passes. As a reviewer, report; do not change the
+branch.
 
-## 0. Scope
+## Scope
+
+- **Reads**: `repository`: the whole diff, `AGENTS.md`, the guides of the components it
+  touches, and `docs/contributing/agent-instructions.md` for agent files.
+- **Writes**: the pull request description and the scrubbed transcript; as the author, also
+  the fixes for what fails. As a reviewer, nothing.
+- **Never changes**: anything outside the change's one purpose; as a reviewer, the branch.
+- **Outside the repository**: opens the pull request (`gh pr create`), publishes the
+  transcript on the `agent-logs` branch, and replies to review comments. Confirm each with the
+  owner first.
+
+## Inputs
+
+- A branch, or an open pull request.
+- The person who owns it, and from them anything only they know: the issue this implements
+  (none is acceptable for a small change).
+
+## Steps
+
+### 1. One purpose
 
 ```bash
 git fetch origin && git log --oneline origin/main..HEAD && git diff --stat origin/main...HEAD
@@ -23,10 +39,10 @@ git fetch origin && git log --oneline origin/main..HEAD && git diff --stat origi
   one pull request each before going on.
 - **Validation still running.** A claim whose run has not finished is not a claim yet. Wait
   for the result, or open a draft and say in Validation which run is pending.
-- Ask the owner for anything only they know: the issue this implements (none is acceptable
-  for a small change), and who the owner is.
 
-## 1. Design fit
+**Check**: the commits serve one purpose, and the owner and the issue (or none) are known.
+
+### 2. Design fit
 
 - **Shared paths stay small.** Changes to the scheduler (`evolving_infra/engine/decoupled_engine/srt/managers/`),
   the symmetric P/D path (`srt/disaggregation/`), the host KV tier (`srt/mem_cache/`), router
@@ -44,7 +60,10 @@ git fetch origin && git log --oneline origin/main..HEAD && git diff --stat origi
   [`docs/contributing/agent-instructions.md`](../../docs/contributing/agent-instructions.md)
   and run `python tools/check_agent_files.py`.
 
-## 2. Testing and validation
+**Check**: each bullet above passes, fails with the file and line, or could not be verified;
+`python tools/check_agent_files.py` exits 0 when the diff changes agent files.
+
+### 3. Testing and validation
 
 - Run the test commands of [`AGENTS.md`](../../AGENTS.md) for every component the diff
   touches, and the directory of any test the diff adds.
@@ -56,7 +75,10 @@ git fetch origin && git log --oneline origin/main..HEAD && git diff --stat origi
   `evolving-infra serve --config examples/gb300/glm52-1node.yaml` with one request, then
   `examples/slurm/submit.py` for anything that claims throughput or latency.
 
-## 3. Docs
+**Check**: every test command run is in the report with its result, and a bug fix shows its
+test failing on the base commit.
+
+### 4. Docs
 
 - Every flag, default, environment variable, config key and endpoint the diff touches is in
   `docs/configuration.md` or the component's page, in the same pull request;
@@ -64,7 +86,10 @@ git fetch origin && git log --oneline origin/main..HEAD && git diff --stat origi
 - Docs and comments are plain statements of what the code does: no hedging, no history of
   the change.
 
-## 4. Pull request contents
+**Check**: every flag, default, environment variable, config key and endpoint in the diff
+appears in the docs diff.
+
+### 5. Pull request contents
 
 Fill a copy of [`docs/PULL_REQUEST_TEMPLATE.md`](../../docs/PULL_REQUEST_TEMPLATE.md),
 keep its sections, and create with `gh pr create --body-file <file>`.
@@ -85,7 +110,7 @@ keep its sections, and create with `gh pr create --body-file <file>`.
 - **Transcript**: see below.
 - **Checklist**: tick what is true; the owner's handle comes from the owner.
 
-### Transcript
+#### Transcript
 
 1. Take the session or sessions in which this change was made. When a session also holds
    unrelated work, cut the file to the turns of this change first.
@@ -105,7 +130,10 @@ keep its sections, and create with `gh pr create --body-file <file>`.
    repository, or of the fork the pull request comes from) and link that file. Several
    sessions go in one file, in order.
 
-## 5. Re-review
+**Check**: every claim has its command and result under Validation; `scrub_transcript.py`
+exited 0 and the owner confirmed the transcript.
+
+### 6. Re-review
 
 Read every comment before changing anything. `gh pr view --comments` omits inline comments:
 
@@ -117,3 +145,11 @@ gh api --paginate "repos/mit-han-lab/EvolvingInfra/pulls/$pr/comments"
 
 For each concern decide with the owner: reply, or change the code and say what changed. Then
 update the description so Claims and Validation match the new diff.
+
+**Check**: every comment has a reply or a change, and Claims and Validation match the new diff.
+
+## Returns
+
+- A report with one entry per step (passes, fails, could not verify).
+- The follow-up work, and the decisions that are the owner's.
+- The filled pull request description.

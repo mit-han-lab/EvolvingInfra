@@ -5,17 +5,32 @@ description: Install and start Evolving Infra on one host or several and confirm
 
 # Serve Evolving Infra
 
-**Scope**: `evolving_infra/launch/`, `examples/`, `docker/`. Writes configs and job scripts; a new model or
-cluster does not need a change to `evolving_infra/engine/`, `evolving_infra/router/` or `evolving_infra/planner/`. If it seems to, stop and say why.
-**Inputs**: the model directory, the hosts (one, or a list), and how commands reach them
-(a shell on each, or a scheduler). Ask for what is missing; do not guess host names.
-**Returns**: the router URL, the workers and their starting roles, the work directory with
-the logs, and the reply to one test request.
+Start Evolving Infra on one host or several and confirm that it answers a request. Needs GPU
+hosts with RDMA NICs and the model at the same path on each.
 
-Never ask for a token or password in the conversation. Registry and Hugging Face logins are
-done by the person; you use the resulting credentials file by path.
+## Scope
 
-## 1. Look at the environment
+- **Reads**: `evolving_infra/launch/`, `examples/`, `docker/`: the launcher, the configs and
+  the image.
+- **Writes**: configs under `examples/<hardware>/` for a model or GPU without an example, the
+  job script, and the work directory with the logs.
+- **Never changes**: `evolving_infra/engine/`, `evolving_infra/router/`,
+  `evolving_infra/planner/`: a new model or cluster does not need them. If it seems to, stop
+  and say why.
+- **Outside the repository**: starts the stack's processes on the GPU hosts, or submits a
+  Slurm job that holds them. Confirm the hosts or the job with the owner first.
+
+## Inputs
+
+- The model directory.
+- The hosts (one, or a list), and how commands reach them (a shell on each, or a scheduler).
+  Ask for what is missing; do not guess host names.
+- Never ask for a token or password in the conversation. Registry and Hugging Face logins are
+  done by the person; you use the resulting credentials file by path.
+
+## Steps
+
+### 1. Look at the environment
 
 ```bash
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
@@ -30,17 +45,21 @@ Each host needs GPUs with RDMA NICs and the model at the same path. The launcher
 of every GPU and whether `nvidia_peermem` is loaded; you do not pass them. It prints what it
 found; `peer memory 0` means the module is not loaded and transfers go through host memory.
 
-## 2. Get the software
+**Check**: every host lists its GPUs and at least one RDMA device, and finds `evolving-infra`
+or the image's runtime. Without an RDMA device P/D transfers cannot run: say so and stop.
+
+### 2. Get the software
 
 - **Image** (every component inside): `docker build -f docker/Dockerfile -t evolving-infra .`,
   or pull the published tag in [`README.md`](../../README.md). Run it with
   `--gpus all --network host --ipc host --device /dev/infiniband --ulimit memlock=-1 -v <models>:/models`.
 - **Source**: the three install lines of [`README.md`](../../README.md) (engine, the Python
   package, `cargo build` of the router). `sgl-router` must be on `PATH`.
-- `evolving-infra serve --help` must work before going on (under a scheduler, the job's first
-  step can be this check).
 
-## 3. Pick the config
+**Check**: `evolving-infra serve --help` prints its usage on every host (under a scheduler,
+in a job step).
+
+### 3. Pick the config
 
 | Hosts | Config | Layout |
 |---|---|---|
@@ -50,12 +69,9 @@ found; `peer memory 0` means the module is not loaded and transfers go through h
 These two are the paper's setup (GLM-5.2 on GB300); use them unchanged to reproduce it. For
 any other model or GPU, write the config yourself with the next section. Config paths are relative to the repository checkout; the image has the same files under
 `/opt/evolving-infra` (its working directory). A child config with `base:` replaces single
-flags of its base and needs that file beside it, so copy both when copying one. If the engine stops with
-"Loaded weights leave no GPU memory for the KV cache", the message gives the smallest
-`--mem-fraction-static`; raise it in the config or give each worker more GPUs
-(`--gpus-per-worker`).
+flags of its base and needs that file beside it, so copy both when copying one.
 
-### A model or GPU without an example
+#### A model or GPU without an example
 
 The repository has no config to copy for it. Derive one, on one host first:
 
@@ -82,11 +98,12 @@ The repository has no config to copy for it. Derive one, on one host first:
    `evolving_infra/planner/perf_model/priors.py` or the coefficients fitted for this model and GPU
    ([`docs/dynamic-pd.md`](../../docs/dynamic-pd.md)). Serve with a fixed split until then.
 
-Report the config with the reply it produced. A config that served a request belongs in the
-repository: open a pull request with it and a row in
-[`docs/README.md`](../../docs/README.md#models-and-hardware).
+Report the config with the reply it produced.
 
-## 4. Start
+**Check**: the config's `model` path exists on every host (inside the container when one is
+used), and the config or its base sets `served_model_name`.
+
+### 4. Start
 
 One host:
 
@@ -120,7 +137,10 @@ until [ -e $RUN/READY ]; do kill -0 $! 2>/dev/null || { echo "serving failed, se
 srun --overlap -N1 -n1 $C bash -c '<the request of step 5>' > $RUN/reply.json
 ```
 
-## 5. Wait and verify
+**Check**: `evolving-infra serve` keeps running and prints no `<name> exited` line;
+`run/logs/` holds one log per process.
+
+### 5. Wait and verify
 
 The first host prints `ready: http://<ip>:30900/v1 (N workers, xPyD)` and writes `run/READY`.
 A first start takes about 20 minutes (weights, CUDA graphs). Then:
@@ -137,5 +157,21 @@ The reply's `choices[0].text` holds generated text. Report the URL, the workers,
 the reply. Each process logs to `run/logs/<name>.log`; `SIGTERM` to `evolving-infra serve`
 stops everything it started.
 
-If it does not become ready, or the request fails, use the
-[`debug-run`](../debug-run/SKILL.md) skill.
+**Check**: `run/READY` exists and the reply's `choices[0].text` holds generated text. If it
+does not become ready, or the request fails, use the [`debug-run`](../debug-run/SKILL.md)
+skill.
+
+## Returns
+
+- The router URL and the workers with their starting roles (the `ready:` line).
+- The work directory with the logs, and the reply to the test request.
+- For a model or GPU without an example: the config, which belongs in a pull request with a
+  row in [`docs/README.md`](../../docs/README.md#models-and-hardware).
+
+## Pitfalls
+
+- The engine stops with "Loaded weights leave no GPU memory for the KV cache": the message
+  gives the smallest `--mem-fraction-static`; raise it in the config, or give each worker more
+  GPUs (`gpus_per_worker`). A config written for one worker per host gets half the GPUs per
+  worker on one host.
+- Copy a child config together with its `base:` file.

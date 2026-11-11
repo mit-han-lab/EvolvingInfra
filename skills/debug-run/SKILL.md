@@ -5,15 +5,27 @@ description: Find why an Evolving Infra run failed to start, failed a request, o
 
 # Debug a run
 
-**Scope**: repository, read-only until the cause is named. Reads the run's logs and the code
-of every component they point to.
-**Inputs**: the work directory of `evolving-infra serve` (or `runs/<job id>/` of
-`submit.py`), and what was expected.
-**Returns**: the root cause with the log lines or numbers that show it, and the fix or the
-decision that is the owner's. Do not change code to make the symptom go away before the
-cause is named.
+Find the root cause of a run that did not start, failed a request, or scored below a
+reference, with the log lines or numbers that show it.
 
-## 1. It did not start
+## Scope
+
+- **Reads**: `repository`: the run's logs and the code of every component they point to.
+- **Writes**: nothing until the cause is named; then the fix, in the component the cause is in.
+- **Never changes**: any code, to make a symptom go away before its cause is named.
+- **Outside the repository**: none. A rerun to confirm a fix uses GPUs: confirm it with the
+  owner first.
+
+## Inputs
+
+- The work directory of `evolving-infra serve`, or `runs/<job id>/` of `submit.py`.
+- What was expected: ready, a reply, or the reference result being compared with.
+
+## Steps
+
+Go to the step that matches the symptom.
+
+### 1. It did not start
 
 `serve` stops when a process it started exits, and names every one that did:
 `RuntimeError: engine-w1 exited with -9; see <dir>/logs/engine-w1.log`. Under `submit.py`
@@ -35,7 +47,10 @@ grep -n -E "Error|Address already in use|Cannot assign" <dir>/logs/<name>.log | 
 Nothing exited and no `ready` after 40 minutes: read the tail of each engine log; an engine
 still loading weights or capturing graphs is slow, not stuck.
 
-## 2. A request or the replay fails
+**Check**: the named cause matches the first error of the log, and the fix makes `serve`
+print `ready`.
+
+### 2. A request or the replay fails
 
 | Message | Cause | Fix |
 |---|---|---|
@@ -46,7 +61,10 @@ still loading weights or capturing graphs is slow, not stuck.
 For a failing request in a running stack, follow it through the logs in this order: `router`
 (which P and D it chose), the P's engine log, the D's engine log.
 
-## 3. Slower than the reference
+**Check**: the logs of router, P and D show where the request failed, and after the fix the
+request returns a reply.
+
+### 3. Slower than the reference
 
 A run can differ from the reference in more than one way: go through steps 1 to 4 for both
 runs before concluding. `<run>/bench` is the directory with `trie-lifecycle-*.jsonl`; scripts
@@ -75,4 +93,10 @@ are in `skills/debug-run/scripts/` and `skills/run-benchmark/scripts/`.
    lengths.
 6. **Noise.** Repeat runs of one configuration differ by about 4 % in requests per second.
 
-Report each step's numbers for both runs on the same window, and what differs.
+**Check**: each of steps 1 to 5 has numbers for both runs on the same window.
+
+## Returns
+
+- The root cause, with the log lines or numbers that show it.
+- The fix, or the decision that is the owner's.
+- For a slower run: each step's numbers for both runs on the same window, and what differs.

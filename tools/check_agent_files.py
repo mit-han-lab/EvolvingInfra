@@ -3,9 +3,12 @@
 
     python tools/check_agent_files.py
 
-Exit code 1 lists every problem: a file over its line budget, a skill whose frontmatter name
-differs from its directory or lacks a description, a skill without its Scope, Inputs and
-Returns lines or with a Scope path that does not exist, a skill without its line in AGENTS.md. Standard library only.
+Exit code 1 lists every problem: a file over its line budget; a skill whose frontmatter name
+differs from its directory or whose description lacks "Use when"; a skill whose sections differ
+from skills/SKILL_TEMPLATE.md (Scope with Reads, Writes, Never changes and Outside the
+repository; Inputs; Steps numbered from 1, each with a Check line; Returns; optional Pitfalls);
+a path or link in a skill that does not exist; a skill without its line in AGENTS.md.
+Standard library only.
 """
 import argparse
 from pathlib import Path
@@ -26,6 +29,41 @@ def lines(path: Path) -> int:
     return len(path.read_text().splitlines())
 
 
+SECTIONS = ["Scope", "Inputs", "Steps", "Returns"]
+SCOPE = ["Reads", "Writes", "Never changes", "Outside the repository"]
+
+
+def section(text: str, title: str) -> str:
+    match = re.search(rf"^## {title}\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    return match.group(1) if match else ""
+
+
+def skill_format(skill: Path, text: str) -> list:
+    """Return how one SKILL.md differs from skills/SKILL_TEMPLATE.md."""
+    found = []
+    prose = re.sub(r"^```.*?^```", "", text, flags=re.M | re.S)  # headings inside code are not sections
+    titles = re.findall(r"^## (.+)$", prose, re.M)
+    if titles not in (SECTIONS, SECTIONS + ["Pitfalls"]):
+        found.append(f"sections are {titles}, expected {SECTIONS} and optionally Pitfalls")
+    labels = re.findall(r"^- \*\*(.+?)\*\*:", section(prose, "Scope"), re.M)
+    if labels != SCOPE:
+        found.append(f"Scope lists {labels}, expected {SCOPE}")
+    for path in re.findall(r"`([^`\s]+)`", section(prose, "Scope")):
+        if "<" not in path and not path.startswith("-") and ("/" in path or "." in path):
+            if not (ROOT / path.rstrip("/")).exists():
+                found.append(f"Scope path {path} does not exist")
+    steps = re.split(r"^### ", section(prose, "Steps"), flags=re.M)[1:]
+    numbers = [int(m.group(1)) for s in steps if (m := re.match(r"(\d+)\. ", s))]
+    if not steps or numbers != list(range(1, len(steps) + 1)):
+        found.append("steps are not ### 1., ### 2., ... in order")
+    found += [f"step {s.split(chr(10), 1)[0]} has no **Check**: line" for s in steps if "**Check**:" not in s]
+    for link in re.findall(r"\]\(([^)\s]+)\)", prose):
+        target = link.split("#", 1)[0]
+        if target and not re.match(r"[a-z]+:", target) and not (skill.parent / target).exists():
+            found.append(f"link {link} does not exist")
+    return found
+
+
 def problems() -> list:
     found = []
     root = ROOT / "AGENTS.md"
@@ -42,19 +80,11 @@ def problems() -> list:
         fields = dict(re.findall(r"^(\w+):\s*(.+)$", front.group(1), re.M)) if front else {}
         if fields.get("name") != name:
             found.append(f"{name}: frontmatter name is {fields.get('name')!r}")
-        if len(fields.get("description", "")) < 40:
-            found.append(f"{name}: description must say what the skill does and when to use it")
+        if len(fields.get("description", "")) < 40 or "Use when" not in fields.get("description", ""):
+            found.append(f"{name}: description must say what the skill does and, with \"Use when\", when to use it")
         if lines(skill) > BUDGET["skill"]:
             found.append(f"{name}: SKILL.md has {lines(skill)} lines (limit {BUDGET['skill']})")
-        head = text[front.end():].split("\n## ", 1)[0] if front else ""
-        labels = re.findall(r"^\*\*(Scope|Inputs|Returns)\*\*:", head, re.M)
-        if labels != ["Scope", "Inputs", "Returns"]:
-            found.append(f"{name}: needs **Scope**, **Inputs** and **Returns** lines under the title, in this order")
-        scope = re.search(r"^\*\*Scope\*\*: (.*?)\.", head, re.M | re.S)
-        paths = re.findall(r"`([^`]+)`", scope.group(1)) if scope else []
-        if scope and not paths and not scope.group(1).startswith("repository"):
-            found.append(f"{name}: Scope is `repository` or a list of directories")
-        found += [f"{name}: Scope path {p} does not exist" for p in paths if not (ROOT / p).exists()]
+        found += [f"{name}: {problem}" for problem in skill_format(skill, text)]
         if f"skills/{name}/SKILL.md" not in index:
             found.append(f"{name}: not listed in AGENTS.md")
     return found
