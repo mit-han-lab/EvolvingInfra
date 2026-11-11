@@ -46,6 +46,7 @@ export EVOLVING_INFRA_REPLAY='{replay}'
 /opt/trie-venv/bin/python benchmarks/replay/run_trie.py workload_path=$R/traces/{workload} \\
   endpoint=http://127.0.0.1:30900/v1 api_key=EMPTY model={name} tokenizer_model={model} concurrency={concurrency} duration={duration} \\
   warm_start=stationary workload_order=natural seed=0 delay_scale=1 strict_replay=true context_source=recorded \\
+  replay_context_mode=actual_output \\
   replay_output_mode=model trajectory_prefix_tokens=10 migration_limit=0 max_retries=0 stream=true \\
   strict_replay_openai_fast_path=true cache_salt_mode=global prefix_block_size={page} timeout=3600 drain_timeout=0 \\
   num_gpus={gpus} output_json=$R/bench/trie-results-0.json lifecycle_output_jsonl=$R/bench/trie-lifecycle-0.jsonl \\

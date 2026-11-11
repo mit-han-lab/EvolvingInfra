@@ -30,6 +30,7 @@ export EVOLVING_INFRA_REPLAY='{"router_url": "http://127.0.0.1:30900",
 /opt/trie-venv/bin/python benchmarks/replay/run_trie.py \
   workload_path=<workload.jsonl> endpoint=http://127.0.0.1:30900/v1 model=deepseek-v4-flash \
   api_key=EMPTY strict_replay=true strict_replay_openai_fast_path=true stream=true max_retries=0 \
+  replay_context_mode=actual_output replay_output_mode=model \
   cache_salt_mode=global prefix_block_size=256 concurrency=<n> duration=<s> \
   output_json=<run>/trie-results-0.json lifecycle_output_jsonl=<run>/trie-lifecycle-0.jsonl \
   lifecycle_run_id=<run> lifecycle_cell_id=bench lifecycle_arm=off lifecycle_concurrency=<n>
@@ -39,6 +40,9 @@ export EVOLVING_INFRA_REPLAY='{"router_url": "http://127.0.0.1:30900",
   frontend's config and the router's prepared contract.
 - Several Trie processes: give one frontend URL per process in `tokenizer_urls`; process `i`
   writes `trie-results-<i>.json` and uses the `i`-th URL.
+- `replay_context_mode=actual_output` puts the model's own earlier outputs, not the recorded ones,
+  into later prompts, as in the paper's runs. With recorded outputs in the context, speculative
+  decoding accepts fewer draft tokens and decode is slower.
 - `cache_salt_mode=global` is required: the prepared path carries one fixed cache salt.
 - `lifecycle_output_jsonl` and the four `lifecycle_*` arguments are required: the agent-identity
   adapter records each request through Trie's lifecycle writer.
