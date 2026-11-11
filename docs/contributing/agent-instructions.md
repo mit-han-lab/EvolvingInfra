@@ -69,3 +69,7 @@ checks every rule below that a script can check.
   real task. Say in the pull request what that task was.
 - Name it with a verb and its object (`deploy-stack`, `check-pr`).
 - List the skill in `AGENTS.md` and in [`skills/README.md`](../../skills/README.md).
+
+Agents find the instructions and the skills without setup. Codex and most other agents read
+`AGENTS.md`. Claude Code reads `CLAUDE.md`, which holds the one line `@AGENTS.md`, and finds
+skills through `.claude/skills`, a link to `skills/`. Write skills only in `skills/`.
