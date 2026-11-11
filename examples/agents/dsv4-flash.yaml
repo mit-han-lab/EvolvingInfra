@@ -1,0 +1,6 @@
+# DeepSeek-V4-Flash on H200 for coding agents: h200/dsv4-flash.yaml plus the tool-call and
+# reasoning parsers.
+base: ../h200/dsv4-flash.yaml
+engine_args:
+  - --tool-call-parser=deepseekv4
+  - --reasoning-parser=deepseek-v4

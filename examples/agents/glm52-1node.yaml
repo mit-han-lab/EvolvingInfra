@@ -1,0 +1,6 @@
+# GLM-5.2 on one GB300 node for coding agents: glm52-1node.yaml plus the parsers that turn the
+# model's tool calls and reasoning into OpenAI `tool_calls` and `reasoning_content`.
+base: ../gb300/glm52-1node.yaml
+engine_args:
+  - --tool-call-parser=glm47
+  - --reasoning-parser=glm45

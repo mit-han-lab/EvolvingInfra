@@ -15,5 +15,8 @@ from: the same config runs on a host you log in to, under Slurm, or on Modal.
 | Slurm with Pyxis | [`slurm/submit.py`](slurm/submit.py)` --config <config>`: serve, replay and score as one job |
 | Modal | [`modal/`](modal/README.md): builds the image and runs two H200 benchmarks |
 
+[`agents/`](agents/README.md) runs Pi, Claude Code and Codex on a running stack: configs with tool-call
+parsers and one launch script per harness.
+
 For other hardware or another model, the [`deploy-stack`](../skills/deploy-stack/SKILL.md) skill derives a
 config; add it here as `<hardware>/<model>.yaml`.

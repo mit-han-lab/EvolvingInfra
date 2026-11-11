@@ -1,0 +1,5 @@
+# Kimi-K2.6 on GB300 for coding agents: gb300/kimi-k26.yaml plus the tool-call and reasoning parsers.
+base: ../gb300/kimi-k26.yaml
+engine_args:
+  - --tool-call-parser=kimi_k2
+  - --reasoning-parser=kimi_k2

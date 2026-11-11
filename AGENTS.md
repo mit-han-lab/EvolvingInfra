@@ -79,6 +79,7 @@ Skills live in `skills/`. To use one, read its `SKILL.md` and follow it.
 | [`check-pr`](skills/check-pr/SKILL.md) | repository | check a change and its description before a pull request or a re-review |
 | [`deploy-stack`](skills/deploy-stack/SKILL.md) | `evolving_infra/launch/`, `examples/`, `docker/` | install and start the stack on one host or several; serve a model or GPU without an example |
 | [`connect-agent`](skills/connect-agent/SKILL.md) | outside the repository (the agent's code) | connect an agent or agent framework to a running stack: identity, prepared path, ending branches |
+| [`connect-harness`](skills/connect-harness/SKILL.md) | `examples/agents/`, read-only | run Pi, Claude Code or Codex on a running stack with the launch scripts |
 | [`run-benchmark`](skills/run-benchmark/SKILL.md) | `examples/`, `benchmarks/` | run the paper's replay benchmark, score it and compare it with the reference |
 | [`diagnose-run`](skills/diagnose-run/SKILL.md) | repository, read-only | find why a run did not start, failed a request, or scored below the reference |
 

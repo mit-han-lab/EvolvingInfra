@@ -73,81 +73,37 @@ uses it. [Architecture](docs/architecture.md) describes the request path.
 
 ## Getting Started
 
-There are two things to do with this repository: serve a model, or reproduce the paper. Your
-coding agent (Claude Code, Codex, ...) can do either by following a [skill](skills/README.md),
-or you can run the commands yourself.
-
-Every component is in the runtime image, built for x86_64 (H200, B300) and aarch64 (GB300):
-
-```bash
-docker pull docker.io/weili0234/evolving-infra:v0.1.0
-```
-
-To build the image or install from source, see [docker/README.md](docker/README.md).
+Evolving Infra is set up and run by your coding agent (Claude Code, Codex, ...): each task below
+is a [skill](skills/README.md) that the agent follows step by step, checking each step and
+reporting what it ran. Every component is in the runtime image, built for x86_64 (H200, B300)
+and aarch64 (GB300): `docker.io/weili0234/evolving-infra:v0.1.0`.
 
 ### Serve a model
 
-**With your coding agent**: "Deploy `<model>` on `<hosts>` with Evolving Infra, following
+Ask your agent: "Deploy `<model>` on `<hosts>` with Evolving Infra, following
 `skills/deploy-stack/SKILL.md`." Give it the model directory, the hosts and how commands reach
 them (a shell on each, or a scheduler). It inspects the machines, writes a config when the
 model or GPU has no example, starts the stack and checks that it answers.
 
-**By hand**: on each host, inside the image (`docker run --gpus all --network host --ipc host
---device /dev/infiniband --ulimit memlock=-1 -v <models>:/models -it <image> bash`), take the config of your
-hardware from [examples/](examples/README.md) and start it. The GB300 configs read GLM-5.2 from
-`/models/GLM-5.2-NVFP4`; `--model-path` overrides it. On one GB300 node:
+### Use it from a coding agent
 
-```bash
-evolving-infra serve --config examples/gb300/glm52-1node.yaml
-```
+Ask your agent: "Run Pi (or Claude Code, or Codex) on our Evolving Infra stack at `<router url>`,
+following `skills/connect-harness/SKILL.md`." The launch scripts are in
+[`examples/agents`](examples/agents/README.md).
 
-The node's GPUs become one prefill and one decode worker, and the router serves an
-OpenAI-compatible API on port 30900. On several hosts, run
-`evolving-infra serve --config examples/gb300/glm52.yaml --hosts h0,h1,h2 --prefill-workers 1`
-on each. [Quickstart](docs/quickstart.md) starts each component by hand.
-
-**Connect the agents you serve.** Tag each request with the agent and branch it belongs to, so
-the KV cache of live branches is kept:
-
-```python
-client = openai.OpenAI(base_url="http://localhost:30900/v1", api_key="unused")
-identity = {"agent_id": run_id, "subagent_id": 0, "request_id": step}
-client.chat.completions.create(
-    model="glm-5.2", messages=messages, max_tokens=1024,
-    extra_headers={"x-agent-context": json.dumps(identity)},
-)
-```
-
-`agent_id` is new for every task run, `subagent_id` names the branch and `request_id` is the
-request's position in it; end a branch with `POST /kv_sessions/end`
-([KV retention](docs/kv-retention.md)). This works on a stack started without `--planner`. To
-connect an agent framework, including its sub-agents and a stack that serves with `--planner`,
-have your coding agent follow [`connect-agent`](skills/connect-agent/SKILL.md).
+To connect your own agent's code, so that the KV cache of its live branches is kept, ask it to
+follow `skills/connect-agent/SKILL.md`.
 
 ### Reproduce the paper
 
-**With your coding agent**: "Reproduce the paper's Claude Code result on our Slurm cluster,
-following `skills/run-benchmark/SKILL.md`." Give it the workload (Claude Code, Putnam or
-OSWorld), the Slurm account and partition, the image, the model directory and a directory every
-node sees. OSWorld runs Kimi-K2.6, which has no example config: the agent derives one first. A
-run holds nine GPU nodes for about two hours.
+Ask your agent: "Reproduce the paper's Claude Code result on our Slurm cluster, following
+`skills/run-benchmark/SKILL.md`." Give it the workload (Claude Code, Putnam or OSWorld), the
+Slurm account and partition, the image, the model directory and a directory every node sees. A
+run holds nine GPU nodes for about two hours. The workloads and the paper's results are in
+[benchmarks/](benchmarks/README.md).
 
-**By hand**: on nine GB300 nodes with Slurm and [Pyxis](https://github.com/NVIDIA/pyxis), with
-GLM-5.2 at `/models/GLM-5.2-NVFP4` on every node, run from a directory every node sees. The job
-downloads the workload from Hugging Face, so the first node needs internet access. It runs the
-replay inside the image, so use an image built from this checkout
-([docker/README.md](docker/README.md)):
-
-```bash
-python examples/slurm/submit.py --account <account> --partition <partition> --image <image>
-```
-
-It serves, replays the Claude Code workload and writes `runs/<job id>/score.json`. Compare it
-with the reference in [examples/gb300](examples/gb300/README.md). The workloads and the paper's
-results are in [benchmarks/](benchmarks/README.md).
-
-A run that does not start, fails a request or scores below the reference:
-[`diagnose-run`](skills/diagnose-run/SKILL.md).
+When a run does not start, fails a request or scores below the reference, ask it to follow
+`skills/diagnose-run/SKILL.md`.
 
 ## Repository layout
 
