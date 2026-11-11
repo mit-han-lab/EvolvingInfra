@@ -7,7 +7,7 @@ for KV retention. It started from SGLang's router; see [PROVENANCE.md](PROVENANC
 
 ## Build
 
-From `router/core/`. The toolchain comes from `rust-toolchain.toml`; `protoc` must be on `PATH`
+From `evolving_infra/router/core/`. The toolchain comes from `rust-toolchain.toml`; `protoc` must be on `PATH`
 or set in `PROTOC`.
 
 ```bash
@@ -41,9 +41,9 @@ The router also keeps upstream's plain policies (`round_robin`, `power_of_two`,
 
 ## Documentation
 
-- [Placement](../../docs/placement.md): how P and D are chosen, peer pulls, late decode choice.
-- [Configuration](../../docs/configuration.md#router-sgl-router): the flags the benchmarks use.
-- [API reference](../../docs/api-reference.md): HTTP endpoints.
+- [Placement](../../../docs/placement.md): how P and D are chosen, peer pulls, late decode choice.
+- [Configuration](../../../docs/configuration.md#router-sgl-router): the flags the benchmarks use.
+- [API reference](../../../docs/api-reference.md): HTTP endpoints.
 - [BENCHMARKS.md](BENCHMARKS.md): CPU microbenchmarks of the routing primitives.
 
 `sgl-router --help` lists every flag.

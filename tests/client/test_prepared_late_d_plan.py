@@ -2,19 +2,19 @@
 
 With ``--pd-late-decode choose`` under external role control, the router's
 /symmetric_pd/prepared plan names every decode candidate. The SDK's plan check
-(router/client/backend/backend.py _validate_prepared_plan) must accept such a
+(evolving_infra/router/client/backend/backend.py _validate_prepared_plan) must accept such a
 plan before /forward_pd. CPU protocol tests only: no GPU, no
 engine; fake routers and engines run on local TCP ports.
 
 The plan builders mirror the router:
-- router/core/src/backend/execution.rs Executions::install: the classic
+- evolving_infra/router/core/src/backend/execution.rs Executions::install: the classic
   plan; for late D the P-leg kv_export and late_d, ``decode`` = the arrival
   pick (target and kv_import of candidate default_idx) and ``decode_candidates``;
-- router/core/src/server/routes/prepared.rs plan: the session tag on the
+- evolving_infra/router/core/src/server/routes/prepared.rs plan: the session tag on the
   P-leg only for a late plan, on both legs otherwise;
-- router/core/src/backend/sglang/kv.rs marks / late_marks: the KV marks;
-- router/core/src/late_bind.rs sym_prefill_field / decode_field;
-- router/core/src/backend/sglang/request.rs prepared_target.
+- evolving_infra/router/core/src/backend/sglang/kv.rs marks / late_marks: the KV marks;
+- evolving_infra/router/core/src/late_bind.rs sym_prefill_field / decode_field;
+- evolving_infra/router/core/src/backend/sglang/request.rs prepared_target.
 """
 import asyncio
 from contextlib import asynccontextmanager

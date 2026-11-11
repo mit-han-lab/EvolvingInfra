@@ -9,7 +9,7 @@ pip install -e ".[planner]"          # numpy, scipy
 python -m evolving_infra.planner control --help
 ```
 
-How to run it, and every launch parameter: [docs/dynamic-pd.md](../docs/dynamic-pd.md).
+How to run it, and every launch parameter: [docs/dynamic-pd.md](../../docs/dynamic-pd.md).
 
 ## How it works
 
@@ -150,7 +150,7 @@ has a mean error of 2.6%; at 8 or more running requests, the context length (dar
 changes the iteration time by only 2–7%.
 
 <p align="center">
-  <img alt="Iteration-time models of GLM-5.2 on four GB300 GPUs: prefill versus uncached tokens and cached prefix, predicted versus measured, decode versus running requests" src="../docs/assets/planner-fit-gb300-glm52.png" width="100%">
+  <img alt="Iteration-time models of GLM-5.2 on four GB300 GPUs: prefill versus uncached tokens and cached prefix, predicted versus measured, decode versus running requests" src="../../docs/assets/planner-fit-gb300-glm52.png" width="100%">
 </p>
 
 **DeepSeek-V4-Flash on H200.** The mean error is 2.5% in (a) and 1.2% in (b). Over all 60
@@ -159,7 +159,7 @@ requests. Decode (d) has a mean error of 3.0%; at 8 or more running requests, th
 length changes the iteration time by at most 6.9%.
 
 <p align="center">
-  <img alt="Iteration-time models of DeepSeek-V4-Flash on four H200 GPUs: prefill versus uncached tokens and cached prefix, predicted versus measured, decode versus running requests" src="../docs/assets/planner-fit-h200-dsv4-flash.png" width="100%">
+  <img alt="Iteration-time models of DeepSeek-V4-Flash on four H200 GPUs: prefill versus uncached tokens and cached prefix, predicted versus measured, decode versus running requests" src="../../docs/assets/planner-fit-h200-dsv4-flash.png" width="100%">
 </p>
 
 ## Code layout

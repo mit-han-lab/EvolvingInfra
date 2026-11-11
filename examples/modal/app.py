@@ -162,8 +162,8 @@ def check_image() -> dict:
         p = sh(cmd)
         out[name] = dict(rc=p.returncode, out=(p.stdout + p.stderr).strip()[-1500:])
     cfg = stack.bench_config("check", True)
-    out["names"] = name_checks(cfg, Path("/opt/evolving-infra/engine/decoupled_engine"),
-                               Path("/opt/evolving-infra/router/core/src/config/cli.rs"))
+    out["names"] = name_checks(cfg, Path("/opt/evolving-infra/evolving_infra/engine/decoupled_engine"),
+                               Path("/opt/evolving-infra/evolving_infra/router/core/src/config/cli.rs"))
     return out
 
 
@@ -189,8 +189,8 @@ def dry_run(dynamic: bool):
     if dynamic:
         print("== controller.json\n" + json.dumps(stack.controller_config(cfg, ips, "/tmp/run/dry-run/replay"), indent=1))
         print("== trace server\n" + subprocess.list2cmdline(stack.trace_server_command(cfg)))
-    print("== name checks\n" + json.dumps(name_checks(cfg, REPO / "engine" / "decoupled_engine",
-                                                     REPO / "router" / "core" / "src" / "config" / "cli.rs"), indent=1))
+    print("== name checks\n" + json.dumps(name_checks(cfg, REPO / "evolving_infra" / "engine" / "decoupled_engine",
+                                                     REPO / "evolving_infra" / "router" / "core" / "src" / "config" / "cli.rs"), indent=1))
 
 
 if __name__ == "__main__":

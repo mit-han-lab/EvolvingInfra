@@ -19,7 +19,7 @@ the sampled count. Injection happens after the confidence computation and the
 ragged-verify planner (the adaptive schedule keeps acting on the real draft)
 and before the target-verify forward (committed KV is written from the
 injected tokens, as a natural full hit would). Implementation:
-`engine/decoupled_engine/srt/speculative/dspark_components/dspark_synthetic_oracle.py`.
+`evolving_infra/engine/decoupled_engine/srt/speculative/dspark_components/dspark_synthetic_oracle.py`.
 
 Guard rails: DSPARK-only; mutually exclusive with `SGLANG_SIMULATE_ACC_LEN`
 and `--speculative-adaptive`; oracle servers reject non-greedy requests at

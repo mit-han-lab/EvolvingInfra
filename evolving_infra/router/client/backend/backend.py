@@ -146,7 +146,7 @@ def _prepared_description(prepared: Mapping[str, Any]) -> dict[str, Any]:
 
 _INVALID_PLAN = "invalid prepared execution plan"
 # The router's late-D link fields, equal on the P-leg and on every candidate
-# (router/core/src/late_bind.rs prefill_field / decode_field).
+# (evolving_infra/router/core/src/late_bind.rs prefill_field / decode_field).
 _LATE_D_LINK = ("v", "mode", "router_epoch", "k")
 # Candidates per request: router late_bind::MAX_CANDIDATES, tokenizer ForwardPD.
 _LATE_D_MAX_CANDIDATES = 64
@@ -182,8 +182,8 @@ def _late_d_candidate_endpoints(plan: dict, config_id: Any, transfer: int) -> li
     """Check the late-D fields of a plan whose common fields and two legs passed.
 
     With ``--pd-late-decode choose`` under external role control the router
-    (router/core/src/backend/execution.rs ``Executions::install``; session tag in
-    router/core/src/server/routes/prepared.rs ``plan``) adds to the classic plan:
+    (evolving_infra/router/core/src/backend/execution.rs ``Executions::install``; session tag in
+    evolving_infra/router/core/src/server/routes/prepared.rs ``plan``) adds to the classic plan:
     ``prefill.late_d`` {v, mode, router_epoch, k, default_idx, local_ok: false};
     ``prefill.kv_export.candidates``, one entry per candidate; ``decode_candidates``,
     one D-leg {target, kv_import, late_d} per candidate in ``cand_idx`` order,

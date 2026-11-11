@@ -24,7 +24,7 @@ m run --detach examples/modal/app.py::dynamic
   frontends assigned to the node (one per Trie process, `python -m evolving_infra.router.frontend`),
   and in dynamic runs the planner's trace server (`python -m evolving_infra.planner serve-traces`).
 - **Rank 0** additionally runs the indexer supervisor (`python -m evolving_infra.router.indexer`,
-  Dynamo 1.4.0), the router (`router/core`, binary `sgl-router`), the planner controller in dynamic
+  Dynamo 1.4.0), the router (`evolving_infra/router/core`, binary `sgl-router`), the planner controller in dynamic
   runs (`python -m evolving_infra.planner control`), and Trie through
   `benchmarks/replay/run_trie.py`.
 

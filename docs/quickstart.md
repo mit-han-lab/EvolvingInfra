@@ -153,16 +153,16 @@ The router turns the identity into the engine request ID and uses it for
 The engine needs a CUDA 13 GPU host; the other components run anywhere.
 
 ```bash
-pip install -e engine                                   # DecoupledEngine, Python >= 3.10
-pip install -e ".[client,frontend,indexer,planner]"     # frontend, KV directory, client SDK, planner; Python >= 3.11
-(cd router/core && cargo build --release --locked)      # router, binary target/release/sgl-router; needs protoc
+pip install -e evolving_infra/engine                                # DecoupledEngine, Python >= 3.10
+pip install -e ".[client,frontend,indexer,planner]"                 # frontend, KV directory, client SDK, planner; Python >= 3.11
+(cd evolving_infra/router/core && cargo build --release --locked)   # router, binary target/release/sgl-router; needs protoc
 ```
 
 Run the CPU tests:
 
 ```bash
 pip install -e ".[client,frontend,indexer,planner,test]" && pytest -q
-(cd router/core && cargo test --locked)
+(cd evolving_infra/router/core && cargo test --locked)
 pip install -e 'benchmarks/trie[test]' && pytest -q benchmarks/trie/tests   # Trie has its own pins: use a separate venv
 ```
 

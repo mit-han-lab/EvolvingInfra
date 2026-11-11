@@ -27,11 +27,11 @@ moves through it.
 
 | Path | Contents | Read first |
 |---|---|---|
-| `engine/` | Serving engine, derived from SGLang (`decoupled_engine`) | [`engine/README.md`](engine/README.md) |
-| `router/core/` | Rust router (`sgl-router`): placement, late decode choice, role API | [`router/core/README.md`](router/core/README.md) |
-| `router/frontend/`, `router/indexer/`, `router/client/` | Tokenizer service, KV directory, Python client | [`router/frontend/README.md`](router/frontend/README.md), [`router/indexer/README.md`](router/indexer/README.md) |
-| `planner/` | Online P/D planner | [`planner/README.md`](planner/README.md) |
-| `launch/` | `evolving-infra serve`: starts every component on one or more hosts | [`examples/gb300/README.md`](examples/gb300/README.md) |
+| `evolving_infra/engine/` | Serving engine, derived from SGLang (`decoupled_engine`) | [`evolving_infra/engine/README.md`](evolving_infra/engine/README.md) |
+| `evolving_infra/router/core/` | Rust router (`sgl-router`): placement, late decode choice, role API | [`evolving_infra/router/core/README.md`](evolving_infra/router/core/README.md) |
+| `evolving_infra/router/frontend/`, `evolving_infra/router/indexer/`, `evolving_infra/router/client/` | Tokenizer service, KV directory, Python client | [`evolving_infra/router/frontend/README.md`](evolving_infra/router/frontend/README.md), [`evolving_infra/router/indexer/README.md`](evolving_infra/router/indexer/README.md) |
+| `evolving_infra/planner/` | Online P/D planner | [`evolving_infra/planner/README.md`](evolving_infra/planner/README.md) |
+| `evolving_infra/launch/` | `evolving-infra serve`: starts every component on one or more hosts | [`examples/gb300/README.md`](examples/gb300/README.md) |
 | `examples/` | A config per hardware and model (`gb300/`, `h200/`); running one under Slurm (`slurm/`) or on Modal (`modal/`) | [`examples/README.md`](examples/README.md) |
 | `benchmarks/` | Trie replay client, replay adapters, run checks, scoring | [`benchmarks/README.md`](benchmarks/README.md) |
 | `docker/` | The runtime image | [`docker/README.md`](docker/README.md) |
@@ -49,7 +49,7 @@ directory, planner) and `/opt/trie-venv` (replay client).
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[planner,test]"                              # launcher, planner, test tools
 python -m pytest -q tests/launch tests/planner tests/engine tests/tools   # no GPU needed
-(cd router/core && cargo test --locked)                       # router: unit and proxy tests
+(cd evolving_infra/router/core && cargo test --locked)   # router: unit and proxy tests
 python3 -m venv .venv-trie && .venv-trie/bin/pip install -e 'benchmarks/trie[test]'
 .venv-trie/bin/python -m pytest -q benchmarks/trie/tests      # replay client
 ```
@@ -77,7 +77,7 @@ Skills live in `skills/`. To use one, read its `SKILL.md` and follow it.
 | Skill | Scope | Use it to |
 |---|---|---|
 | [`pr-checklist`](skills/pr-checklist/SKILL.md) | repository | check a change and its description before a pull request or a re-review |
-| [`serve`](skills/serve/SKILL.md) | `launch/`, `examples/`, `docker/` | install and start the stack on one host or several; serve a model or GPU without an example |
+| [`serve`](skills/serve/SKILL.md) | `evolving_infra/launch/`, `examples/`, `docker/` | install and start the stack on one host or several; serve a model or GPU without an example |
 | [`run-benchmark`](skills/run-benchmark/SKILL.md) | `examples/`, `benchmarks/` | run the paper's replay benchmark, score it and compare it with the reference |
 | [`debug-run`](skills/debug-run/SKILL.md) | repository, read-only | find why a run did not start, failed a request, or scored below the reference |
 
@@ -90,11 +90,11 @@ work it out.
 Read the guide of a directory before changing code in it. If the guide conflicts with the
 requested change, stop and say so.
 
-- [`engine/AGENTS.md`](engine/AGENTS.md): resolved settings, where defaults live, ports, TP ranks.
-- [`router/core/AGENTS.md`](router/core/AGENTS.md): the preset, the test helper, which routes
+- [`evolving_infra/engine/AGENTS.md`](evolving_infra/engine/AGENTS.md): resolved settings, where defaults live, ports, TP ranks.
+- [`evolving_infra/router/core/AGENTS.md`](evolving_infra/router/core/AGENTS.md): the preset, the test helper, which routes
   late decode choice and role control accept.
-- [`planner/AGENTS.md`](planner/AGENTS.md): launch parameters, the role API, what stops the planner.
-- [`launch/AGENTS.md`](launch/AGENTS.md): interpreters, port layout, hardware detection, hosts.
+- [`evolving_infra/planner/AGENTS.md`](evolving_infra/planner/AGENTS.md): launch parameters, the role API, what stops the planner.
+- [`evolving_infra/launch/AGENTS.md`](evolving_infra/launch/AGENTS.md): interpreters, port layout, hardware detection, hosts.
 - [`benchmarks/AGENTS.md`](benchmarks/AGENTS.md): replay settings, scoring windows, comparing runs;
   one guide per workload under it.
 

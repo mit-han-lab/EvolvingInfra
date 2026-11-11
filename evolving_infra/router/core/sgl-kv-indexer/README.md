@@ -64,7 +64,7 @@ whole-block events. `REPORT` replaces the component snapshot for one
 ## Build
 
 ```bash
-cd router/core
+cd evolving_infra/router/core
 cargo build --release --locked -p sgl-kv-indexer
 ```
 

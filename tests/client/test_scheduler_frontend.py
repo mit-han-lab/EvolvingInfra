@@ -88,7 +88,7 @@ class IdentityTests(unittest.TestCase):
 
     def test_retry_keeps_identity_and_cache_namespace_is_explicit(self):
         identity = RequestIdentity('question/你好', 2, 7)
-        # Shared with router/core/src/agent_identity.rs; moving the Python classes
+        # Shared with evolving_infra/router/core/src/agent_identity.rs; moving the Python classes
         # must not change which request the Rust runtime sees.
         self.assertEqual(
             identity.engine_rid,

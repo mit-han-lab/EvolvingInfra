@@ -7,7 +7,7 @@ import pytest
 
 PATH = (
     Path(__file__).resolve().parents[2]
-    / "engine/decoupled_engine/srt/arg_groups/symmetric_defaults.py"
+    / "evolving_infra/engine/decoupled_engine/srt/arg_groups/symmetric_defaults.py"
 )
 spec = importlib.util.spec_from_file_location("symmetric_defaults", PATH)
 sd = importlib.util.module_from_spec(spec)

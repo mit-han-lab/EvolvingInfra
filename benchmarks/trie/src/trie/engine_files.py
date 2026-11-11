@@ -16,7 +16,7 @@ import sys
 from types import ModuleType
 
 # benchmarks/trie/src/trie/engine_files.py -> repository root is parents[4].
-_CHECKOUT_ENGINE = Path(__file__).resolve().parents[4] / "engine" / "decoupled_engine"
+_CHECKOUT_ENGINE = Path(__file__).resolve().parents[4] / "evolving_infra" / "engine" / "decoupled_engine"
 # Module name the engine used for the image layout before the rename; a module registered under it
 # (tests, or an environment that provides it) takes precedence over the engine tree.
 _LEGACY_IMAGE_LAYOUT = "sglang_image_layout"

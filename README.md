@@ -86,9 +86,9 @@ docker build -f docker/Dockerfile -t evolving-infra .
 Or install from source:
 
 ```bash
-pip install -e engine                                   # engine
-pip install -e ".[client,frontend,indexer,planner]"     # launcher, client, tokenizer service, KV directory, planner
-(cd router/core && cargo build --release --locked)      # router
+pip install -e evolving_infra/engine                                # engine
+pip install -e ".[client,frontend,indexer,planner]"                 # launcher, client, tokenizer service, KV directory, planner
+(cd evolving_infra/router/core && cargo build --release --locked)   # router
 ```
 
 To reproduce the paper's setup, GLM-5.2 on GB300, start it on one node:
@@ -133,11 +133,11 @@ client.completions.create(
 
 | Directory | What it contains |
 |---|---|
-| [`engine/`](engine/README.md) | Serving engine, derived from SGLang (`decoupled_engine`) |
-| [`router/core/`](router/core/README.md) | Rust router (`sgl-router`) |
-| [`router/frontend/`](router/frontend/README.md), [`router/indexer/`](router/indexer/README.md), [`router/client/`](router/client/__init__.py) | Tokenizer service, KV directory, Python client |
-| [`planner/`](planner/README.md) | Planner |
-| [`launch/`](launch/__main__.py), [`examples/`](examples/README.md) | `evolving-infra serve`; a config per hardware and model, and how to run one under Slurm or on Modal |
+| [`evolving_infra/engine/`](evolving_infra/engine/README.md) | Serving engine, derived from SGLang (`decoupled_engine`); [what we changed](evolving_infra/engine/CHANGES.md) |
+| [`evolving_infra/router/core/`](evolving_infra/router/core/README.md) | Rust router (`sgl-router`) |
+| [`evolving_infra/router/frontend/`](evolving_infra/router/frontend/README.md), [`evolving_infra/router/indexer/`](evolving_infra/router/indexer/README.md), [`evolving_infra/router/client/`](evolving_infra/router/client/__init__.py) | Tokenizer service, KV directory, Python client |
+| [`evolving_infra/planner/`](evolving_infra/planner/README.md) | Planner |
+| [`evolving_infra/launch/`](evolving_infra/launch/__main__.py), [`examples/`](examples/README.md) | `evolving-infra serve`; a config per hardware and model, and how to run one under Slurm or on Modal |
 | [`AGENTS.md`](AGENTS.md), [`skills/`](skills/) | Instructions and skills for coding agents |
 | [`benchmarks/`](benchmarks/README.md) | Agent trace replay, run checks, reference results |
 | [`docker/`](docker/README.md) | Runtime image |

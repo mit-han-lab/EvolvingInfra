@@ -28,18 +28,18 @@ git fetch origin && git log --oneline origin/main..HEAD && git diff --stat origi
 
 ## 1. Design fit
 
-- **Shared paths stay small.** Changes to the scheduler (`engine/decoupled_engine/srt/managers/`),
+- **Shared paths stay small.** Changes to the scheduler (`evolving_infra/engine/decoupled_engine/srt/managers/`),
   the symmetric P/D path (`srt/disaggregation/`), the host KV tier (`srt/mem_cache/`), router
-  placement (`router/core/src/scheduler/`) and the planner's decision rule (`planner/policy/`)
+  placement (`evolving_infra/router/core/src/scheduler/`) and the planner's decision rule (`evolving_infra/planner/policy/`)
   reach every deployment. Keep them minimal and say in Details why each is needed.
 - **Defaults are decisions.** A new flag has a default that works without it. A feature of
   the paper's configuration goes in the `paper` presets
   (`srt/arg_groups/symmetric_defaults.py`, `apply_symmetric_pd_preset` in
-  `router/core/src/config/cli.rs`), with a test, not in every launch command.
+  `evolving_infra/router/core/src/config/cli.rs`), with a test, not in every launch command.
 - **Engine code reads resolved settings**: `resolution_result(server_args, field)`, never the
   raw field, for anything resolution can set.
 - **No environment-specific values in code**: host names, cluster paths, NIC names, account
-  names. They belong in a config or are detected (`launch/hardware.py`).
+  names. They belong in a config or are detected (`evolving_infra/launch/hardware.py`).
 - **Agent files** (`AGENTS.md`, a skill, the template): follow
   [`docs/contributing/agent-instructions.md`](../../docs/contributing/agent-instructions.md)
   and run `python tools/check_agent_files.py`.

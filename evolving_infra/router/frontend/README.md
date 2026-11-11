@@ -14,7 +14,7 @@ server.py      HTTP endpoints, native tokenization and service lifecycle.
 Install the root project with the `[frontend]` extra. Start with
 `python -m evolving_infra.router.frontend --config /path/node.json`;
 [node.example.json](node.example.json) lists the node settings. Tests are in
-[tests/frontend](../../tests/frontend).
+[tests/frontend](../../../tests/frontend).
 
 Engine code is optional and imported lazily (`_engine.py`): `hash_mode=sglang_native`
 (the default) needs `decoupled_engine.srt.mem_cache.cpp_utils.native_hash` from

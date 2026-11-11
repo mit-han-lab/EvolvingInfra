@@ -56,13 +56,6 @@ packages = [
     "evolving_infra.planner.policy",
 ]
 
-[tool.setuptools.package-dir]
-"evolving_infra.router.client" = "router/client"
-"evolving_infra.router.frontend" = "router/frontend"
-"evolving_infra.router.indexer" = "router/indexer"
-"evolving_infra.launch" = "launch"
-"evolving_infra.planner" = "planner"
-
 [tool.setuptools.package-data]
 "evolving_infra.router.frontend" = ["node.example.json"]
 "evolving_infra.router.indexer" = ["dynamo-services.example.json"]

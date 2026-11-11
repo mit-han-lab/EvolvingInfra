@@ -40,7 +40,7 @@ SHA-256，避免把切片误认为完整语料。
 ## DSV4 编码
 
 `--chat-encoding auto` 对目录名含 `deepseek-v4` 的 tokenizer 使用同一 SGLang checkout 内的
-`engine/decoupled_engine/srt/entrypoints/openai/encoding_dsv4.py`，不经简版 Jinja。目录改名时显式指定 `dsv4`。
+`evolving_infra/engine/decoupled_engine/srt/entrypoints/openai/encoding_dsv4.py`，不经简版 Jinja。目录改名时显式指定 `dsv4`。
 默认 `--thinking-mode thinking`；工具定义注入首个 system，DSML、角色、工具结果归并/排序由参考编码器处理。
 `chat` 模式只适用于无录制 reasoning 的输出，有 reasoning 时拒绝丢弃或伪装为普通内容。
 `add_generation_prompt=False` 关闭末尾待生成的 assistant 前缀；已完成的 assistant 不受影响。

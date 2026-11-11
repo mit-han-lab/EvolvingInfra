@@ -1,7 +1,7 @@
-# router/core
+# evolving_infra/router/core
 
 The Rust router (`sgl-router`). [`README.md`](README.md) has the build;
-[`docs/placement.md`](../../docs/placement.md) says how it picks P and D.
+[`docs/placement.md`](../../../docs/placement.md) says how it picks P and D.
 
 - **Build and test**: `cargo test --locked` from this directory (unit tests in `src/`, proxy
   tests with mock workers in `tests/proxy/`). `protoc` must be on `PATH` or in `PROTOC`.
@@ -21,7 +21,7 @@ The Rust router (`sgl-router`). [`README.md`](README.md) has the build;
   `--symmetric-pd-external-role-control` and retention on, a plain `/v1/completions` request is
   refused: the router needs the frontend's lifecycle callbacks to count work per session.
 - **Placement constants** are named in `src/scheduler/co_schedule.rs`
-  (`DEFAULT_TRADE_COPY_LAMBDA`); [`docs/paper.md`](../../docs/paper.md) points at them. Change
+  (`DEFAULT_TRADE_COPY_LAMBDA`); [`docs/paper.md`](../../../docs/paper.md) points at them. Change
   the doc with the constant.
 - **A flag that only makes sense with `--policy symmetric_pd`** is listed in the check that
   rejects it under other policies (search `symmetric_pd_import_cache_policy.is_some()`).

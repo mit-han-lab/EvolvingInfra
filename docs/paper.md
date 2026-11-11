@@ -3,20 +3,20 @@
 Where each mechanism of *Evolving Infra: Agent-Adaptive LLM Serving at Scale* lives in this
 repository, and the flags that control it. With `--disaggregation-mode symmetric` on the engines
 and `--policy symmetric_pd` on the router, every mechanism below is on by default
-([Configuration](configuration.md)). Engine paths are under `engine/decoupled_engine/srt/`.
+([Configuration](configuration.md)). Engine paths are under `evolving_infra/engine/decoupled_engine/srt/`.
 
 ## Mechanisms
 
 | Paper | Flags | Code |
 |---|---|---|
-| §4.1 Symmetric engines: every worker serves both phases and switches phase without a restart | Engine `--disaggregation-mode symmetric`. Router `--policy symmetric_pd`, `--symmetric-pd-external-role-control` (`PUT /symmetric_pd/roles`) | `disaggregation/symmetric/`, `router/core/src/server/app.rs` |
+| §4.1 Symmetric engines: every worker serves both phases and switches phase without a restart | Engine `--disaggregation-mode symmetric`. Router `--policy symmetric_pd`, `--symmetric-pd-external-role-control` (`PUT /symmetric_pd/roles`) | `disaggregation/symmetric/`, `evolving_infra/router/core/src/server/app.rs` |
 | §4.2 Shared host-memory KV pool: prefill workers read KV from a peer's host memory over RDMA | Engine `--enable-hierarchical-cache --hicache-write-policy write_through`, `--enable-peer-kv-servicer`. Router `--symmetric-pd-pull-hint`, `--symmetric-pd-pull-from-any-holder` | `mem_cache/peer_kv_servicer.py`, `mem_cache/storage/peer_kv/`, `disaggregation/pull/` |
 | §4.2 Deduplication across the GPUs of a node | Engine `--enable-dsa-hicache-host-dedup` (GLM-5.2), `--enable-mla-hicache-host-dedup` (Kimi-K2.6), `--enable-dsv4-hicache-host-dedup` (DeepSeek-V4) | `mem_cache/dsa_host_dedup.py`, `mem_cache/mla_host_dedup.py`, `mem_cache/dsv4_host_dedup.py` |
-| §4.3 Agent-aware KV directory: KV placement plus the active branches that reference each block | Router `--kv-indexer-url`, `--kv-worker-map`, `--symmetric-pd-kv-session-retention`. Engine `--enable-kv-session-retention`. Clients send `x-agent-context` and `POST /kv_sessions/end` | `router/indexer/`, `router/core/src/agent_identity.rs`, `router/core/src/backend/kv_sessions.rs`, `mem_cache/unified_cache/session_ref_tracker.py` |
-| §5.1 Prefill and decode iteration-time models, fitted online | Engine `--sched-trace-dir`; the planner fits during the learning window | `planner/perf_model/` (`step_fit.py`, `worker_model.py`, `calibration.py`) |
-| §5.2 Online phase-split planner | `python -m evolving_infra.planner control` ([Dynamic P/D](dynamic-pd.md)) | `planner/managers/planner_manager.py`, `planner/policy/` |
+| §4.3 Agent-aware KV directory: KV placement plus the active branches that reference each block | Router `--kv-indexer-url`, `--kv-worker-map`, `--symmetric-pd-kv-session-retention`. Engine `--enable-kv-session-retention`. Clients send `x-agent-context` and `POST /kv_sessions/end` | `evolving_infra/router/indexer/`, `evolving_infra/router/core/src/agent_identity.rs`, `evolving_infra/router/core/src/backend/kv_sessions.rs`, `mem_cache/unified_cache/session_ref_tracker.py` |
+| §5.1 Prefill and decode iteration-time models, fitted online | Engine `--sched-trace-dir`; the planner fits during the learning window | `evolving_infra/planner/perf_model/` (`step_fit.py`, `worker_model.py`, `calibration.py`) |
+| §5.2 Online phase-split planner | `python -m evolving_infra.planner control` ([Dynamic P/D](dynamic-pd.md)) | `evolving_infra/planner/managers/planner_manager.py`, `evolving_infra/planner/policy/` |
 | §5.3 Eviction: unreferenced KV first; among referenced KV, the branch predicted to return last | Engine `--enable-kv-session-retention` | `mem_cache/unified_cache/retention_order.py` |
-| §5.3 Routing by predicted time to first token, with the fetch cost and the copy price | Router `--symmetric-pd-p-select cost-function --co-schedule-trade --co-schedule-uncached-balance`. Engine `--enable-prefill-work-snapshot` | `router/core/src/scheduler/cost_function.rs`, `router/core/src/scheduler/co_schedule.rs`, `managers/scheduler_components/prefill_routing_snapshot.py` |
+| §5.3 Routing by predicted time to first token, with the fetch cost and the copy price | Router `--symmetric-pd-p-select cost-function --co-schedule-trade --co-schedule-uncached-balance`. Engine `--enable-prefill-work-snapshot` | `evolving_infra/router/core/src/scheduler/cost_function.rs`, `evolving_infra/router/core/src/scheduler/co_schedule.rs`, `managers/scheduler_components/prefill_routing_snapshot.py` |
 | §5.3 Decode bound when the prefill starts | Router `--pd-late-decode choose --pd-late-decode-rule fit_req`. Engine `--disaggregation-late-d choose` | `disaggregation/late_d.py` |
 
 ## Parameters (Appendix E.3)

@@ -41,7 +41,7 @@ class Fleet:
 
     An engine abort ends only a request the engine has admitted (`hit`); the Backend sends one
     abort to each engine for every failed/cancelled report and for an upload reported after one
-    (router/core/src/backend/execution.rs `event()`), as the Rust router does.
+    (evolving_infra/router/core/src/backend/execution.rs `event()`), as the Rust router does.
     """
 
     def __init__(self):

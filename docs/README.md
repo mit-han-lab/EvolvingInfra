@@ -45,7 +45,7 @@ host-memory tier.
 | [API Reference](api-reference.md) | Router HTTP endpoints and the client SDK |
 | [From the Paper to the Code](paper.md) | Where each mechanism and parameter of the paper lives, and the flags that turn it on |
 
-Component READMEs: [engine](../engine/README.md), [router core](../router/core/README.md),
-[frontend](../router/frontend/README.md), [indexer](../router/indexer/README.md),
-[planner](../planner/README.md), [benchmarks](../benchmarks/README.md),
+Component READMEs: [engine](../evolving_infra/engine/README.md), [router core](../evolving_infra/router/core/README.md),
+[frontend](../evolving_infra/router/frontend/README.md), [indexer](../evolving_infra/router/indexer/README.md),
+[planner](../evolving_infra/planner/README.md), [benchmarks](../benchmarks/README.md),
 [Modal benchmarks](../examples/modal/README.md), [runtime image](../docker/README.md).

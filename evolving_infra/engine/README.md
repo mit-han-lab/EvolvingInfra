@@ -7,7 +7,7 @@ unified host KV cache with session retention, and DeepSeek-V4 attention changes.
 ## Install and run
 
 ```bash
-pip install -e engine            # Python >= 3.10, CUDA 13 GPU host
+pip install -e evolving_infra/engine               # Python >= 3.10, CUDA 13 GPU host
 decoupled-engine --model-path <model> [options]   # = python -m decoupled_engine.launch_server
 ```
 
@@ -21,7 +21,8 @@ The engine is SGLang's `python/sglang` at upstream commit
 [`9a489f8d2f`](https://github.com/sgl-project/sglang/commit/9a489f8d2fc376fbe5594393af367fd99ada7aac),
 renamed to `decoupled_engine` and substantially modified. Each modified upstream file says
 so in its header ("Adapted from SGLang ..."); files without that line are new or differ
-only by the rename. The main changes:
+only by the rename. [CHANGES.md](CHANGES.md) lists the 85 new files and the 145 modified
+ones. The main changes:
 
 - **Symmetric P/D workers** (`srt/disaggregation/symmetric/`): any worker can run the
   prefill or the decode leg, and KV moves to the decode worker chunk by chunk during prefill.

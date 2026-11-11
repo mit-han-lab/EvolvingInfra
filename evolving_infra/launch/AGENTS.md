@@ -2,7 +2,7 @@
 
 `evolving-infra serve`: one command per host starts that host's engines and, on the first
 host, the KV directory, the frontend, the router and the planner.
-[`examples/gb300/README.md`](../examples/gb300/README.md) shows its use.
+[`examples/gb300/README.md`](../../examples/gb300/README.md) shows its use.
 
 - **Three interpreters.** The launcher runs in the environment that has the frontend, the KV
   directory and the planner (`sys.executable`). Engines start with the interpreter that has

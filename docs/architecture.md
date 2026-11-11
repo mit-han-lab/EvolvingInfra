@@ -27,12 +27,12 @@ engine restarts.
 
 | Component | Directory | Language | Role |
 |---|---|---|---|
-| DecoupledEngine | [`engine/`](../engine/README.md) | Python (CUDA kernels) | SGLang-derived engine. `--disaggregation-mode symmetric` makes every worker able to run either leg. Moves KV from P to D with one-sided Mooncake RDMA reads while P is still computing, keeps a host-memory KV tier, and can pull KV from a peer's host pool. |
-| Router | [`router/core/`](../router/core/README.md) | Rust (`sgl-router`) | Serves one model. Under `--policy symmetric_pd` it picks a P and a D for every request, keeps per-worker work reservations, accepts role changes, and keeps the session registry used for KV retention. |
-| Frontend (T) | [`router/frontend/`](../router/frontend/README.md) | Python | Tokenizes and hashes the input, stores the token IDs, uploads the input to the chosen P and D, streams D's output to the caller, and reports progress to the router. One per replay or client process. |
-| Indexer | [`router/indexer/`](../router/indexer/README.md) | Python, runs Dynamo | Supervises the pinned `python -m dynamo.indexer` (`ai-dynamo==1.4.0`), one KV event bridge per worker, and a hash-query adapter. It answers which worker holds which prefix blocks. |
-| Client SDK | [`router/client/`](../router/client/__init__.py) | Python | `Agent`, `Scheduler` and `Backend` for the prepared path. Gives each request an agent / sub-agent / request identity. |
-| Planner | [`planner/`](../planner/README.md) | Python | Fits per-worker step-time models from engine traces, then switches the P/D split through the router's role API when the predicted gain is significant. |
+| DecoupledEngine | [`evolving_infra/engine/`](../evolving_infra/engine/README.md) | Python (CUDA kernels) | SGLang-derived engine. `--disaggregation-mode symmetric` makes every worker able to run either leg. Moves KV from P to D with one-sided Mooncake RDMA reads while P is still computing, keeps a host-memory KV tier, and can pull KV from a peer's host pool. |
+| Router | [`evolving_infra/router/core/`](../evolving_infra/router/core/README.md) | Rust (`sgl-router`) | Serves one model. Under `--policy symmetric_pd` it picks a P and a D for every request, keeps per-worker work reservations, accepts role changes, and keeps the session registry used for KV retention. |
+| Frontend (T) | [`evolving_infra/router/frontend/`](../evolving_infra/router/frontend/README.md) | Python | Tokenizes and hashes the input, stores the token IDs, uploads the input to the chosen P and D, streams D's output to the caller, and reports progress to the router. One per replay or client process. |
+| Indexer | [`evolving_infra/router/indexer/`](../evolving_infra/router/indexer/README.md) | Python, runs Dynamo | Supervises the pinned `python -m dynamo.indexer` (`ai-dynamo==1.4.0`), one KV event bridge per worker, and a hash-query adapter. It answers which worker holds which prefix blocks. |
+| Client SDK | [`evolving_infra/router/client/`](../evolving_infra/router/client/__init__.py) | Python | `Agent`, `Scheduler` and `Backend` for the prepared path. Gives each request an agent / sub-agent / request identity. |
+| Planner | [`evolving_infra/planner/`](../evolving_infra/planner/README.md) | Python | Fits per-worker step-time models from engine traces, then switches the P/D split through the router's role API when the predicted gain is significant. |
 | Replay | [`benchmarks/`](../benchmarks/README.md) | Python | Trie strict-replay client, the adapter that runs it through the prepared path, and the run validity checks. |
 
 ## Request path (prepared path)
@@ -98,18 +98,19 @@ unreferenced host KV first. It is off in the tested configurations. See
 
 ```text
 evolving-infra/
-├── engine/decoupled_engine/   # DecoupledEngine (SGLang-derived); srt/ holds the runtime
-├── router/
-│   ├── core/                  # Rust router, binary sgl-router (sgl-kv-indexer/ is its KV index client crate)
-│   ├── frontend/              # tokenizer frontend (T): /prepare, /forward_pd
-│   ├── indexer/               # KV directory: supervises Dynamo's indexer, event bridges, query adapter
-│   └── client/                # Python client SDK: Agent, Scheduler, Backend
-├── planner/                   # online P/D controller, step-time fit, trace servers
+├── evolving_infra/            # the system; also the Python import root (evolving_infra.planner, ...)
+│   ├── engine/                # DecoupledEngine (SGLang-derived), its own package decoupled_engine; srt/ holds the runtime
+│   ├── router/
+│   │   ├── core/              # Rust router, binary sgl-router (sgl-kv-indexer/ is its KV index client crate)
+│   │   ├── frontend/          # tokenizer frontend (T): /prepare, /forward_pd
+│   │   ├── indexer/           # KV directory: supervises Dynamo's indexer, event bridges, query adapter
+│   │   └── client/            # Python client SDK: Agent, Scheduler, Backend
+│   ├── planner/               # online P/D controller, step-time fit, trace servers
+│   └── launch/                # evolving-infra serve
 ├── benchmarks/                # trie/ (strict-replay client), replay/ (adapter, run checks), reference results
-├── launch/                    # evolving-infra serve
 ├── examples/                  # a config per hardware and model; slurm/ and modal/ run one
 ├── docker/                    # runtime image
-└── tests/                     # Python tests; Rust tests are in router/core/tests/
+└── tests/                     # Python tests; Rust tests are in evolving_infra/router/core/tests/
 ```
 
 The Python components install as one distribution, `evolving-infra`, with imports under
@@ -127,7 +128,7 @@ reference deployment's ports and settings are in [`examples/modal/stack.py`](../
 ## Provenance
 
 The engine and the router core are derived from [SGLang](https://github.com/sgl-project/sglang)
-at upstream commit `9a489f8d2f`; [engine/README.md](../engine/README.md#relation-to-sglang)
+at upstream commit `9a489f8d2f`; [evolving_infra/engine/README.md](../evolving_infra/engine/README.md#relation-to-sglang)
 summarizes what the engine changes.
-[router/core/PROVENANCE.md](../router/core/PROVENANCE.md) records the router's origin, and
+[evolving_infra/router/core/PROVENANCE.md](../evolving_infra/router/core/PROVENANCE.md) records the router's origin, and
 [NOTICE](../NOTICE) lists every included third-party work.

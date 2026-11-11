@@ -27,10 +27,10 @@ grep -n -E "Error|Address already in use|Cannot assign" <dir>/logs/<name>.log | 
 | Message | Cause | Fix |
 |---|---|---|
 | `Loaded weights leave no GPU memory for the KV cache under --mem-fraction-static=X. Raise ... above Y` | the weights fill the worker's GPUs; typical when a config written for one worker per host runs on one host, where each worker gets half the GPUs | the one-node config, or `--mem-fraction-static` above Y, or more GPUs per worker |
-| `ports already in use on this host: ...` (from `serve`) | another process holds a port the layout needs | stop that process, or change the port in `launch/layout.py` |
-| `Address already in use (addr='tcp://<ip>:<port>')`, `OwnerPlane failed to bind` | the port is in another engine's range, or a host service holds it | each engine takes two ports per GPU from its `--disaggregation-bootstrap-port` (in its launch line at the top of the log): if the port is in another engine's range the ranges overlap, else `ss -ltnp \| grep :<port>` names the service; fix in `launch/layout.py` |
+| `ports already in use on this host: ...` (from `serve`) | another process holds a port the layout needs | stop that process, or change the port in `evolving_infra/launch/layout.py` |
+| `Address already in use (addr='tcp://<ip>:<port>')`, `OwnerPlane failed to bind` | the port is in another engine's range, or a host service holds it | each engine takes two ports per GPU from its `--disaggregation-bootstrap-port` (in its launch line at the top of the log): if the port is in another engine's range the ranges overlap, else `ss -ltnp \| grep :<port>` names the service; fix in `evolving_infra/launch/layout.py` |
 | `Cannot assign requested address (addr='tcp://<ip>:...')` | the engine was given another host's address | compare `<ip>` with this host's `host N: <ip>` line in `serve.log`; they differ when a host's rank does not match its place in `--hosts`: let `serve` find the host by name, do not pass a scheduler's node index |
-| router log: a worker is refused, or `engine must enable ...` | the engine and the router run different presets, or engine code read a raw argument | the same preset on both sides; in engine code `resolution_result` (`engine/AGENTS.md`) |
+| router log: a worker is refused, or `engine must enable ...` | the engine and the router run different presets, or engine code read a raw argument | the same preset on both sides; in engine code `resolution_result` (`evolving_infra/engine/AGENTS.md`) |
 
 Nothing exited and no `ready` after 40 minutes: read the tail of each engine log; an engine
 still loading weights or capturing graphs is slow, not stuck.

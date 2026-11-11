@@ -25,11 +25,11 @@ RUN apt-get update \
 # already satisfies and adds only what the engine's pins require beyond it.
 # The base image's working directory is /sgl-workspace/sglang, which this step deletes; build from
 # /opt/evolving-infra so pip never runs in a removed directory.
-COPY engine /opt/evolving-infra/engine
+COPY evolving_infra/engine /opt/evolving-infra/evolving_infra/engine
 WORKDIR /opt/evolving-infra
 RUN pip uninstall -y sglang sgl-router sglang-router 2>/dev/null || true \
  && rm -rf /sgl-workspace/sglang \
- && PIP_CONSTRAINT= pip install -e /opt/evolving-infra/engine \
+ && PIP_CONSTRAINT= pip install -e /opt/evolving-infra/evolving_infra/engine \
  && python3 -c 'import decoupled_engine' \
  && pip list 2>/dev/null | grep -i -E '^(decoupled-engine|sglang-kernel|flashinfer-python|mooncake-transfer-engine|torch) '
 
@@ -65,14 +65,14 @@ RUN git clone --depth 1 --branch "${MOONCAKE_VERSION}" https://github.com/kvcach
  && rm -rf /opt/mooncake/src/build
 
 # ---------------------------------------------------------------- router
-# The toolchain comes from router/core/rust-toolchain.toml; dependencies from its Cargo.lock.
-COPY router/core /opt/evolving-infra/router/core
+# The toolchain comes from evolving_infra/router/core/rust-toolchain.toml; dependencies from its Cargo.lock.
+COPY evolving_infra/router/core /opt/evolving-infra/evolving_infra/router/core
 RUN if ! command -v rustup >/dev/null && [ ! -x /root/.cargo/bin/rustup ]; then \
       curl --proto '=https' --tlsv1.2 --retry 3 -sSf https://sh.rustup.rs \
         | sh -s -- -y --profile minimal --default-toolchain none; \
     fi \
  && export PATH=/root/.cargo/bin:$PATH \
- && cd /opt/evolving-infra/router/core \
+ && cd /opt/evolving-infra/evolving_infra/router/core \
  && rustup show active-toolchain \
  && cargo build --release --locked --bin sgl-router \
  && install -D -m 0755 target/release/sgl-router /usr/local/bin/sgl-router \
@@ -83,11 +83,11 @@ RUN if ! command -v rustup >/dev/null && [ ! -x /root/.cargo/bin/rustup ]; then 
 # Their own venv with the pinned Dynamo indexer (python -m dynamo.indexer). fastapi < 0.142: 0.142
 # turns on OpenTelemetry export at startup and the frontend exits.
 COPY pyproject.toml README.md LICENSE NOTICE /opt/evolving-infra/
-COPY router/frontend /opt/evolving-infra/router/frontend
-COPY router/indexer /opt/evolving-infra/router/indexer
-COPY router/client /opt/evolving-infra/router/client
-COPY planner /opt/evolving-infra/planner
-COPY launch /opt/evolving-infra/launch
+COPY evolving_infra/router/frontend /opt/evolving-infra/evolving_infra/router/frontend
+COPY evolving_infra/router/indexer /opt/evolving-infra/evolving_infra/router/indexer
+COPY evolving_infra/router/client /opt/evolving-infra/evolving_infra/router/client
+COPY evolving_infra/planner /opt/evolving-infra/evolving_infra/planner
+COPY evolving_infra/launch /opt/evolving-infra/evolving_infra/launch
 COPY examples /opt/evolving-infra/examples
 RUN python3 -m venv /opt/indexer-venv \
  && /opt/indexer-venv/bin/pip install -q "ai-dynamo==${DYNAMO_VERSION}" msgpack pyzmq \
@@ -109,6 +109,6 @@ ENV PYTHONUNBUFFERED=1 \
     SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=3600 \
     SGLANG_DISAGGREGATION_WAITING_TIMEOUT=3600 \
     MOONCAKE_PROTOCOL=rdma \
-    DECOUPLED_ENGINE_DIR=/opt/evolving-infra/engine/decoupled_engine
+    DECOUPLED_ENGINE_DIR=/opt/evolving-infra/evolving_infra/engine/decoupled_engine
 
 WORKDIR /opt/evolving-infra

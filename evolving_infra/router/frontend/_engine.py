@@ -21,7 +21,7 @@ import sys
 
 IMAGE_LAYOUT_MODULE = "decoupled_engine_image_layout"
 NATIVE_HASH_MODULE = "decoupled_engine.srt.mem_cache.cpp_utils.native_hash"
-# router/frontend/_engine.py -> repository root is parents[2].
+# evolving_infra/router/frontend/_engine.py -> evolving_infra/ is parents[2].
 _CHECKOUT_ENGINE = Path(__file__).resolve().parents[2] / "engine" / "decoupled_engine"
 
 

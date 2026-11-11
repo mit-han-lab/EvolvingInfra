@@ -1,7 +1,7 @@
 # Trie strict replay
 
 Trie is the replay client used to benchmark evolving-infra. It drives the
-DecoupledEngine (`engine/`, derived from SGLang) and the router through their
+DecoupledEngine (`evolving_infra/engine/`, derived from SGLang) and the router through their
 OpenAI-compatible and native HTTP contracts. Keeping it in the same repository
 keeps the replay schema, HTTP extension and conformance tests in step with the
 engine.

@@ -44,10 +44,10 @@ Starting from it keeps the build identical to what was measured. Override the ba
 | Step | What it does | Why |
 |---|---|---|
 | apt | RDMA tools, protoc, Mooncake build dependencies | router build (protobuf) and the Mooncake rebuild |
-| engine | removes the base's `sglang` / `sgl-router`, then `pip install -e engine/` | pip keeps every dependency the base already satisfies and adds only what the engine's pins need beyond it |
+| engine | removes the base's `sglang` / `sgl-router`, then `pip install -e evolving_infra/engine/` | pip keeps every dependency the base already satisfies and adds only what the engine's pins need beyond it |
 | FlashInfer | `flashinfer-cubin` (and `flashinfer-jit-cache` when present) at the resolved FlashInfer version | prebuilt kernels instead of JIT on first use |
 | Mooncake | rebuilds Mooncake `v0.3.13` with `patches/mooncake-rdma-polling-only.patch` and swaps its `engine.so` into the wheel | see below |
-| router | `cargo build --release --locked --bin sgl-router` in `router/core`, installed as `/usr/local/bin/sgl-router` | toolchain from `router/core/rust-toolchain.toml`, dependencies from its `Cargo.lock` |
+| router | `cargo build --release --locked --bin sgl-router` in `evolving_infra/router/core`, installed as `/usr/local/bin/sgl-router` | toolchain from `evolving_infra/router/core/rust-toolchain.toml`, dependencies from its `Cargo.lock` |
 | `/opt/indexer-venv` | `ai-dynamo==1.4.0`, then the root package with `[frontend,indexer,planner]` and `fastapi<0.142` | the indexer supervisor starts the pinned `python -m dynamo.indexer` from this venv; FastAPI 0.142 enables OpenTelemetry export at startup and the frontend exits |
 | `/opt/trie-venv` | `benchmarks/trie`, `openai==2.30.0`, `httpx==0.28.1`, and the root package (router client SDK) | Trie pins `transformers==4.57.6`, which must not meet the engine's; the client SDK serves `benchmarks/replay` |
 

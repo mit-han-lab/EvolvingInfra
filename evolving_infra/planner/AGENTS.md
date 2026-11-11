@@ -1,7 +1,7 @@
 # planner
 
 The online P/D planner. [`README.md`](README.md) has the models and the decision rule;
-[`docs/dynamic-pd.md`](../docs/dynamic-pd.md) has every launch parameter.
+[`docs/dynamic-pd.md`](../../docs/dynamic-pd.md) has every launch parameter.
 
 - **Every launch parameter is a field of `PlannerArgs`** (`planner_args.py`) with a default
   and a help text; the flag name comes from the field name. Add the row to the tables in

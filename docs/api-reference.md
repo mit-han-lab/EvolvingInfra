@@ -3,7 +3,7 @@
 HTTP endpoints of the router (`sgl-router`). The engines expose the SGLang-style endpoints
 (`/generate`, `/v1/completions`, `/v1/loads`, `/kv_session/control`, and others) that the router
 and the frontend call. The frontend's endpoints (`/prepare`, `/forward_pd`) are in
-[router/frontend](../router/frontend/README.md).
+[evolving_infra/router/frontend](../evolving_infra/router/frontend/README.md).
 
 ## Health and metrics
 
@@ -54,7 +54,7 @@ Enabled by `--symmetric-pd-external-role-control`.
 | GET | `/symmetric_pd/roles` | Current P/D weights per worker, the epoch and revision, and completed workload totals. |
 | PUT | `/symmetric_pd/roles` | Replace the weights, compare-and-set on epoch and revision. Authenticated with the token file named by `EVOLVING_INFRA_ROLE_CONTROL_TOKEN_FILE`. |
 
-The planner is the usual caller ([planner](../planner/README.md)).
+The planner is the usual caller ([planner](../evolving_infra/planner/README.md)).
 
 ## Cache and sessions
 

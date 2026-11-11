@@ -45,7 +45,7 @@ class RequestIdentity:
 
     @property
     def engine_rid(self) -> str:
-        # Binary framing matches router/core/src/agent_identity.rs. Delimiters inside
+        # Binary framing matches evolving_infra/router/core/src/agent_identity.rs. Delimiters inside
         # agent_id cannot collide, and Unicode normalization is never inferred.
         """Derive the engine request ID from unambiguous binary identity framing.
 

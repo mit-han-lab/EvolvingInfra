@@ -5,8 +5,8 @@ description: Install and start Evolving Infra on one host or several and confirm
 
 # Serve Evolving Infra
 
-**Scope**: `launch/`, `examples/`, `docker/`. Writes configs and job scripts; a new model or
-cluster does not need a change to `engine/`, `router/` or `planner/`. If it seems to, stop and say why.
+**Scope**: `evolving_infra/launch/`, `examples/`, `docker/`. Writes configs and job scripts; a new model or
+cluster does not need a change to `evolving_infra/engine/`, `evolving_infra/router/` or `evolving_infra/planner/`. If it seems to, stop and say why.
 **Inputs**: the model directory, the hosts (one, or a list), and how commands reach them
 (a shell on each, or a scheduler). Ask for what is missing; do not guess host names.
 **Returns**: the router URL, the workers and their starting roles, the work directory with
@@ -79,7 +79,7 @@ The repository has no config to copy for it. Derive one, on one host first:
    prefill chunk when little KV memory is left.
 6. **Verify** with step 5 below on one host, then on several.
 7. **Planner last.** `--planner` needs `planner.prefill_shape_prior`: a named prior of
-   `planner/perf_model/priors.py` or the coefficients fitted for this model and GPU
+   `evolving_infra/planner/perf_model/priors.py` or the coefficients fitted for this model and GPU
    ([`docs/dynamic-pd.md`](../../docs/dynamic-pd.md)). Serve with a fixed split until then.
 
 Report the config with the reply it produced. A config that served a request belongs in the

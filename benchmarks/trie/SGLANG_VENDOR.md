@@ -1,7 +1,7 @@
 # Trie and SGLang integration provenance
 
 Trie is embedded at `benchmarks/trie/`; the matching inference runtime is
-DecoupledEngine in `engine/` (derived from SGLang). This copy deliberately excludes the source repository's
+DecoupledEngine in `evolving_infra/engine/` (derived from SGLang). This copy deliberately excludes the source repository's
 nested SGLang checkout and private runtime capture adapters.
 
 ## Imported Trie revision

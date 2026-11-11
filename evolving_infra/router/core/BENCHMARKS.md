@@ -5,7 +5,7 @@ catch algorithmic regressions in the routing primitives; end-to-end throughput
 needs a GPU deployment and is measured with `benchmarks/` at the repository root.
 
 ```bash
-cd router/core
+cd evolving_infra/router/core
 cargo bench --bench tree_lookup   -- --sample-size 30 --measurement-time 3
 cargo bench --bench policy_select -- --sample-size 30 --measurement-time 3
 ```
