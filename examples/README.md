@@ -6,6 +6,7 @@ from: the same config runs on a host you log in to, under Slurm, or on Modal.
 | Hardware and model | Config | Status |
 |---|---|---|
 | [GB300, GLM-5.2](gb300/README.md) | [`gb300/glm52.yaml`](gb300/glm52.yaml), [`gb300/glm52-1node.yaml`](gb300/glm52-1node.yaml) | the paper's main experiment |
+| GB300, Kimi-K2.6 | [`gb300/kimi-k26.yaml`](gb300/kimi-k26.yaml) | the paper's OSWorld experiment ([`benchmarks/osworld`](../benchmarks/osworld/README.md)) |
 | [H200, DeepSeek-V4-Flash](h200/README.md) | [`h200/dsv4-flash.yaml`](h200/dsv4-flash.yaml) | the paper's H200 setup |
 
 | Where it runs | How |

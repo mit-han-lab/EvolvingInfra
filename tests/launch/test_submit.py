@@ -32,3 +32,10 @@ def test_putnam_runs_sixteen_processes_on_the_published_shards_with_host_return(
 def test_h200_benchmark_serves_a_fixed_split():
     script = dry_run("--config", str(SUBMIT.parents[1] / "h200/dsv4-flash.yaml"))
     assert "--planner" not in script and "--prefill-workers 1" in script and "-N 1 " in script
+
+
+def test_osworld_unpacks_the_screenshot_archive_and_points_the_shards_at_it():
+    script = dry_run("--config", str(SUBMIT.parents[1] / "gb300/kimi-k26.yaml"))
+    assert "tar -xf $T/osworld/screenshots.tar -C $T/osworld" in script and "[ -d $T/osworld/screenshots ] ||" in script
+    assert "[ -e $T/$f ] ||" in script, "files already there are not downloaded again"
+    assert "--image-root $T/osworld/screenshots\n" in script and "processes=16" in script and "concurrency=128" in script

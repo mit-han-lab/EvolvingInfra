@@ -9,6 +9,8 @@ host, the KV directory, the frontend, the router and the planner.
   `decoupled_engine` (`engine_python()`), the router is the `sgl-router` binary on `PATH`.
 - **Ports are assigned in `layout.py`** and nowhere else. `Worker.ports()` lists every port a
   worker binds; `serve.py` checks them before starting. A new listening port is added to both.
+- **Every port an engine binds comes from `layout.py`** and is checked before the start. A
+  port the engine picks itself can be taken between the pick and the bind.
 - **`stack.json` is the launcher's output for clients** (written with `READY`): the replay
   adapter reads it. A new fact a client needs goes there, not into the client's command line.
 - **What the launcher reads from the node is in `hardware.py`**: GPU count, the RDMA NICs

@@ -93,6 +93,7 @@ class Stack:
                 "--disaggregation-mode", "symmetric", "--disaggregation-transfer-backend", "mooncake",
                 "--disaggregation-bootstrap-port", str(w.bootstrap_port),
                 "--peer-kv-servicer-port", str(w.servicer_port),
+                "--disaggregation-late-d-control-port", str(w.late_decode_port),
                 "--kv-events-config", json.dumps({"publisher": "zmq", "endpoint": f"tcp://*:{w.events_port}",
                                                   "replay_endpoint": f"tcp://*:{w.events_port + 1}"}),
                 "--enable-metrics", "--enable-cache-report", "--incremental-streaming-output"]
@@ -120,7 +121,8 @@ class Stack:
         self.check_ports()
         nics = hardware.nic_map()
         env = {"SGLANG_HOST_IP": self.ips[self.rank],
-               "WITH_NVIDIA_PEERMEM": "1" if hardware.peer_memory() else "0"}
+               "WITH_NVIDIA_PEERMEM": "1" if hardware.peer_memory() else "0",
+               **{k: str(v) for k, v in (self.cfg.get("engine_env") or {}).items()}}
         print(f"host {self.rank}: {self.ips[self.rank]}, RDMA {nics or 'none'}, "
               f"peer memory {env['WITH_NVIDIA_PEERMEM']}", flush=True)
         for w in self.mine:
@@ -155,13 +157,17 @@ class Stack:
             "tokenize_endpoint": f"{ws[0].url}/tokenize",
             "targets": {f"{w.url}/generate": cid for w in ws},
             "page_size": page, "context_length": cfg.get("context_length") or 1048576, "hash_mode": "dynamo",
-            "is_eagle": self.eagle, "cache_salt": None, "callback_targets": [callback]})
+            "is_eagle": self.eagle, "cache_salt": None, "callback_targets": [callback],
+            "public_url": f"http://{head}:{FRONTEND_PORT}",  # workers fetch uploaded images from here
+            **(cfg.get("frontend") or {})})  # e.g. image_config and body limits for image input
         self.start("frontend", [sys.executable, "-m", "evolving_infra.router.frontend", "--config", frontend,
                                 "--host", "0.0.0.0", "--port", str(FRONTEND_PORT)])
         prepared = self.write("prepared.json", {
             "callback_url": callback, "max_inflight": 4096,
             "contracts": {cid: {"page_size": page, "is_eagle": self.eagle, "model_path": model,
-                                "cache_namespace": None}}})
+                                "cache_namespace": None,
+                                **({"image_config": cfg["frontend"]["image_config"]}
+                                   if (cfg.get("frontend") or {}).get("image_config") else {})}}})
         ready = self.dir / "indexer" / "ready.json"
         for _ in range(120):
             self.check()
@@ -170,7 +176,8 @@ class Stack:
             time.sleep(2)
         query = json.loads(ready.read_text())["query_url"]
         argv = ["sgl-router", "--host", "0.0.0.0", "--port", str(ROUTER_PORT),
-                "--model-id", cfg["served_model_name"], "--tokenizer-path", f"{model}/tokenizer.json",
+                "--model-id", cfg["served_model_name"],
+                "--tokenizer-path", cfg.get("tokenizer") or f"{model}/tokenizer.json",
                 "--policy", "symmetric_pd", "--request-timeout-secs", "3600", "--stale-request-timeout-secs", "3600",
                 "--kv-indexer-url", query,
                 "--kv-worker-map", json.dumps([{"id": 20001 + w.idx, "url": w.url,

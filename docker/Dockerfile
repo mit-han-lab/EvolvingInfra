@@ -100,7 +100,7 @@ RUN python3 -m venv /opt/indexer-venv \
 # the prepared-path adapter in benchmarks/replay.
 COPY benchmarks /opt/evolving-infra/benchmarks
 RUN python3 -m venv /opt/trie-venv \
- && /opt/trie-venv/bin/pip install -q /opt/evolving-infra/benchmarks/trie 'openai==2.30.0' 'httpx==0.28.1' \
+ && /opt/trie-venv/bin/pip install -q /opt/evolving-infra/benchmarks/trie 'openai==2.30.0' 'httpx==0.28.1' tiktoken pillow \
  && /opt/trie-venv/bin/pip install -q "/opt/evolving-infra[client]" \
  && /opt/trie-venv/bin/python -c 'import trie.cli, evolving_infra.router.client'
 

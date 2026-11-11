@@ -1,0 +1,53 @@
+{
+ "source": "kimi.e3_constants of kimi26-tp4-gb300-step-model.json (sha256 3ebd1b1b9d1e5c627febb43f6f1012fb26b8a652c9f200cdd06b0a589169d64f): Kimi-K2.6 TP4 GB300 step model fitted on NSC job 264995 (6P3D c128 CUA static baseline, P workers 0-5, fit window 300-1800 s); offline E3 with next-pass APE mean 13.5 %, p50 6.7 %, p95 36.8 % on its score window",
+ "gpu_busy": {
+  "small": null,
+  "large": [
+   346.1279373223806,
+   0.0,
+   6.887663203363226,
+   0.0,
+   120.38206895056491
+  ],
+  "floor_ms": 711.7239308357239
+ },
+ "gpu_idle": {
+  "small": null,
+  "large": [
+   346.1279373223806,
+   0.0,
+   6.887663203363226,
+   0.0,
+   120.38206895056491
+  ],
+  "floor_ms": 711.7239308357239
+ },
+ "launch_coef": [
+  0.0,
+  1.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0
+ ],
+ "launch_anchor": "launch",
+ "launch_resid_q": null,
+ "lag_next": [
+  -0.05028843163039307,
+  0.9490883357237409
+ ],
+ "lag_none_s": -0.08050317772201021,
+ "boot_s": 0.12830114364624023,
+ "idle_delay_s": 0.0012354850769042969,
+ "phi_s": 0.0,
+ "chunk_tokens": 8192,
+ "page_tokens": 64,
+ "graph_tokens": 2048,
+ "units": "gpu coefficients in ms over [1, new tokens, attention pairs / 1e6, host tokens, batch size]",
+ "notes": [
+  "'large' only: all busy passes are full ~8k chunks; 'small' (<= 2048 new tokens) is not identified",
+  "new_tokens coefficient 0: full chunks make it collinear with the intercept",
+  "LAUNCH_Y_MAX_S = 5 s (E3 constant) drops launch intervals >= 5 s: share 0.102 of the fit-window Kimi intervals; raise it (e.g. 15 s) before any online launch refit on Kimi",
+  "G2 online GPU fit needs idle single-request passes; a saturated Kimi P has few (see idle counts): freeze these warmup constants instead of relying on the online G2 refit"
+ ]
+}

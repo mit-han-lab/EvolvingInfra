@@ -44,3 +44,4 @@ slurm:
   mounts: /models:/models
   extra_args: ""
   setup: ""
+  traces: null                # a directory kept between runs for the downloaded workloads

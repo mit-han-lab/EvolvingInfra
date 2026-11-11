@@ -73,6 +73,11 @@ PAPER = {
     "drain_timeout": "0",
     "api_key": "EMPTY",
 }
+# Environment of the replay client in the paper's runs (set unless already given).
+PAPER_ENV = {
+    "TRIE_BENCHMARK_CANCEL_TIMEOUT_S": "180",   # time to cancel in-flight requests when the replay ends
+    "TRIE_SKIP_ROW_VALIDATION": "1",            # the published workloads were validated when they were built
+}
 OWN = ("preset", "stack", "output_dir", "processes", "process")
 
 
@@ -154,6 +159,10 @@ def install_routing_key(client_type) -> None:
 
 def main() -> int:
     arguments, settings, record = resolve(sys.argv[1:], os.environ)
+    if record["preset"] == "paper":
+        for key, value in PAPER_ENV.items():
+            os.environ.setdefault(key, value)
+        record["environment"] = {key: os.environ[key] for key in PAPER_ENV}
     sys.argv[1:] = arguments
     output = Path(argument("output_json") or "trie-results.json")
     if argument("cache_salt_mode", "session") != "global":

@@ -43,8 +43,22 @@ def load(path: Path) -> dict:
     return out
 
 
+def absolute(flags: list) -> list:
+    """Flags whose value is a file relative to the current directory, with that file's full path:
+    the processes run in the work directory."""
+    out = []
+    for flag in flags:
+        name, eq, value = flag.partition("=")
+        out.append(f"{name}={Path(value).resolve()}" if eq and not value.startswith("/") and Path(value).is_file()
+                   else flag)
+    return out
+
+
 def config(args) -> dict:
     cfg = load(Path(args.config)) if args.config else {}
+    for key in ("engine_args", "router_args"):
+        if cfg.get(key):
+            cfg[key] = absolute(cfg[key])
     if args.model_path:
         cfg["model"] = args.model_path
     if not cfg.get("model"):

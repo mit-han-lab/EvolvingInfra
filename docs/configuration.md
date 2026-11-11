@@ -170,6 +170,9 @@ holds what it cannot detect.
 | `gpus_per_worker` | TP size of one worker | all GPUs of a host; half of them on a single host |
 | `prefill_workers` | workers that start as prefill | half of the workers |
 | `retention` | KV session retention in the router; `false` for a model whose cache tree is not FULL-only | `true` |
+| `tokenizer` | the `tokenizers` file the router reads | `<model>/tokenizer.json` |
+| `engine_env` | environment variables of every engine | none |
+| `frontend` | settings added to the tokenizer frontend's config: `image_config` for image input, body and staging limits | none |
 | `engine_args`, `router_args` | flags appended to every engine and to the router | `--trust-remote-code`; none |
 | `planner` | planner arguments ([Dynamic P/D](dynamic-pd.md)); used with `--planner` | none |
 | `base` | another config file to start from; `engine_args` replace the base's flags of the same name | none |

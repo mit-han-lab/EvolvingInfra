@@ -45,6 +45,10 @@ preset:
 | `max_retries`, `migration_limit` | `0`, `0` | a failed request counts as failed |
 | `stream`, `strict_replay_openai_fast_path`, `timeout`, `drain_timeout` | `true`, `true`, `3600`, `0` | transport |
 
+The preset also sets the client's environment as in the paper's runs unless it is already
+set: `TRIE_BENCHMARK_CANCEL_TIMEOUT_S=180` and `TRIE_SKIP_ROW_VALIDATION=1` (the published
+workloads were validated when they were built).
+
 An argument given explicitly overrides the preset. `run_trie.py` writes the resolved settings
 and every difference from the preset to `<output dir>/replay-settings-<i>.json`, and
 `score.py` reports them as `replay_differs_from_preset`: an empty object means the paper's

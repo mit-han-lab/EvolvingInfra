@@ -67,3 +67,4 @@ slurm:
   mounts: /models:/models
   extra_args: ""              # more sbatch options, e.g. --gpus-per-node=4
   setup: ""                   # shell commands run in the container first, e.g. activating an environment
+  traces: null                # a directory kept between runs for the downloaded workloads

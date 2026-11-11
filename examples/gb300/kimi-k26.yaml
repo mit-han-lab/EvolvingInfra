@@ -1,0 +1,102 @@
+# Kimi-K2.6 (NVFP4) on GB300, as in the paper's OSWorld runs: one TP4 worker per 4-GPU node,
+# EAGLE3 speculative decoding with a draft model, image input. `evolving-infra serve --config`
+# reads the top part; `slurm/submit.py` also reads `benchmarks` and `slurm`.
+
+model: /models/Kimi-K2.6-NVFP4
+served_model_name: kimi-k2.6
+tokenizer: /models/Kimi-K2.6-NVFP4/tokenizer.json   # exported from the model's tiktoken vocabulary, see README
+page_size: 64
+context_length: 262144
+engine_args:
+  - --trust-remote-code
+  - --quantization=modelopt_fp4
+  - --kv-cache-dtype=fp8_e4m3
+  - --attention-backend=trtllm_mla
+  - --moe-runner-backend=flashinfer_trtllm
+  - --sampling-backend=flashinfer
+  - --mem-fraction-static=0.80
+  - --max-running-requests=256
+  - --chunked-prefill-size=8192
+  - --max-prefill-tokens=8192
+  - --speculative-algorithm=EAGLE3
+  - --speculative-draft-model-path=/models/Kimi-K2.6-EAGLE3
+  - --speculative-num-steps=5
+  - --speculative-eagle-topk=1
+  - --speculative-num-draft-tokens=6
+  - --speculative-moe-runner-backend=flashinfer_trtllm
+  - --stream-interval=1
+  - --cuda-graph-backend-prefill=breakable
+  - --cuda-graph-max-bs-prefill=8192
+  - --cuda-graph-backend-decode=full
+  - --cuda-graph-max-bs-decode=256
+  - --dist-timeout=7200
+  - --watchdog-timeout=3600
+  - '--model-loader-extra-config={"enable_multithread_load": true, "num_threads": 16}'
+  - --weight-loader-drop-cache-after-load
+engine_env:
+  SGLANG_SYMMETRIC_PUBLISH_ASYNC_READBACK: 1
+  SGLANG_PREFILL_STATE_PUSH_PORT: 26648          # prefill state for the router's e3 wait model
+  SGLANG_PREFILL_STATE_PUSH_LAUNCH_MODE: always
+frontend:
+  image_config:
+    layout_type: kimi_k25
+    image_token_id: 163605
+    patch_size: 14
+    merge_kernel_size: 2
+    in_patch_limit: 16384
+    patch_limit_on_one_side: 512
+    image_mean: [0.5, 0.5, 0.5]
+    image_std: [0.5, 0.5, 0.5]
+    fixed_output_tokens: null
+  max_body_bytes: 134217728
+  max_response_bytes: 134217728
+  max_staging_bytes: 17179869184
+  ttl_seconds: 3600
+  request_timeout_seconds: 3600
+router_args:                   # the e3 wait model with measured copy price and prefill rate
+  - --co-schedule-trade
+  - --co-schedule-trade-copy-lambda=auto
+  - --co-schedule-trade-copy-lambda-q=sat
+  - --co-schedule-trade-copy-lambda-mu=1
+  - --co-schedule-trade-copy-lambda-min=0
+  - --co-schedule-trade-copy-lambda-max=1000000000
+  - --co-schedule-trade-copy-lambda-fallback=18.4
+  - --co-schedule-trade-rate-tokens-per-s=auto
+  - --co-schedule-trade-wait=e3
+  - --co-schedule-trade-e3-bound-table=examples/gb300/e3/bound-params.json
+  - --co-schedule-trade-e3-frozen-fit=examples/gb300/e3/kimi-k26-frozen-fit.json
+  - --co-schedule-trade-e3-push-port=26648
+  - --co-schedule-trade-e3-next-pass-lag
+  - --co-schedule-trade-gate-m=0
+  - --co-schedule-trade-eft-max-view-age-ms=5000
+  - --symmetric-pd-gwq-auto
+  - --symmetric-pd-gwq-room=predicted
+  - --symmetric-pd-trace-session-moves
+planner:
+  prefill_shape_prior: kimi-k26-gb300-tp4
+  decision_period_secs: 300
+  cold_start_max_wait_secs: 1    # learn from the start of the replay, as the paper's runs did
+
+# The paper's OSWorld replay (Hugging Face crmsndu/evolving-infra-traces) on 9 nodes starting as
+# 6P3D: 5400 s; the score covers [1800 s, 5400 s).
+benchmarks:
+  osworld:                     # 128 concurrent agents (the paper also ran 144 and 160), 16 client processes
+    prefill_workers: 6
+    workload: osworld/osworld2-kimi-formal.jsonl
+    shards: osworld/shards.json
+    images: osworld/screenshots.tar
+    processes: 16
+    concurrency: 128
+    duration: 5400
+    warmup: 1800
+
+slurm:
+  nodes: 9
+  account: null
+  partition: null
+  time: "03:00:00"
+  image: null
+  mounts: /models:/models
+  extra_args: ""
+  setup: ""
+  traces: null                # a directory kept between runs for the downloaded workloads

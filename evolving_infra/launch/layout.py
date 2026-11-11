@@ -40,9 +40,13 @@ class Worker:
     def events_port(self) -> int:
         return 5557 + 10 * self.local
 
+    @property
+    def late_decode_port(self) -> int:  # the link over which a prefill worker binds its decode worker
+        return 21776 + 1000 * self.local
+
     def ports(self) -> list:
         """Every port this worker binds on its host."""
-        return ([self.port, self.events_port, self.events_port + 1]
+        return ([self.port, self.events_port, self.events_port + 1, self.late_decode_port]
                 + list(range(self.bootstrap_port, self.bootstrap_port + 2 * self.gpus))
                 + list(range(self.servicer_port, self.servicer_port + self.gpus)))
 

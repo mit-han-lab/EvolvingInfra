@@ -1,5 +1,6 @@
 """The launcher's layout, NIC detection and generated commands (no GPUs needed)."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -109,3 +110,14 @@ def test_h200_config_has_two_tp4_workers_per_node_without_eagle_or_retention(sta
     assert not s.eagle, "DSPARK is not EAGLE: the KV directory hashes plain token pages"
     assert not s.retention and s.cfg["page_size"] == 256
     assert stack(["--config", "examples/gb300/glm52.yaml"]).retention
+
+
+def test_kimi_config_passes_its_tokenizer_environment_and_image_layout(stack, tmp_path):
+    s = stack(["--config", "examples/gb300/kimi-k26.yaml"], hosts=("a", "b"))
+    assert s.eagle and s.retention and s.cfg["tokenizer"].endswith("tokenizer.json")
+    assert s.cfg["engine_env"]["SGLANG_PREFILL_STATE_PUSH_PORT"] == 26648
+    assert s.cfg["frontend"]["image_config"]["layout_type"] == "kimi_k25"
+    args = s.cfg["router_args"]
+    assert "--co-schedule-trade" in args and "--co-schedule-trade-wait=e3" in args
+    files = [a.split("=", 1)[1] for a in args if "e3/" in a]
+    assert len(files) == 2 and all(f.startswith("/") and Path(f).is_file() for f in files), "full paths"

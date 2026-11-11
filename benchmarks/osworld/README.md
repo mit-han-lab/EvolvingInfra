@@ -5,8 +5,8 @@ keyboard tools, recorded with Kimi-K2.6: 98 tasks, 14,920 requests, 2.0 M output
 Every step adds a screenshot, so it is prefill-heavy.
 
 Files ([Hugging Face](https://huggingface.co/datasets/crmsndu/evolving-infra-traces)):
-`osworld/osworld2-kimi-formal.jsonl`, `osworld/shards.json`, and `osworld/screenshots/`
-(12,838 files named by sha256, 5.9 GB).
+`osworld/osworld2-kimi-formal.jsonl`, `osworld/shards.json`, and `osworld/screenshots.tar`
+(12,838 screenshots named by sha256, 5.9 GB; it unpacks to `screenshots/`).
 
 ## What a file holds
 
@@ -15,19 +15,28 @@ Events carry the prompt token ids of Kimi-K2.6 and the screenshots of the step
 
 ## Reproduce the paper
 
-Nine GB300 nodes, Kimi-K2.6 (EAGLE3), starting as 6P3D, planning window 300 s, router wait
-model `e3` with λ and rate `auto` (`--co-schedule-trade-wait`). The replay uses 16 client
-processes: each replays one shard at 1/16 of the concurrency (128, 144 or 160 agents in
-total). Write the shards and point them at the screenshots:
+Nine GB300 nodes, Kimi-K2.6 (NVFP4, EAGLE3 with a draft model), starting as 6P3D, planning
+window 300 s, router wait model `e3` with the copy price and the prefill rate measured while
+serving. [`examples/gb300/kimi-k26.yaml`](../../examples/gb300/kimi-k26.yaml) holds all of
+it: the engine flags, the image layout for the frontend, and the router's `e3` flags with
+their two parameter files in [`examples/gb300/e3/`](../../examples/gb300/e3). The replay uses
+16 client processes, each on one shard at 1/16 of the concurrency (128, 144 or 160 agents in
+total). As one Slurm job, at 128 agents:
 
 ```bash
-hf download crmsndu/evolving-infra-traces --repo-type dataset --local-dir traces && cd traces
-python make_shards.py osworld/osworld2-kimi-formal.jsonl osworld/shards.json shards/osworld \
-  --image-root "$PWD/osworld/screenshots"
+python examples/slurm/submit.py --config examples/gb300/kimi-k26.yaml \
+  --account <account> --partition <partition> --image <image>
 ```
 
-Each process runs the command of [`replay/README.md`](../replay/README.md) on its shard
-with `processes=16 process=<i>` and writes `trie-results-<i>.json`; [`replay/score.py`](../replay/score.py) scores the directory.
+The job downloads the workload and the screenshots, writes the shards with the screenshots'
+path, and starts the 16 processes. For 144 or 160 agents set `benchmarks.osworld.concurrency`.
+
+The router reads a `tokenizers` file, and Kimi-K2.6 ships a tiktoken vocabulary. Export it
+once into the model directory, where the config's `tokenizer` points:
+
+```bash
+python benchmarks/osworld/scripts/export_tokenizer.py /models/Kimi-K2.6-NVFP4
+```
 
 Results of the paper's runs on [1800 s, 5400 s), two runs per setting:
 

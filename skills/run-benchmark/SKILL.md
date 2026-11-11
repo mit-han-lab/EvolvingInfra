@@ -34,10 +34,8 @@ reference results.
 
 Read the workload's README and `AGENTS.md` first: they give the paper's setup, its results and
 the rules of that workload. `submit.py --benchmark <name>` runs a benchmark of the config as
-one job: `claude-code` (the default) and `putnam` in `examples/gb300/glm52.yaml`. OSWorld
-has no benchmark entry: start the stack with the [`deploy-stack`](../deploy-stack/SKILL.md) skill, write
-the shards as its README says, run one replay process per shard on the host that runs the
-router, then score and compare as in steps 3 and 4.
+one job: `claude-code` (the default) and `putnam` in `examples/gb300/glm52.yaml`, `osworld`
+in `examples/gb300/kimi-k26.yaml`.
 
 ```bash
 python examples/slurm/submit.py --config <config> --account <a> --partition <p> --image <image> \

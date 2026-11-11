@@ -34,7 +34,7 @@ set -a; [ -f /etc/environment ] && . /etc/environment; set +a
 SETUP
 P=". $RUN/setup.sh;"
 srun --ntasks={nodes} --cpu-bind=none $C bash -c \\
-  "$P ulimit -l unlimited; evolving-infra serve --config $RUN/config.yaml --hosts $HOSTS \\
+  "$P ulimit -l unlimited; cd /opt/evolving-infra; evolving-infra serve --config $RUN/config.yaml --hosts $HOSTS \\
    {planner}--prefill-workers {prefill} --work-dir $RUN/\\$(hostname -s)" > $RUN/serve.log 2>&1 &
 SERVE=$!
 until [ -e $RUN/$HEAD/READY ]; do kill -0 $SERVE 2>/dev/null || {{ echo "serving failed, see $RUN"; exit 1; }}; sleep 10; done
@@ -43,14 +43,19 @@ kill $SERVE; wait $SERVE
 cat $RUN/score.json
 """
 
-BENCH = """set -e; cd /opt/evolving-infra; R={run}; T=$R/traces; PY=/opt/trie-venv/bin/python
-for f in {files}; do $PY -c "from huggingface_hub import hf_hub_download as d; print(d('crmsndu/evolving-infra-traces', '$f', repo_type='dataset', local_dir='$T'))"; done
-# Every replay setting not given here is the paper's (benchmarks/replay/run_trie.py, preset=paper).
+BENCH = """set -e; cd /opt/evolving-infra; R={run}; T={traces}; PY=/opt/trie-venv/bin/python
+# The workload files: downloaded once into $T, which slurm.traces can point at a directory kept between runs.
+for f in {files}; do [ -e $T/$f ] || $PY -c "from huggingface_hub import hf_hub_download as d; print(d('crmsndu/evolving-infra-traces', '$f', repo_type='dataset', local_dir='$T'))"; done
+{images}# Every replay setting not given here is the paper's (benchmarks/replay/run_trie.py, preset=paper).
 REPLAY="$PY benchmarks/replay/run_trie.py stack=$R/$(hostname -s) concurrency={concurrency} duration={duration} output_dir=$R/bench"
 {replay}
 python3 benchmarks/replay/score.py $R/bench --skip-s {warmup} --window-s {window} > $R/score.json
 """
 ONE = "$REPLAY workload_path=$T/{workload}"
+# The images the workload's requests refer to: one archive of the dataset, unpacked beside it.
+IMAGES = """[ -d $T/{unpacked} ] || {{ $PY -c "from huggingface_hub import hf_hub_download as d; print(d('crmsndu/evolving-infra-traces', '{images}', repo_type='dataset', local_dir='$T'))"
+  tar -xf $T/{images} -C $T/{parent}; }}
+"""
 # Several client processes: process i replays shard i at concurrency / N; they start 2 s apart.
 MANY = """$PY $T/make_shards.py $T/{workload} $T/{shards} $R/shards{image_root}
 for i in $(seq 0 {last}); do
@@ -91,20 +96,23 @@ def main():
     run = "$RUN"  # exported by the job script
     processes = bench.get("processes", 1)
     files = [bench["workload"]] + ([bench["shards"], "make_shards.py"] if processes > 1 else [])
-    if bench.get("images"):
-        files.append(bench["images"])
+    images = bench.get("images")  # an archive of the dataset, or a directory already on the nodes
+    local = bool(images) and images.startswith("/")
     replay = ONE if processes == 1 else MANY.format(
         workload=bench["workload"], shards=bench.get("shards"), processes=processes, last=processes - 1,
-        image_root=f" --image-root $T/{bench['images']}" if bench.get("images") else "")
+        image_root=f" --image-root {images if local else '$T/' + images.removesuffix('.tar')}" if images else "")
     bench_script = BENCH.format(
-        run=run, files=" ".join(files), replay=replay.format(workload=bench["workload"]) if processes == 1 else replay,
+        run=run, files=" ".join(files), traces=slurm.get("traces") or "$R/traces",
+        images=IMAGES.format(images=images, parent=str(Path(images).parent), unpacked=images.removesuffix(".tar"))
+        if images and not local else "", replay=replay.format(workload=bench["workload"]) if processes == 1 else replay,
         concurrency=bench["concurrency"], duration=bench["duration"],
         warmup=bench["warmup"], window=bench["duration"] - bench["warmup"])
     script = SCRIPT.format(
         prefill=bench["prefill_workers"], planner="--planner " if bench.get("serve_planner", True) else "", nodes=slurm["nodes"], time=slurm.get("time", "03:00:00"),
         account=f"-A {slurm['account']} " if slurm.get("account") else "",
         partition=f"-p {slurm['partition']}" if slurm.get("partition") else "",
-        out=out, image=slurm["image"], mounts=slurm.get("mounts", "/models:/models"),
+        out=out, image=slurm["image"],
+        mounts=slurm.get("mounts", "/models:/models") + (f",{slurm['traces']}:{slurm['traces']}" if slurm.get("traces") else ""),
         extra=f" {slurm['extra_args']}" if slurm.get("extra_args") else "",
         setup=slurm.get("setup") or "",
         config=yaml.safe_dump(cfg, sort_keys=False, width=200), bench=shlex.quote(bench_script))
