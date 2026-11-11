@@ -218,16 +218,16 @@ pub fn unusable_reason(value: &Value) -> String {
 /// The latest observed state of every decode worker, by URL.
 #[derive(Debug, Default)]
 pub struct DecodeCapacityStore {
-    states: RwLock<HashMap<String, DecodeCapacity>>,
+    states: RwLock<Arc<HashMap<String, DecodeCapacity>>>,
 }
 
 impl DecodeCapacityStore {
     /// Replace the whole snapshot (one collector round).
     pub fn replace(&self, states: HashMap<String, DecodeCapacity>) {
-        *self.states.write() = states;
+        *self.states.write() = Arc::new(states);
     }
 
-    pub fn snapshot(&self) -> HashMap<String, DecodeCapacity> {
+    pub fn snapshot(&self) -> Arc<HashMap<String, DecodeCapacity>> {
         self.states.read().clone()
     }
 

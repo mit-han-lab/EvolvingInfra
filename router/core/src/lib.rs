@@ -23,7 +23,6 @@ pub mod discovery;
 pub mod dynamo_prefix;
 pub mod e3;
 pub mod eft_cheap;
-pub mod symmetric_pd;
 pub mod global_queue;
 pub mod health;
 pub mod image_layout;
@@ -40,3 +39,12 @@ pub mod tokenizer;
 pub mod trade_e3;
 pub mod trade_e3_push;
 pub mod workers;
+
+/// Lowercase hex SHA-256 of `data`.
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}

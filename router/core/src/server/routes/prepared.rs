@@ -104,7 +104,7 @@ pub async fn plan(
         rid: rid.clone(),
         id: reservation.clone(),
     };
-    let decision = flex.admit(flex, input).await?;
+    let decision = flex.admit(input).await?;
     let ledger = decision.ledger.clone();
     let (p, d) = (decision.p_worker.url.clone(), decision.d_worker.url.clone());
     // Late D choose on symmetric workers (`--pd-late-decode choose`) under
@@ -378,7 +378,7 @@ mod tests {
     use crate::{
         config::SymmetricPdConfig,
         discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec},
-        symmetric_pd::{DSelect, SymmetricPdRuntime, PSelect, PlaceHttpRequest, RoleWeight},
+        scheduler::{DSelect, SymmetricPdRuntime, PSelect, PlaceHttpRequest, RoleWeight},
         workers::SymmetricPdWorkerInfo,
     };
     use axum::{
@@ -449,7 +449,7 @@ mod tests {
         .join()
         .unwrap();
         ctx.symmetric_pd = Some(Arc::clone(&flex));
-        let reservation = flex.account(&flex, "http://p:30000", 8192);
+        let reservation = flex.account("http://p:30000", 8192);
         reservation.mark_unknown();
         let app = crate::server::app::build_router(Arc::new(ctx));
         let probe = PlaceHttpRequest {
@@ -457,7 +457,7 @@ mod tests {
             prompt_len: Some(8),
             ..Default::default()
         };
-        let before = flex.place_http(&flex, probe.clone()).await.unwrap();
+        let before = flex.place_http(probe.clone()).await.unwrap();
         for _ in 0..4 {
             let response = app
                 .clone()
@@ -483,7 +483,7 @@ mod tests {
             assert!(p["observation"].is_null());
             assert!(p["sample_age_ms"].is_null());
         }
-        let after = flex.place_http(&flex, probe).await.unwrap();
+        let after = flex.place_http(probe).await.unwrap();
         assert_eq!(
             after.transfer_id.unwrap(),
             (before.transfer_id.unwrap() + 1) & i64::MAX as u64

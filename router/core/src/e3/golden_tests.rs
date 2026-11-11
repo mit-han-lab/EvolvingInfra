@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use crate::sha256_hex;
 
 use super::*;
 
@@ -78,13 +78,6 @@ fn opt<T: DeserializeOwned>(v: &Value, key: &str, what: &str) -> Option<T> {
 
 fn to_json<T: serde::Serialize>(v: T) -> Value {
     serde_json::to_value(v).expect("serializable")
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    Sha256::digest(data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 /// Comparison of the port's JSON with the reference's JSON.

@@ -136,9 +136,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::e3::numeric::{py_cmp, py_max, quantile, sort_py};
+use crate::eft_cheap::{is_true, nonneg_int};
 use crate::e3::{
     arrival_rates, error_bound, features, fit_gpu_classes, fit_launch_intervals, make_params,
     receipt_delays, resolve_gpu, router_floor_ms, router_lag_next, row_ready, step_of, ArrivalRow,
@@ -201,16 +201,6 @@ fn unix_s(at: SystemTime) -> f64 {
         .map_or(0.0, |d| d.as_secs_f64())
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// A JSON integer >= 0 (a float such as 5.0 is not one).
-fn nonneg_int(v: Option<&Value>) -> Option<i64> {
-    v.and_then(Value::as_u64)
-        .and_then(|x| i64::try_from(x).ok())
-}
-
 fn positive_int(v: Option<&Value>) -> Option<i64> {
     nonneg_int(v).filter(|x| *x > 0)
 }
@@ -219,10 +209,6 @@ fn positive_int(v: Option<&Value>) -> Option<i64> {
 fn nonneg_f64(v: Option<&Value>) -> Option<f64> {
     v.and_then(Value::as_f64)
         .filter(|x| x.is_finite() && *x >= 0.0)
-}
-
-fn is_true(v: Option<&Value>) -> bool {
-    matches!(v, Some(Value::Bool(true)))
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +384,7 @@ impl TradeE3Config {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let value: Value =
             serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-        let sha = hex(&Sha256::digest(&bytes));
+        let sha = crate::sha256_hex(&bytes);
         let ModeTable {
             table,
             file_level,
@@ -463,7 +449,7 @@ impl TradeE3Config {
         }
         let path = self.bound_path.clone();
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if hex(&Sha256::digest(&bytes)) != self.bound_sha256 {
+        if crate::sha256_hex(&bytes) != self.bound_sha256 {
             return Err(format!(
                 "{}: the bound file changed while it was read",
                 path.display()
@@ -659,7 +645,7 @@ impl FrozenFit {
         }
         Ok(Self {
             path: path.to_path_buf(),
-            sha256: hex(&Sha256::digest(&bytes)),
+            sha256: crate::sha256_hex(&bytes),
             gpu,
             launch_coef: file.launch_coef,
             launch_resid_q: file.launch_resid_q,

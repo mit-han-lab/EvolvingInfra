@@ -222,8 +222,8 @@ pub(crate) struct FlexLate {
 /// the request then takes the plain symmetric_pd dispatch.
 pub(crate) fn flex_pick(
     late: &Arc<LateBind>,
-    flex: &crate::symmetric_pd::SymmetricPdRuntime,
-    d: &crate::symmetric_pd::Decision,
+    flex: &crate::scheduler::SymmetricPdRuntime,
+    d: &crate::scheduler::Decision,
 ) -> Result<Option<(Choose, FlexLate)>, ApiError> {
     let Some(transfer_id) = d.placement.transfer_id.filter(|_| !d.is_local()) else {
         return Ok(None);
@@ -283,7 +283,7 @@ pub(crate) fn build_flex_bodies(
     kv_session: Option<&Value>,
     d_image_source: Option<&Value>,
 ) -> Result<(Bytes, LegBodies, Option<Vec<Value>>), ApiError> {
-    use crate::symmetric_pd::{KV_EXPORT_KEY, KV_IMPORT_KEY, KV_PULL_HINT_KEY};
+    use crate::scheduler::{KV_EXPORT_KEY, KV_IMPORT_KEY, KV_PULL_HINT_KEY};
     let mut value = match value {
         Some(v) => v,
         None => serde_json::from_slice(body).map_err(|_| {

@@ -37,7 +37,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 
 pub const SCHEMA: &str = "eft-cheap.v1";
 const FAMILY: &str = "augmented";
@@ -88,13 +87,13 @@ fn finite(v: Option<&Value>) -> Option<f64> {
 }
 
 /// Python `nonneg_int(x)`: a JSON integer >= 0 (a float such as 5.0 is not).
-fn nonneg_int(v: Option<&Value>) -> Option<i64> {
+pub(crate) fn nonneg_int(v: Option<&Value>) -> Option<i64> {
     v.and_then(Value::as_u64)
         .and_then(|x| i64::try_from(x).ok())
 }
 
 /// Python `x is True`.
-fn is_true(v: Option<&Value>) -> bool {
+pub(crate) fn is_true(v: Option<&Value>) -> bool {
     matches!(v, Some(Value::Bool(true)))
 }
 
@@ -399,7 +398,7 @@ impl EftModel {
             }
             None => {
                 sources.insert("sha256".into(), json!("canonical_json"));
-                hex_digest(python_json(model).as_bytes())
+                crate::sha256_hex(python_json(model).as_bytes())
             }
         };
         Ok(Self {
@@ -460,15 +459,8 @@ pub fn load_model(path: &std::path::Path) -> Result<EftModel, String> {
     let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let model: Value =
         serde_json::from_slice(&data).map_err(|e| format!("{}: {e}", path.display()))?;
-    EftModel::from_json(&model, Some(hex_digest(&data)))
+    EftModel::from_json(&model, Some(crate::sha256_hex(&data)))
         .map_err(|e| format!("{}: {e}", path.display()))
-}
-
-fn hex_digest(data: &[u8]) -> String {
-    Sha256::digest(data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 /// Python `json.dumps(value, sort_keys=True, separators=(",", ":"))`
@@ -546,7 +538,7 @@ fn write_python_str(s: &str, out: &mut String) {
 /// Python `repr(float)`: shortest round-trip digits; scientific form when the
 /// decimal exponent is below -4 or at least 16 (`1e-05`, `1e+16`), else
 /// fixed form with at least one fractional digit (`0.05`, `100.0`).
-fn python_float_repr(x: f64) -> String {
+pub(crate) fn python_float_repr(x: f64) -> String {
     if x.is_nan() {
         return "NaN".into();
     }

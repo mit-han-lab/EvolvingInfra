@@ -26,6 +26,25 @@ const DEFAULT_KV_INDEXER_QUERY_TIMEOUT_MS: u64 = 100;
 /// Decode->prefill drain bound when external role control sets no explicit value.
 const DEFAULT_ROLE_DRAIN_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_KV_INDEXER_QUERY_MAX_INFLIGHT: usize = sgl_kv_indexer::DEFAULT_QUERY_MAX_INFLIGHT;
+/// Per-RID progress poll period of the P-role workers under
+/// `--symmetric-pd-p-select cost-function` when `--co-schedule-load-poll-ms` is unset.
+const DEFAULT_COST_FUNCTION_LOAD_POLL_MS: u64 = 100;
+/// KV hint indexer query timeout when `--kv-indexer-timeout-ms` is unset.
+const DEFAULT_KV_HINT_INDEXER_TIMEOUT_MS: u64 = 20;
+/// KV hint indexer query timeout set by `--symmetric-pd-preset paper`.
+const PAPER_PRESET_KV_HINT_INDEXER_TIMEOUT_MS: u64 = 200;
+/// Minimum expected hit (one page) when `--kv-pull-hint-min-tokens` is unset.
+const DEFAULT_KV_PULL_HINT_MIN_TOKENS: u32 = 256;
+
+/// Trimmed decision-replay routing-key header named by `flag`, or the default
+/// header when the flag is unset. An empty value is an error.
+fn resolve_decision_replay_header(header: Option<&str>, flag: &str) -> Result<String> {
+    match header {
+        Some(h) if h.trim().is_empty() => Err(anyhow!("{flag} must not be empty")),
+        Some(h) => Ok(h.trim().to_string()),
+        None => Ok(crate::config::types::default_symmetric_pd_decision_replay_header()),
+    }
+}
 
 fn parse_kv_worker_map(raw: &str) -> Result<Vec<crate::kv_hint::KvWorkerMapEntry>> {
     let entries: Vec<crate::kv_hint::KvWorkerMapEntry> =
@@ -1231,13 +1250,6 @@ impl Cli {
         })
     }
 
-    /// Resolve parsed flags into a validated [`Config`].
-    ///
-    /// Builds the [`DiscoveryBackend`] (enforcing static-vs-k8s mutual
-    /// exclusivity and resolving the k8s selector grammar via
-    /// [`resolve_mode`]), assembles the single [`ModelConfig`], then runs
-    /// [`Config::validate`] for the remaining value-level invariants
-    /// (model id, static worker URLs).
     /// `--symmetric-pd-preset paper`: set every flag of the paper's
     /// configuration that is still unset. Features whose inputs are missing
     /// stay off: the cost function needs the KV directory and the servicers.
@@ -1264,10 +1276,10 @@ impl Cli {
         // change, so imported KV keeps the engine's host write policy.
         self.symmetric_pd_import_cache_policy.get_or_insert(SymmetricPdImportCachePolicy::Retain);
         if self.symmetric_pd_external_role_control {
-            self.symmetric_pd_role_drain_timeout_secs.get_or_insert(5);
+            self.symmetric_pd_role_drain_timeout_secs.get_or_insert(DEFAULT_ROLE_DRAIN_TIMEOUT_SECS);
         }
         if self.kv_indexer_url.is_some() {
-            self.kv_indexer_timeout_ms.get_or_insert(200);
+            self.kv_indexer_timeout_ms.get_or_insert(PAPER_PRESET_KV_HINT_INDEXER_TIMEOUT_MS);
         }
         let servicers = self.kv_worker_map.as_deref().is_some_and(|map| map.contains("servicer"));
         if self.kv_indexer_url.is_some() && servicers && self.symmetric_pd_p_select.is_none() {
@@ -1277,11 +1289,19 @@ impl Cli {
             self.kv_pull_scope.get_or_insert(KvPullScope::Any);
             self.co_schedule_trade = true;
             self.co_schedule_uncached_balance = true;
-            self.co_schedule_load_poll_ms.get_or_insert(100);
-            self.kv_pull_hint_min_incremental_tokens.get_or_insert(512);
+            self.co_schedule_load_poll_ms.get_or_insert(DEFAULT_COST_FUNCTION_LOAD_POLL_MS);
+            self.kv_pull_hint_min_incremental_tokens
+                .get_or_insert(crate::scheduler::co_schedule::TRADE_MIN_PULL_TOKENS as u32);
         }
     }
 
+    /// Resolve parsed flags into a validated [`Config`].
+    ///
+    /// Builds the [`DiscoveryBackend`] (enforcing static-vs-k8s mutual
+    /// exclusivity and resolving the k8s selector grammar via
+    /// [`resolve_mode`]), assembles the single [`ModelConfig`], then runs
+    /// [`Config::validate`] for the remaining value-level invariants
+    /// (model id, static worker URLs).
     pub fn into_config(mut self) -> Result<Config> {
         self.apply_symmetric_pd_preset();
         let mut symmetric_pd = self.build_symmetric_pd()?;
@@ -1303,13 +1323,10 @@ impl Cli {
                         p.display()
                     ));
                 }
-                let header = match &self.pd_decision_replay_header {
-                    Some(h) if h.trim().is_empty() => {
-                        return Err(anyhow!("--pd-decision-replay-header must not be empty"))
-                    }
-                    Some(h) => h.trim().to_string(),
-                    None => crate::config::types::default_symmetric_pd_decision_replay_header(),
-                };
+                let header = resolve_decision_replay_header(
+                    self.pd_decision_replay_header.as_deref(),
+                    "--pd-decision-replay-header",
+                )?;
                 Some(PdDecisionReplayConfig {
                     table: p.clone(),
                     header,
@@ -1936,21 +1953,18 @@ impl Cli {
                     compact_trace: self.co_schedule_trade_olp_trace_compact,
                     verify: false,
                 });
-            } else if self.co_schedule_trade_olp_params.is_some() {
-                return Err(anyhow!(
-                    "--co-schedule-trade-olp-params needs --co-schedule-trade-wait olp or \
-                     --co-schedule-trade-olp-shadow"
-                ));
-            } else if self.co_schedule_trade_olp_incremental {
-                return Err(anyhow!(
-                    "--co-schedule-trade-olp-incremental needs --co-schedule-trade-wait olp or \
-                     --co-schedule-trade-olp-shadow"
-                ));
-            } else if self.co_schedule_trade_olp_trace_compact {
-                return Err(anyhow!(
-                    "--co-schedule-trade-olp-trace-compact needs --co-schedule-trade-wait olp or \
-                     --co-schedule-trade-olp-shadow"
-                ));
+            } else {
+                let olp_only = [
+                    (self.co_schedule_trade_olp_params.is_some(), "--co-schedule-trade-olp-params"),
+                    (self.co_schedule_trade_olp_incremental, "--co-schedule-trade-olp-incremental"),
+                    (self.co_schedule_trade_olp_trace_compact, "--co-schedule-trade-olp-trace-compact"),
+                ];
+                if let Some((_, flag)) = olp_only.iter().find(|(set, _)| *set) {
+                    return Err(anyhow!(
+                        "{flag} needs --co-schedule-trade-wait olp or \
+                         --co-schedule-trade-olp-shadow"
+                    ));
+                }
             }
             let e3_flags = self.co_schedule_trade_e3_bound_table.is_some()
                 || self.co_schedule_trade_e3_bound_mode.is_some()
@@ -2175,7 +2189,7 @@ impl Cli {
                      cost model)"
                 )
             })?;
-            let load_poll_ms = self.co_schedule_load_poll_ms.unwrap_or(100);
+            let load_poll_ms = self.co_schedule_load_poll_ms.unwrap_or(DEFAULT_COST_FUNCTION_LOAD_POLL_MS);
             if load_poll_ms == 0 {
                 return Err(anyhow!("--co-schedule-load-poll-ms must be greater than 0"));
             }
@@ -2302,13 +2316,13 @@ impl Cli {
                 .kv_worker_map
                 .ok_or_else(|| anyhow!("{requirer} requires --kv-worker-map"))?;
             let worker_map = parse_kv_worker_map(&map_json)?;
-            let timeout_ms = self.kv_indexer_timeout_ms.unwrap_or(20);
+            let timeout_ms = self.kv_indexer_timeout_ms.unwrap_or(DEFAULT_KV_HINT_INDEXER_TIMEOUT_MS);
             if timeout_ms == 0 {
                 return Err(anyhow!("--kv-indexer-timeout-ms must be greater than 0"));
             }
             Some(crate::kv_hint::KvHintConfig {
                 indexer_url,
-                min_tokens: self.kv_pull_hint_min_tokens.unwrap_or(256),
+                min_tokens: self.kv_pull_hint_min_tokens.unwrap_or(DEFAULT_KV_PULL_HINT_MIN_TOKENS),
                 // TRADE never pulls below 512, so its gate defaults to 512.
                 min_incremental_tokens: self.kv_pull_hint_min_incremental_tokens.unwrap_or(
                     if self.co_schedule_trade {
@@ -2603,42 +2617,30 @@ impl Cli {
                 "--symmetric-pd-max-uncached-tokens / --symmetric-pd-load-poll-ms must be greater than 0"
             ));
         }
-        let mut placement = crate::symmetric_pd::placement::PlacementConfig {
+        let mut placement = crate::scheduler::placement::PlacementConfig {
             force_split: self.symmetric_pd_force_split,
             ..Default::default()
         };
         if let Some(v) = self.symmetric_pd_p_select {
             placement.p_select = v.into();
         }
-        if placement.p_select == crate::symmetric_pd::placement::PSelect::CostFunction {
+        if placement.p_select == crate::scheduler::placement::PSelect::CostFunction {
             self.check_flex_cost_function()?;
-        } else if self.symmetric_pd_unknown_expire_secs.is_some() {
-            return Err(anyhow!(
-                "--symmetric-pd-unknown-expire-secs requires --symmetric-pd-p-select cost-function"
-            ));
-        } else if self.symmetric_pd_loads_host_room {
-            return Err(anyhow!(
-                "--symmetric-pd-loads-host-room requires --symmetric-pd-p-select cost-function"
-            ));
-        } else if self.symmetric_pd_gwq_auto {
-            return Err(anyhow!(
-                "--symmetric-pd-gwq-auto requires --symmetric-pd-p-select cost-function"
-            ));
-        } else if self.symmetric_pd_gwq_room.is_some() {
-            return Err(anyhow!(
-                "--symmetric-pd-gwq-room requires --symmetric-pd-p-select cost-function"
-            ));
-        } else if self.symmetric_pd_trace_session_moves {
-            return Err(anyhow!(
-                "--symmetric-pd-trace-session-moves requires --symmetric-pd-p-select cost-function"
-            ));
-        } else if self.symmetric_pd_pull_from_any_holder {
-            return Err(anyhow!(
-                "--symmetric-pd-pull-from-any-holder requires --symmetric-pd-p-select cost-function"
-            ));
+        } else {
+            let cost_function_only = [
+                (self.symmetric_pd_unknown_expire_secs.is_some(), "--symmetric-pd-unknown-expire-secs"),
+                (self.symmetric_pd_loads_host_room, "--symmetric-pd-loads-host-room"),
+                (self.symmetric_pd_gwq_auto, "--symmetric-pd-gwq-auto"),
+                (self.symmetric_pd_gwq_room.is_some(), "--symmetric-pd-gwq-room"),
+                (self.symmetric_pd_trace_session_moves, "--symmetric-pd-trace-session-moves"),
+                (self.symmetric_pd_pull_from_any_holder, "--symmetric-pd-pull-from-any-holder"),
+            ];
+            if let Some((_, flag)) = cost_function_only.iter().find(|(set, _)| *set) {
+                return Err(anyhow!("{flag} requires --symmetric-pd-p-select cost-function"));
+            }
         }
         if self.symmetric_pd_owner_threshold_tokens.is_some() || self.symmetric_pd_detour_margin_tokens.is_some() {
-            if placement.p_select != crate::symmetric_pd::placement::PSelect::CoSchedule {
+            if placement.p_select != crate::scheduler::placement::PSelect::CoSchedule {
                 return Err(anyhow!("--symmetric-pd-owner-threshold-tokens / --symmetric-pd-detour-margin-tokens require --symmetric-pd-p-select co-schedule"));
             }
         }
@@ -2695,13 +2697,10 @@ impl Cli {
                 "--symmetric-pd-decision-replay-header requires --symmetric-pd-decision-replay"
             ));
         }
-        let decision_replay_header = match &self.symmetric_pd_decision_replay_header {
-            Some(h) if h.trim().is_empty() => {
-                return Err(anyhow!("--symmetric-pd-decision-replay-header must not be empty"))
-            }
-            Some(h) => h.trim().to_string(),
-            None => crate::config::types::default_symmetric_pd_decision_replay_header(),
-        };
+        let decision_replay_header = resolve_decision_replay_header(
+            self.symmetric_pd_decision_replay_header.as_deref(),
+            "--symmetric-pd-decision-replay-header",
+        )?;
         if self.symmetric_pd_external_role_control && self.symmetric_pd_decision_replay.is_some() {
             return Err(anyhow!(
                 "external role control conflicts with --symmetric-pd-decision-replay"
@@ -3886,7 +3885,7 @@ mod tests {
         );
         assert_eq!(
             flex.placement.p_select,
-            crate::symmetric_pd::placement::PSelect::CacheFirst
+            crate::scheduler::placement::PSelect::CacheFirst
         );
 
         let mut args = base.to_vec();
@@ -6656,12 +6655,12 @@ mod tests {
         ]);
         let config = into_config_owned(with_model(&args)).unwrap();
         let flex = config.model.symmetric_pd.unwrap();
-        assert_eq!(flex.placement.p_select, crate::symmetric_pd::placement::PSelect::CoSchedule);
-        assert_eq!(flex.placement.d_select, crate::symmetric_pd::placement::DSelect::RoundRobin);
+        assert_eq!(flex.placement.p_select, crate::scheduler::placement::PSelect::CoSchedule);
+        assert_eq!(flex.placement.d_select, crate::scheduler::placement::DSelect::RoundRobin);
         assert_eq!(flex.placement.co_schedule.owner_threshold_tokens, 8192);
         assert_eq!(flex.placement.co_schedule.detour_margin_tokens, 1024);
         let default = into_config_owned(with_model(&base)).unwrap();
-        assert_eq!(default.model.symmetric_pd.unwrap().placement.p_select, crate::symmetric_pd::placement::PSelect::CacheFirst);
+        assert_eq!(default.model.symmetric_pd.unwrap().placement.p_select, crate::scheduler::placement::PSelect::CacheFirst);
         let mut invalid = base.to_vec();
         invalid.extend(["--symmetric-pd-owner-threshold-tokens", "8192"]);
         assert!(into_config_owned(with_model(&invalid)).is_err());
@@ -6669,7 +6668,7 @@ mod tests {
 
     #[test]
     fn symmetric_pd_selection_flags_map_into_placement_config() {
-        use crate::symmetric_pd::placement::{DSelect, PSelect};
+        use crate::scheduler::placement::{DSelect, PSelect};
         let c = into_config_owned(with_model(&[
             "--policy",
             "symmetric_pd",
@@ -6937,7 +6936,7 @@ mod tests {
     #[test]
     fn symmetric_pd_cost_function_accepts_the_startup_argv() {
         use crate::config::{LateDecodeMode, LateDecodeRule};
-        use crate::symmetric_pd::placement::{DSelect, PSelect};
+        use crate::scheduler::placement::{DSelect, PSelect};
         use crate::scheduler::co_schedule::{TradeAutoQ, TradeLambdaMode, TradeRateMode};
         let cfg = cost_function_config(&[], &[]).unwrap();
         // The co-schedule policy is not built: its flags configure symmetric_pd.

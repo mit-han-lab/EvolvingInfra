@@ -30,13 +30,13 @@
 
 use super::chat::{
     build_outgoing_body, estimate_prefill_tokens, generate_room_id, parse_probe, BootstrapFields,
-    RecordDurationOnDrop, MAX_CHAT_BODY_BYTES, X_SGL_DECODE_URL,
+    RecordDurationOnDrop, X_SGL_DECODE_URL,
 };
 use super::decision_log::{
-    log_routing_decision, AdmissionLedger, LateDispatchLog, RoutingDecision,
+    log_routing_decision, settle_prefill_leg, AdmissionLedger, LateDispatchLog, RoutingDecision,
 };
 use crate::discovery::{ModelId, WorkerMode};
-use crate::policies::registry::{PdPoolResolver, PdResolveError};
+use crate::policies::registry::PdPoolResolver;
 use crate::policies::SelectionContext;
 use crate::proxy::{prefill_failed, PdLegs, PrefillFailure};
 use crate::server::app_context::AppContext;
@@ -48,12 +48,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use bytes::Bytes;
 use std::sync::Arc;
-
-/// Default cap = the chat route's: replay prompts are token arrays that
-/// reach hundreds of KiB for 100k-token contexts; 5 MiB covers them with
-/// margin. `--max-completions-body-mib` overrides it (token-id replay with
-/// uploaded screenshots); `build_router` applies the configured value.
-pub const MAX_COMPLETIONS_BODY_BYTES: usize = MAX_CHAT_BODY_BYTES;
 
 /// The route a request arrived on; the upstream request uses the same path.
 #[derive(Clone, Copy, Debug)]
@@ -149,17 +143,7 @@ async fn dispatch(
     } else {
         resolver
             .prefill_candidates(&model_id)
-            .map_err(|e| match e {
-                PdResolveError::NoHealthyWorkers => ApiError::NoHealthyWorkers {
-                    model: model_str.clone(),
-                },
-                PdResolveError::NoPrefillWorkersAvailable => ApiError::NoPrefillWorkersAvailable {
-                    model: model_str.clone(),
-                },
-                PdResolveError::NoDecodeWorkersAvailable => ApiError::NoDecodeWorkersAvailable {
-                    model: model_str.clone(),
-                },
-            })?
+            .map_err(|e| ApiError::from_pd_resolve(e, &model_str))?
     };
 
     let policy = ctx
@@ -281,7 +265,7 @@ async fn dispatch(
     // The co-scheduler may HOLD the request here until capacity frees or
     // its starvation guard fires.
     let mut co_dispatch: Option<crate::co_schedule::Dispatch> = None;
-    let mut flex_decision: Option<crate::symmetric_pd::Decision> = None;
+    let mut flex_decision: Option<crate::scheduler::Decision> = None;
     let mut pd_replay_decode: Option<Arc<Worker>> = None;
     // A policy's per-request note (`--policy gateway_cache_aware`), logged
     // with the rid below.
@@ -298,8 +282,7 @@ async fn dispatch(
         let (session_id, turn) = extract_session(request_value.as_ref());
         let d = flex
             .admit(
-                flex,
-                crate::symmetric_pd::PlaceInput {
+                crate::scheduler::PlaceInput {
                     tokens: prompt_ids.clone(),
                     hashes: None,
                     prompt_len,
@@ -308,11 +291,7 @@ async fn dispatch(
                     session_id,
                     turn,
                     rid: extract_rid(request_value.as_ref()),
-                    routing_key: flex
-                        .replay_header()
-                        .and_then(|h| headers.get(h))
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_string),
+                    routing_key: replay_routing_key(flex.replay_header(), &headers),
                     ingress_ms: start.elapsed().as_secs_f64() * 1e3,
                     // The cost function's copy price auto (N_active) and
                     // the session-move trace.
@@ -372,7 +351,7 @@ async fn dispatch(
         let pinned = ctx.pd_replay.as_ref().and_then(|replay| {
             let prompt_len = request_value
                 .as_ref()
-                .map(|v| crate::symmetric_pd::estimate_prompt_len(v, prompt_ids.as_deref()))
+                .map(|v| crate::scheduler::estimate_prompt_len(v, prompt_ids.as_deref()))
                 .unwrap_or_else(|| estimate_prefill_tokens(&body) as u64);
             let rid = extract_rid(request_value.as_ref());
             super::pd_replay::pick(&ctx, replay, &headers, prompt_len, &workers, &model_id, rid.as_deref())
@@ -405,7 +384,7 @@ async fn dispatch(
                 .or_else(|| {
                     request_value
                         .as_ref()
-                        .map(|v| crate::symmetric_pd::estimate_prompt_len(v, None))
+                        .map(|v| crate::scheduler::estimate_prompt_len(v, None))
                 })
                 .unwrap_or_else(|| estimate_prefill_tokens(&body) as u64)
         },
@@ -428,40 +407,14 @@ async fn dispatch(
         .as_ref()
         .filter(|_| ingress.late_d_choose() && worker.mode() == WorkerMode::Prefill)
     {
-        let pick =
-            super::late_d::pick(&ctx, late, &resolver, &model_id, &worker).map_err(
-                |e| match e {
-                    PdResolveError::NoHealthyWorkers => ApiError::NoHealthyWorkers {
-                        model: model_str.clone(),
-                    },
-                    PdResolveError::NoDecodeWorkersAvailable => {
-                        ApiError::NoDecodeWorkersAvailable {
-                            model: model_str.clone(),
-                        }
-                    }
-                    PdResolveError::NoPrefillWorkersAvailable => {
-                        ApiError::NoPrefillWorkersAvailable {
-                            model: model_str.clone(),
-                        }
-                    }
-                },
-            )?;
+        let pick = super::late_d::pick(&ctx, late, &resolver, &model_id, &worker)
+            .map_err(|e| ApiError::from_pd_resolve(e, &model_str))?;
         late_choose = pick.choose;
         Some(pick.arrival)
     } else if worker.mode() == WorkerMode::Prefill {
         let selection = ctx
             .select_decode(&resolver, &model_id, &worker.url, decode_charge_tokens)
-            .map_err(|e| match e {
-                PdResolveError::NoHealthyWorkers => ApiError::NoHealthyWorkers {
-                    model: model_str.clone(),
-                },
-                PdResolveError::NoDecodeWorkersAvailable => ApiError::NoDecodeWorkersAvailable {
-                    model: model_str.clone(),
-                },
-                PdResolveError::NoPrefillWorkersAvailable => ApiError::NoPrefillWorkersAvailable {
-                    model: model_str.clone(),
-                },
-            })?;
+            .map_err(|e| ApiError::from_pd_resolve(e, &model_str))?;
         decode_charge = selection.charge;
         decode_token_log = selection.token_log;
         Some(selection.worker)
@@ -713,7 +666,7 @@ async fn dispatch(
                 .or_else(|| {
                     request_value
                         .as_ref()
-                        .map(|v| crate::symmetric_pd::estimate_prompt_len(v, None))
+                        .map(|v| crate::scheduler::estimate_prompt_len(v, None))
                 })
                 .unwrap_or_else(|| estimate_prefill_tokens(&body) as u64),
             request_value.as_ref(),
@@ -776,7 +729,7 @@ async fn dispatch(
         (Bytes::new(), Bytes::new())
     } else if let Some(d) = flex_decision.as_ref() {
         let (p_body, d_body) =
-            crate::symmetric_pd::build_leg_bodies(
+            crate::scheduler::build_leg_bodies(
                 &body,
                 request_value,
                 None,
@@ -907,27 +860,7 @@ async fn dispatch(
                     failure.fail_and_log(status, detail, &legs);
                 }
             }
-            if let Some(cost) = prefill_cost.as_mut() {
-                let accounted = match &prefill_result {
-                    Ok(response) => cost.finish(if response.status().is_success() {
-                        "prefill_response_success"
-                    } else if crate::proxy::is_reader_gone(&prefill_result) {
-                        crate::proxy::READER_GONE_FINISH_REASON
-                    } else {
-                        "prefill_response_error"
-                    }),
-                    Err(error) => cost.mark_unknown(&format!("prefill_transport_error: {error}")),
-                };
-                if let Err(error) = accounted {
-                    tracing::error!(target: "cost_balance", %error, "cost lifecycle observation failed");
-                }
-            }
-            if let Some(ledger) = prefill_ledger {
-                match (&prefill_result, ledger) {
-                    (Err(_), AdmissionLedger::Flex(handle)) => handle.mark_unknown(),
-                    (_, ledger) => ledger.retire(),
-                }
-            }
+            settle_prefill_leg(prefill_cost.as_mut(), prefill_ledger, &prefill_result);
             match prefill_result {
                 // Cancelled, not failed: the engine finished the P-leg
                 // because its reader left; the D-leg owns the outcome.
@@ -1074,6 +1007,16 @@ pub(crate) fn extract_rid(v: Option<&serde_json::Value>) -> Option<String> {
         .map(String::from)
 }
 
+/// The decision-replay routing key: the value of the replay header, when
+/// decision replay is on (`header` is `Some`) and the request carries it as
+/// valid UTF-8.
+pub(crate) fn replay_routing_key(header: Option<&str>, headers: &HeaderMap) -> Option<String> {
+    header
+        .and_then(|h| headers.get(h))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
 /// Prompt length of a symmetric_pd placement (the completions and chat routes).
 ///
 /// # Inputs
@@ -1096,7 +1039,7 @@ pub(crate) fn flex_prompt_len(
         return estimate_prefill_tokens(body) as u64;
     }
     value
-        .map(|v| crate::symmetric_pd::estimate_prompt_len(v, ids))
+        .map(|v| crate::scheduler::estimate_prompt_len(v, ids))
         .unwrap_or_else(|| estimate_prefill_tokens(body) as u64)
 }
 

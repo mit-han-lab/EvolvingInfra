@@ -6,10 +6,10 @@
 //! (e.g. to run traditional decode engines with the symmetric engines' KV
 //! pool split), so the two data planes are compared under identical
 //! placement. The table format and outcome names are
-//! [`crate::symmetric_pd::DecisionReplay`]'s.
+//! [`crate::scheduler::DecisionReplay`]'s.
 
 use crate::discovery::ModelId;
-use crate::symmetric_pd::DecisionReplay;
+use crate::scheduler::DecisionReplay;
 use crate::policies::registry::PdPoolResolver;
 use crate::server::app_context::AppContext;
 use crate::workers::Worker;

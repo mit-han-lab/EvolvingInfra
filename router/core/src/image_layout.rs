@@ -628,55 +628,7 @@ pub fn python_float_repr(f: f64) -> anyhow::Result<String> {
     if !f.is_finite() {
         anyhow::bail!("non-finite float in image config");
     }
-    if f == 0.0 {
-        return Ok(if f.is_sign_negative() { "-0.0" } else { "0.0" }.into());
-    }
-    // Rust `{:e}` gives the shortest round-trip digits: "-1.2345e-7".
-    let s = format!("{f:e}");
-    let (mant, exp) = s
-        .split_once('e')
-        .ok_or_else(|| anyhow::anyhow!("float format"))?;
-    let exp: i32 = exp.parse()?;
-    let (neg, mant) = match mant.strip_prefix('-') {
-        Some(m) => (true, m),
-        None => (false, mant),
-    };
-    let digits: String = mant.chars().filter(|c| *c != '.').collect();
-    let n = digits.len() as i32;
-    let mut out = String::new();
-    if neg {
-        out.push('-');
-    }
-    if (-4..16).contains(&exp) {
-        if exp >= 0 {
-            let int_len = exp + 1;
-            if n <= int_len {
-                out.push_str(&digits);
-                out.push_str(&"0".repeat((int_len - n) as usize));
-                out.push_str(".0");
-            } else {
-                out.push_str(&digits[..int_len as usize]);
-                out.push('.');
-                out.push_str(&digits[int_len as usize..]);
-            }
-        } else {
-            out.push_str("0.");
-            out.push_str(&"0".repeat((-exp - 1) as usize));
-            out.push_str(&digits);
-        }
-    } else {
-        out.push_str(&digits[..1]);
-        if n > 1 {
-            out.push('.');
-            out.push_str(&digits[1..]);
-        }
-        out.push_str(&format!(
-            "e{}{:02}",
-            if exp < 0 { '-' } else { '+' },
-            exp.abs()
-        ));
-    }
-    Ok(out)
+    Ok(crate::eft_cheap::python_float_repr(f))
 }
 
 // ---------------------------------------------------------------- metrics

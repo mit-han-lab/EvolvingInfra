@@ -99,10 +99,6 @@ impl PrefillFailure {
         self.token.cancel();
     }
 
-    pub fn is_failed(&self) -> bool {
-        self.token.is_cancelled()
-    }
-
     /// Why a finished prefill call failed, or `None` when it answered
     /// 2xx or ended because its reader left ([`ReaderGone`]: the D-leg
     /// owns the outcome): any transport-level error is 502, a non-2xx

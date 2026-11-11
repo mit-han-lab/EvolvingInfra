@@ -38,6 +38,7 @@
 //! empty rounds and per-worker poll failures; the snapshot and the request
 //! counts).
 
+use crate::server::metrics::escape_label;
 use crate::workers::{Worker, WorkerRegistry};
 use dashmap::DashMap;
 use rand::Rng;
@@ -782,19 +783,6 @@ async fn monitor_loop(
             "decode power-of-two-smg load round"
         );
     }
-}
-
-fn escape_label(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str(r"\\"),
-            '"' => out.push_str(r#"\""#),
-            '\n' => out.push_str(r"\n"),
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 #[cfg(test)]

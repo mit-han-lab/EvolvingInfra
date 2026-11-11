@@ -6,7 +6,7 @@
 //! contract: the response carries `p_leg`, `d_leg`, `local`, `transfer_id`,
 //! `score_terms`, `marks{kv_export,kv_import}`, `targets`, `inputs`.
 
-use crate::symmetric_pd::{PlaceHttpRequest, PlaceHttpResponse};
+use crate::scheduler::{PlaceHttpRequest, PlaceHttpResponse};
 use crate::server::app_context::AppContext;
 use crate::server::error::ApiError;
 use axum::extract::State;
@@ -44,6 +44,6 @@ pub async fn place(
         serde_json::from_slice(&body)
             .map_err(|e| ApiError::BadRequest(format!("invalid /symmetric_pd/place body: {e}")))?
     };
-    let resp = flex.place_http(flex, req).await?;
+    let resp = flex.place_http(req).await?;
     Ok(Json(resp))
 }

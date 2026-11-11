@@ -523,6 +523,31 @@ impl TradeParams {
             || self.rate_mode == TradeRateMode::Auto
     }
 
+    /// The start-up description of the copy price lambda and of the rate R
+    /// (`auto` or fixed), as `(lambda, rate)`.
+    pub fn auto_description(&self) -> (String, String) {
+        let lambda = match self.copy_lambda_mode {
+            TradeLambdaMode::Auto { q, mu, min, max } => format!(
+                "lambda = clamp(mu*q*R/R_hat, min, max) with q {} ({}), mu = {mu}, \
+                 min = {min}, max = {max}, fallback lambda = {}",
+                q.as_str(),
+                match q {
+                    TradeAutoQ::Sat => "N_active/n_P*busy",
+                    TradeAutoQ::Inflight => "1 + mean in-flight requests per P",
+                },
+                self.copy_lambda,
+            ),
+            TradeLambdaMode::Fixed => format!("lambda fixed = {}", self.copy_lambda),
+        };
+        let rate = match self.rate_mode {
+            TradeRateMode::Auto => {
+                format!("R = R_hat (fallback R = {})", self.rate_tokens_per_s)
+            }
+            TradeRateMode::Fixed => format!("R fixed = {}", self.rate_tokens_per_s),
+        };
+        (lambda, rate)
+    }
+
     /// The parameters of one decision, with `copy_lambda` and
     /// `rate_tokens_per_s` resolved from the router's measurements `auto`,
     /// and how they were resolved. [`trade_cost_full`] then uses them
@@ -905,23 +930,9 @@ pub struct TradeSelection {
     pub protect_reason: Option<&'static str>,
 }
 
-/// Choose argmin TRADE cost. Equal costs go to the cache-aware owner, then to
-/// the higher own hit, then (`wait = eft` or `olp`) to the shorter wait B_w,
-/// then to the lower backlog, then to the smaller URL. With `wait = eft` or
-/// `olp`, Ps with the same highest own hit are ordered by cost (the smaller
-/// predicted finish is the owner), not by the ledger backlog. With `margin_noise_k > 0` the
-/// owner is kept unless its cost exceeds the best one by more than the noise
-/// margin. With `hol_weight > 0` every cost includes the HOL term, so these
-/// rules and the gain of the noise margin use it; the margin itself is
-/// unchanged. With `wait = e3` the selection is [`select_trade_e3`]; the
-/// other wait sources are unchanged by it. Pure: no I/O, no reservation.
-/// Panics if `inputs` is empty.
-pub fn select_trade(params: &TradeParams, inputs: &[TradeInput<'_>]) -> TradeSelection {
-    if params.wait == TradeWait::E3 {
-        return select_trade_e3(params, inputs);
-    }
-    assert!(!inputs.is_empty());
-    let costs: Vec<TradeCost> = inputs
+/// The TRADE cost of every candidate, in the order of `inputs`.
+fn trade_costs(params: &TradeParams, inputs: &[TradeInput<'_>]) -> Vec<TradeCost> {
+    inputs
         .iter()
         .enumerate()
         .map(|(i, input)| {
@@ -948,7 +959,26 @@ pub fn select_trade(params: &TradeParams, inputs: &[TradeInput<'_>]) -> TradeSel
                 input.arrival_rate_per_s,
             )
         })
-        .collect();
+        .collect()
+}
+
+/// Choose argmin TRADE cost. Equal costs go to the cache-aware owner, then to
+/// the higher own hit, then (`wait = eft` or `olp`) to the shorter wait B_w,
+/// then to the lower backlog, then to the smaller URL. With `wait = eft` or
+/// `olp`, Ps with the same highest own hit are ordered by cost (the smaller
+/// predicted finish is the owner), not by the ledger backlog. With `margin_noise_k > 0` the
+/// owner is kept unless its cost exceeds the best one by more than the noise
+/// margin. With `hol_weight > 0` every cost includes the HOL term, so these
+/// rules and the gain of the noise margin use it; the margin itself is
+/// unchanged. With `wait = e3` the selection is [`select_trade_e3`]; the
+/// other wait sources are unchanged by it. Pure: no I/O, no reservation.
+/// Panics if `inputs` is empty.
+pub fn select_trade(params: &TradeParams, inputs: &[TradeInput<'_>]) -> TradeSelection {
+    if params.wait == TradeWait::E3 {
+        return select_trade_e3(params, inputs);
+    }
+    assert!(!inputs.is_empty());
+    let costs = trade_costs(params, inputs);
     // The ledger wait keeps the first version's ties (backlog); the
     // predicted waits (eft, olp) order equally cached Ps by cost.
     let eft = matches!(params.wait, TradeWait::Eft | TradeWait::Olp);
@@ -1267,34 +1297,7 @@ impl TradePhiState {
 /// when the gate was evaluated. Pure; panics if `inputs` is empty.
 pub fn select_trade_e3(params: &TradeParams, inputs: &[TradeInput<'_>]) -> TradeSelection {
     assert!(!inputs.is_empty());
-    let costs: Vec<TradeCost> = inputs
-        .iter()
-        .enumerate()
-        .map(|(i, input)| {
-            // A candidate's own copy price (pull price phi), as in
-            // [`select_trade`]; None keeps the parameters.
-            let own;
-            let params = match input.copy_lambda {
-                Some(copy_lambda) => {
-                    own = TradeParams {
-                        copy_lambda,
-                        ..*params
-                    };
-                    &own
-                }
-                None => params,
-            };
-            trade_cost_full(
-                params,
-                input.backlog,
-                input.uncached,
-                input.pulled,
-                trade_duplicate_tokens(inputs, i),
-                input.wait,
-                input.arrival_rate_per_s,
-            )
-        })
-        .collect();
+    let costs = trade_costs(params, inputs);
     let usable = |i: usize| inputs[i].wait.is_some() && inputs[i].bound_s.is_some();
     let owner = (0..inputs.len())
         .min_by(|&a, &b| {

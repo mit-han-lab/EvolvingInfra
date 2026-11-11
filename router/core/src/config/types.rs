@@ -274,7 +274,7 @@ pub enum PolicyKind {
     #[value(name = "co_schedule")]
     CoSchedule,
     /// symmetric P/D placement: every request goes through
-    /// `crate::symmetric_pd::placement::place()` over the PD workers (legacy
+    /// `crate::scheduler::placement::place()` over the PD workers (legacy
     /// Prefill/Decode plus `Symmetric` engines with weights); Split
     /// requests carry `kv_export` / `kv_import` marks instead of the
     /// `bootstrap_*` fields, Local requests are one plain request. Tuning
@@ -589,7 +589,7 @@ pub struct ModelConfig {
     /// Traditional-PD per-request decision replay (`--pd-decision-replay`):
     /// the prefill worker and its decode peer are taken from a table
     /// recorded by a reference run (same file format as
-    /// `--symmetric-pd-decision-replay`, see [`crate::symmetric_pd::DecisionReplay`]),
+    /// `--symmetric-pd-decision-replay`, see [`crate::scheduler::DecisionReplay`]),
     /// so a traditional-PD run can be compared with a symmetric P/D run under
     /// identical per-request placement. `None` = live selection. Unknown
     /// keys / lengths fall back to `policy` + `pd_decode_policy`.
@@ -707,20 +707,20 @@ impl SymmetricPdWorkerSpec {
     }
 
     /// Capability set as the placement sees it.
-    pub fn capabilities(&self) -> crate::symmetric_pd::placement::Capabilities {
+    pub fn capabilities(&self) -> crate::scheduler::placement::Capabilities {
         let has = |name: &str| {
             self.capabilities
                 .iter()
                 .any(|c| c.eq_ignore_ascii_case(name))
         };
-        crate::symmetric_pd::placement::Capabilities {
+        crate::scheduler::placement::Capabilities {
             prefill: has("prefill"),
             decode: has("decode"),
         }
     }
 
-    pub fn weight(&self) -> crate::symmetric_pd::placement::RoleWeight {
-        crate::symmetric_pd::placement::RoleWeight {
+    pub fn weight(&self) -> crate::scheduler::placement::RoleWeight {
+        crate::scheduler::placement::RoleWeight {
             prefill: self.prefill_weight,
             decode: self.decode_weight,
         }
@@ -768,7 +768,7 @@ pub enum SymmetricPdPSelect {
     CostFunction,
 }
 
-impl From<SymmetricPdPSelect> for crate::symmetric_pd::placement::PSelect {
+impl From<SymmetricPdPSelect> for crate::scheduler::placement::PSelect {
     fn from(v: SymmetricPdPSelect) -> Self {
         match v {
             SymmetricPdPSelect::Score => Self::Score,
@@ -929,7 +929,7 @@ pub enum SymmetricPdDSelect {
     CacheFirst,
 }
 
-impl From<SymmetricPdDSelect> for crate::symmetric_pd::placement::DSelect {
+impl From<SymmetricPdDSelect> for crate::scheduler::placement::DSelect {
     fn from(v: SymmetricPdDSelect) -> Self {
         match v {
             SymmetricPdDSelect::Score => Self::Score,
@@ -944,7 +944,7 @@ impl From<SymmetricPdDSelect> for crate::symmetric_pd::placement::DSelect {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymmetricPdConfig {
     /// Score weights / normalisation of the pure `place()` function.
-    pub placement: crate::symmetric_pd::placement::PlacementConfig,
+    pub placement: crate::scheduler::placement::PlacementConfig,
     /// Statically configured symmetric workers (e.g. 4 prefill-leaning + 4
     /// decode-leaning). Legacy Prefill / Decode workers also take part
     /// with `{1,0}` / `{0,1}` weights.

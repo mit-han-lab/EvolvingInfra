@@ -4,6 +4,7 @@
 //! `/v1/loads`, preserving absent measurements and engine snapshot timestamps.
 //! HTTP retrieval and wire validation are isolated from ledger reconciliation.
 use crate::backend::state::{EngineLoadSample, LoadObservation, PrefillProgress};
+use serde::Deserialize;
 use serde_json::Value;
 
 /// Parse a `/v1/loads` reply into `(uncached_tokens, running, waiting)`
@@ -101,8 +102,7 @@ pub fn parse_sample_with(
             .get("prefill_work")
             .filter(|v| !v.is_null())
             .ok_or("engine must enable --enable-prefill-work-snapshot")?;
-        let progress: PrefillProgress =
-            serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
+        let progress = PrefillProgress::deserialize(raw).map_err(|e| e.to_string())?;
         if progress.epoch.is_empty() {
             return Err("prefill_work engine epoch is empty".into());
         }

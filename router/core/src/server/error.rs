@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::policies::registry::PdResolveError;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -157,6 +158,20 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    /// The 503 a PD pool-resolution failure surfaces as, for `model`.
+    pub(crate) fn from_pd_resolve(e: PdResolveError, model: &str) -> ApiError {
+        let model = model.to_string();
+        match e {
+            PdResolveError::NoHealthyWorkers => ApiError::NoHealthyWorkers { model },
+            PdResolveError::NoPrefillWorkersAvailable => {
+                ApiError::NoPrefillWorkersAvailable { model }
+            }
+            PdResolveError::NoDecodeWorkersAvailable => {
+                ApiError::NoDecodeWorkersAvailable { model }
+            }
+        }
+    }
+
     fn status_and_code(&self) -> (StatusCode, &'static str) {
         match self {
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),

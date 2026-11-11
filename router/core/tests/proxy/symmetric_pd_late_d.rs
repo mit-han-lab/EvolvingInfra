@@ -37,7 +37,7 @@ use sgl_router::config::{
     ServerConfig, StaticUrlsDiscoveryConfig,
 };
 use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
-use sgl_router::symmetric_pd::{DSelect, PSelect, RoleWeight};
+use sgl_router::scheduler::{DSelect, PSelect, RoleWeight};
 use sgl_router::kv_hint::{KvHintConfig, KvWorkerMapEntry};
 use sgl_router::policies::factory::build_registry_with_defaults;
 use sgl_router::proxy::Proxy;

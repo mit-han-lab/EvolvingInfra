@@ -4,7 +4,7 @@
 use super::decision_log::{log_routing_decision, AdmissionLedger, RoutingDecision};
 use crate::discovery::{ModelId, WorkerMode};
 use crate::policies::kv_events::{compute_block_hashes, compute_block_hashes_bigram};
-use crate::policies::registry::{PdPoolResolver, PdResolveError};
+use crate::policies::registry::PdPoolResolver;
 use crate::policies::{request_tokens_for, ExternalPrefixSignal, RequestTokens, SelectionContext};
 use crate::proxy::{prefill_failed, PdLegs, PrefillFailure};
 use crate::server::app_context::AppContext;
@@ -129,17 +129,7 @@ pub async fn chat_completions(
     } else {
         resolver
             .prefill_candidates(&model_id)
-            .map_err(|e| match e {
-                PdResolveError::NoHealthyWorkers => ApiError::NoHealthyWorkers {
-                    model: model_str.clone(),
-                },
-                PdResolveError::NoPrefillWorkersAvailable => ApiError::NoPrefillWorkersAvailable {
-                    model: model_str.clone(),
-                },
-                PdResolveError::NoDecodeWorkersAvailable => ApiError::NoDecodeWorkersAvailable {
-                    model: model_str.clone(),
-                },
-            })?
+            .map_err(|e| ApiError::from_pd_resolve(e, &model_str))?
     };
 
     let policy = ctx
@@ -252,7 +242,7 @@ pub async fn chat_completions(
     // The co-scheduler may HOLD the request here until capacity frees or
     // its starvation guard fires.
     let mut co_dispatch: Option<crate::co_schedule::Dispatch> = None;
-    let mut flex_decision: Option<crate::symmetric_pd::Decision> = None;
+    let mut flex_decision: Option<crate::scheduler::Decision> = None;
     // Traditional-PD decision replay: the pinned decode peer (routes/pd_replay.rs).
     let mut pd_replay_decode: Option<Arc<Worker>> = None;
     let worker = if let Some(flex) = ctx.symmetric_pd.as_ref() {
@@ -269,8 +259,7 @@ pub async fn chat_completions(
             crate::server::routes::completions::extract_session(request_value.as_ref());
         let d = flex
             .admit(
-                flex,
-                crate::symmetric_pd::PlaceInput {
+                crate::scheduler::PlaceInput {
                     tokens: ids.map(<[u32]>::to_vec),
                     hashes: None,
                     prompt_len,
@@ -279,11 +268,10 @@ pub async fn chat_completions(
                     session_id,
                     turn,
                     rid: crate::server::routes::completions::extract_rid(request_value.as_ref()),
-                    routing_key: flex
-                        .replay_header()
-                        .and_then(|h| headers.get(h))
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_string),
+                    routing_key: crate::server::routes::completions::replay_routing_key(
+                        flex.replay_header(),
+                        &headers,
+                    ),
                     ingress_ms: start.elapsed().as_secs_f64() * 1e3,
                     // The cost function's copy price auto (N_active) and the
                     // session-move trace.
@@ -338,7 +326,7 @@ pub async fn chat_completions(
             let ids = request_tokens.as_ref().map(|t| t.ids.as_slice());
             let prompt_len = request_value
                 .as_ref()
-                .map(|v| crate::symmetric_pd::estimate_prompt_len(v, ids))
+                .map(|v| crate::scheduler::estimate_prompt_len(v, ids))
                 .unwrap_or_else(|| estimate_prefill_tokens(&body) as u64);
             let rid = crate::server::routes::completions::extract_rid(request_value.as_ref());
             super::pd_replay::pick(&ctx, replay, &headers, prompt_len, &workers, &model_id, rid.as_deref())
@@ -381,7 +369,7 @@ pub async fn chat_completions(
                 .or_else(|| {
                     request_value
                         .as_ref()
-                        .map(|v| crate::symmetric_pd::estimate_prompt_len(v, None))
+                        .map(|v| crate::scheduler::estimate_prompt_len(v, None))
                 })
                 .unwrap_or_else(|| estimate_prefill_tokens(&body) as u64)
         },
@@ -399,17 +387,7 @@ pub async fn chat_completions(
     } else if worker.mode() == WorkerMode::Prefill {
         let selection = ctx
             .select_decode(&resolver, &model_id, &worker.url, decode_charge_tokens)
-            .map_err(|e| match e {
-                PdResolveError::NoHealthyWorkers => ApiError::NoHealthyWorkers {
-                    model: model_str.clone(),
-                },
-                PdResolveError::NoDecodeWorkersAvailable => ApiError::NoDecodeWorkersAvailable {
-                    model: model_str.clone(),
-                },
-                PdResolveError::NoPrefillWorkersAvailable => ApiError::NoPrefillWorkersAvailable {
-                    model: model_str.clone(),
-                },
-            })?;
+            .map_err(|e| ApiError::from_pd_resolve(e, &model_str))?;
         decode_charge = selection.charge;
         decode_token_log = selection.token_log;
         Some(selection.worker)
@@ -669,7 +647,7 @@ pub async fn chat_completions(
     // the D-leg (`kv_import`); Local leaves only `input_ids` injected.
     let (outgoing_body, executing_body) = if let Some(d) = flex_decision.as_ref() {
         let (p_body, d_body) =
-            crate::symmetric_pd::build_leg_bodies(
+            crate::scheduler::build_leg_bodies(
                 &body,
                 request_value,
                 forward_input_ids,
@@ -816,27 +794,11 @@ pub async fn chat_completions(
                     failure.fail_and_log(status, detail, &legs);
                 }
             }
-            if let Some(cost) = prefill_cost.as_mut() {
-                let accounted = match &prefill_result {
-                    Ok(response) => cost.finish(if response.status().is_success() {
-                        "prefill_response_success"
-                    } else if crate::proxy::is_reader_gone(&prefill_result) {
-                        crate::proxy::READER_GONE_FINISH_REASON
-                    } else {
-                        "prefill_response_error"
-                    }),
-                    Err(error) => cost.mark_unknown(&format!("prefill_transport_error: {error}")),
-                };
-                if let Err(error) = accounted {
-                    tracing::error!(target: "cost_balance", %error, "cost lifecycle observation failed");
-                }
-            }
-            if let Some(ledger) = prefill_ledger {
-                match (&prefill_result, ledger) {
-                    (Err(_), AdmissionLedger::Flex(handle)) => handle.mark_unknown(),
-                    (_, ledger) => ledger.retire(),
-                }
-            }
+            super::decision_log::settle_prefill_leg(
+                prefill_cost.as_mut(),
+                prefill_ledger,
+                &prefill_result,
+            );
             match prefill_result {
                 // Cancelled, not failed: the engine finished the P-leg
                 // because its reader left; the D-leg owns the outcome.

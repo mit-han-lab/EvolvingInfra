@@ -4017,21 +4017,25 @@ impl CostBook {
     pub fn snapshot(&self) -> Value {
         let mut state = self.state.lock();
         self.expire_unknown(&mut state, None, Instant::now());
+        // Status counts and the oldest active assigned time of each worker.
+        let mut by_worker = HashMap::<&str, (BTreeMap<&str, u64>, Option<u64>)>::new();
+        for entry in state.entries.values() {
+            let (counts, oldest_assigned_ms) =
+                by_worker.entry(entry.worker_url.as_str()).or_default();
+            *counts.entry(entry.status.label()).or_default() += 1;
+            if entry.status.active() {
+                *oldest_assigned_ms =
+                    Some(oldest_assigned_ms.map_or(entry.assigned_unix_ms, |old| {
+                        old.min(entry.assigned_unix_ms)
+                    }));
+            }
+        }
         let workers: Vec<Value> = state
             .workers
             .iter()
             .map(|(url, worker)| {
-                let mut counts = BTreeMap::<&str, u64>::new();
-                let mut oldest_assigned_ms: Option<u64> = None;
-                for entry in state.entries.values().filter(|e| &e.worker_url == url) {
-                    *counts.entry(entry.status.label()).or_default() += 1;
-                    if entry.status.active() {
-                        oldest_assigned_ms =
-                            Some(oldest_assigned_ms.map_or(entry.assigned_unix_ms, |old| {
-                                old.min(entry.assigned_unix_ms)
-                            }));
-                    }
-                }
+                let (counts, oldest_assigned_ms) =
+                    by_worker.remove(url.as_str()).unwrap_or_default();
                 json!({
                     "worker_url": url,
                     "cost": worker.cost.to_string(),
