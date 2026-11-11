@@ -29,10 +29,15 @@ class TaskScope:
     lifecycle_task_trace: str | None = None
 
 
+# One of several replay processes: its name. Processes replay the same traces with the same cycle
+# numbers, and two live agents with one identity are refused by the router.
+PROCESS = ""
+
+
 def _agent_id(kind, trace_id, cycle_id):
     if not isinstance(trace_id, str) or not trace_id or type(cycle_id) is not int or cycle_id < 0:
         raise ValueError("Replay identity needs a trace ID and nonnegative cycle")
-    digest = hashlib.sha256(trace_id.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256((PROCESS + trace_id).encode("utf-8")).hexdigest()
     return f"{kind}:{digest}:cycle:{cycle_id}"
 
 

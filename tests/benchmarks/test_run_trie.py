@@ -71,3 +71,12 @@ def test_score_reports_the_differences(tmp_path):
     (tmp_path / "replay-settings-0.json").write_text(json.dumps({"preset": "paper", "differs_from_preset": differs}))
     result = score.window_score(str(tmp_path), 0, 10)
     assert result["replay_preset"] == ["paper"] and result["replay_differs_from_preset"] == differs
+
+
+def test_processes_give_the_same_trace_different_agents():
+    identity = load("replay_agent_identity")
+    one = identity._agent_id("trace", "putnam_1990_a2", 0)
+    identity.PROCESS = "process-3:"
+    assert identity._agent_id("trace", "putnam_1990_a2", 0) != one
+    identity.PROCESS = ""
+    assert identity._agent_id("trace", "putnam_1990_a2", 0) == one

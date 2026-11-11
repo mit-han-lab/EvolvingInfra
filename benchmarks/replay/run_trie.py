@@ -175,6 +175,8 @@ def main() -> int:
     client, writer = trie.client.Client, trie.client_lifecycle.ClientLifecycleWriter
     config = prepared_replay.Config(**settings)
     prepared_replay.install(client, config)
+    if record["processes"] > 1:
+        replay_agent_identity.PROCESS = f"process-{record['process']}:"
     replay_agent_identity.install(client, writer)
     name = output.name.replace("trie-results", "session-lifecycle")
     log = output.with_name(name).with_suffix(".jsonl").open("x", buffering=1)

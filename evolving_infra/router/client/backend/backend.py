@@ -541,7 +541,10 @@ class Backend:
             allow_redirects=False,
         ) as response:
             if not 200 <= response.status < 300:
-                raise PreparedHTTPError(f"prepared placement returned HTTP {response.status}", response.status)
+                reason = " ".join((await response.text())[:300].split())
+                raise PreparedHTTPError(
+                    f"prepared placement returned HTTP {response.status}" + (f": {reason}" if reason else ""),
+                    response.status)
             return await response.json()
 
     async def _cancel_prepared(self, endpoint: str, plan: Any) -> None:
