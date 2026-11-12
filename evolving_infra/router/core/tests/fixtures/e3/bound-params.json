@@ -2,8 +2,8 @@
  "schema": "router-e3-bound-params.v2",
  "bound_tables_sha256": "9df02c05d5d4b1334f3e35ce17bfd29302122c7f9792c02052b38175c89cf239",
  "fit_cells": [
-  "g1-r4ca",
-  "r6-obs90c1-dev"
+  "GB300 replay cell 1",
+  "GB300 replay cell 2"
  ],
  "rule": "reroute from owner o to worker w only if (C_o - C_w) - sqrt(b_o^2 + b_w^2) > g_min_s",
  "g_min_s": 0.1,

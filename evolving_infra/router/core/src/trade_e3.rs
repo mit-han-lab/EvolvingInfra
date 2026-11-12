@@ -3751,7 +3751,7 @@ mod tests {
         assert_eq!(cfg.bound_schema, crate::e3::BOUND_PARAMS_SCHEMA);
         assert_eq!(
             cfg.bound_sha256,
-            "11455495bef2612b5de3dfef5226ffd9c9a3b5ac87bd9e5af02784a6c2e2feb5"
+            "45efd36a2a344d7fc1712be3ec6ae4119147f707d5bb511512c079c491e83e60"
         );
         let cfg9 =
             TradeE3Config::load(&params, DEFAULT_BOUND_MODE, Some("0.9"), 0.0, None).unwrap();

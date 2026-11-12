@@ -1,5 +1,5 @@
 {
- "source": "kimi.e3_constants of kimi26-tp4-gb300-step-model.json (sha256 3ebd1b1b9d1e5c627febb43f6f1012fb26b8a652c9f200cdd06b0a589169d64f): Kimi-K2.6 TP4 GB300 step model fitted on job 264995 (6P3D c128 CUA static baseline, P workers 0-5, fit window 300-1800 s); offline E3 with next-pass APE mean 13.5 %, p50 6.7 %, p95 36.8 % on its score window",
+ "source": "kimi.e3_constants of kimi26-tp4-gb300-step-model.json (sha256 3ebd1b1b9d1e5c627febb43f6f1012fb26b8a652c9f200cdd06b0a589169d64f): Kimi-K2.6 TP4 GB300 step model fitted on one GB300 run (6P3D c128 CUA static baseline, P workers 0-5, fit window 300-1800 s); offline E3 with next-pass APE mean 13.5 %, p50 6.7 %, p95 36.8 % on its score window",
  "gpu_busy": {
   "small": null,
   "large": [
