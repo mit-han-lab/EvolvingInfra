@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pi on Evolving Infra. Pi speaks OpenAI chat completions, so it talks to the router directly.
+# Pi on Evolving Infra. Pi speaks OpenAI chat completions, so it talks to the agent gateway directly.
 #   bash examples/agents/pi.sh [pi arguments...]     e.g. bash examples/agents/pi.sh -p "Summarize README.md"
 # The provider comes from pi-provider.ts (loaded with -e); nothing in ~/.pi changes.
 set -euo pipefail

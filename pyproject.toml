@@ -47,6 +47,7 @@ packages = [
     "evolving_infra.router.client.backend",
     "evolving_infra.router.client.scheduler",
     "evolving_infra.router.frontend",
+    "evolving_infra.router.gateway",
     "evolving_infra.router.indexer",
     "evolving_infra.launch",
     "evolving_infra.planner",

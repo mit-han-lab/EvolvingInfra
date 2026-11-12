@@ -17,7 +17,7 @@ import time
 import urllib.request
 
 from evolving_infra.launch import hardware
-from evolving_infra.launch.layout import (FRONTEND_PORT, INDEXER_PORT, INDEXER_QUERY_PORT, ROUTER_PORT,
+from evolving_infra.launch.layout import (FRONTEND_PORT, GATEWAY_PORT, INDEXER_PORT, INDEXER_QUERY_PORT, ROUTER_PORT,
                                           TRACE_PORT, workers)
 
 
@@ -200,6 +200,10 @@ class Stack:
             env["EVOLVING_INFRA_ROLE_CONTROL_TOKEN_FILE"] = str(token)
         self.start("router", argv + list(cfg.get("router_args", [])), env)
         self.wait("router", f"http://127.0.0.1:{ROUTER_PORT}/readyz", 600)
+        self.start("gateway", [sys.executable, "-m", "evolving_infra.router.gateway",
+                               "--router-url", f"http://127.0.0.1:{ROUTER_PORT}", "--port", str(GATEWAY_PORT)]
+                   + ([] if self.retention else ["--no-retention"]))
+        self.wait("gateway", f"http://127.0.0.1:{GATEWAY_PORT}/gateway/stats", 60)
         if self.planner is not None:
             self.start_planner(token)
 
@@ -229,6 +233,7 @@ class Stack:
                       f"{sum(w.role == 'decode' for w in self.workers)}D)", flush=True)
                 self.write("stack.json", {  # what a client needs; benchmarks/replay/run_trie.py stack=<this dir>
                     "router_url": f"http://{self.head}:{ROUTER_PORT}",
+                    "gateway_url": f"http://{self.head}:{GATEWAY_PORT}",  # for clients without agent identities
                     "tokenizer_url": f"http://{self.head}:{FRONTEND_PORT}",
                     "model": self.cfg["served_model_name"], "model_path": self.cfg["model"],
                     "page_size": self.cfg["page_size"], "config_id": "default", "retention": self.retention,

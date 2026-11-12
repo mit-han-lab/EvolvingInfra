@@ -31,14 +31,20 @@ def _flag(arg: str) -> str:
 
 
 def load(path: Path) -> dict:
-    """A config file; ``base: other.yaml`` starts from that file, and engine flags given here replace its own."""
+    """A config file; ``base: other.yaml`` starts from that file. Engine and router flags given here
+    replace the base's flags of the same name and keep the others; mappings (``engine_env``,
+    ``frontend``, ``planner``) are merged key by key; any other key replaces the base's."""
     cfg = yaml.safe_load(path.read_text()) or {}
     if "base" not in cfg:
         return cfg
     out = load(path.parent / cfg.pop("base"))
-    mine = cfg.pop("engine_args", [])
-    replaced = {_flag(a) for a in mine}
-    out["engine_args"] = [a for a in out.get("engine_args", []) if _flag(a) not in replaced] + mine
+    for key in ("engine_args", "router_args"):
+        mine = cfg.pop(key, [])
+        replaced = {_flag(a) for a in mine}
+        out[key] = [a for a in out.get(key, []) if _flag(a) not in replaced] + mine
+    for key in ("engine_env", "frontend", "planner"):
+        if isinstance(cfg.get(key), dict) and isinstance(out.get(key), dict):
+            out[key] = {**out[key], **cfg.pop(key)}
     out.update(cfg)
     return out
 

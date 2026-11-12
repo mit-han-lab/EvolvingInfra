@@ -81,7 +81,8 @@ retains the text-only deployment contract.
 The client uploads PNG/JPEG contents as Base64 strings or data URLs in
 `input.image_data`, alongside `input_ids` or `prompt`. Chat requests instead use
 uploaded data URLs in `messages[].content[].image_url.url`. Local paths and remote
-image URLs are rejected. Supplied token IDs contain one image placeholder per
+image URLs are rejected, and an image whose header exceeds Pillow's pixel limit
+(`2 * Image.MAX_IMAGE_PIXELS`) returns 413 `IMAGE_TOO_LARGE`. Supplied token IDs contain one image placeholder per
 uploaded image, in the same order; callers must not expand the placeholders.
 
 The distributed-tokenizer reads image headers, hashes the original file contents
@@ -214,7 +215,9 @@ terminal leg while reconciling other legs whose engine state remains uncertain.
 There is no generation retry, except resuming a D-leg that the Backend migrated
 (below). A consumed `ref` cannot be forwarded again; a 404
 cannot establish that no computation happened. Cancellation/partial submission
-closes both local upload/response resources and reports terminal states. Closing
+closes both local upload/response resources and reports terminal states. A caller
+that disconnects from `/forward_pd`, streaming or not, cancels the exchange: each
+leg without a terminal state is reported `cancelled`. Closing
 HTTP is not proof the GPU stopped or export pages were released: the Backend must
 call engine abort/reconcile as appropriate.
 
@@ -222,19 +225,28 @@ Only idempotent state callbacks are retried. Normal delivery uses two immediate
 attempts with a configured per-attempt timeout. A failed callback and subsequent
 events for that plan remain ordered in a service-owned in-memory outbox, even
 after the HTTP request has ended. Background retries use the same event IDs with
-exponential delays from 0.5 to 30 seconds. They never resend generation. The
+exponential delays from 0.5 to 30 seconds. They never resend generation. A
+non-claim event is dropped, logged once (`pd_callback_dropped`) and counted, and
+the next event of the plan is sent, when the Backend rejects it permanently
+(any 4xx other than 408 and 429, such as the 400 for an execution a restarted
+router no longer knows), or when an attempt fails 600 seconds or more after the
+event entered the outbox (connection errors, timeouts, 3xx, 408, 429 and 5xx).
+The Backend therefore receives each later deliverable event in order, but not a
+dropped one; it reconciles such a plan as it would after a lost callback. The
 initial `claimed` authorization is never deferred: without an immediate ACK,
 neither engine POST starts. Its `not_submitted` cleanup events can be deferred.
 
 `callback_outbox_max_plans` (default 1024) bounds the number of active plus
-undelivered plans. A slot is reserved before consuming the input or claiming a
+undelivered plans; a finished plan releases its slot once each of its events is
+accepted or dropped. A slot is reserved before consuming the input or claiming a
 plan, so concurrent completions cannot overflow the outbox. At capacity, new
 `/prepare` and `/forward_pd` calls return 503 `CALLBACK_BACKLOG`; a rejected forward
 retains its unconsumed input. Existing uploads, outputs and cleanup continue.
 No full input or load-accounting ledger is kept in this outbox.
 
 `/health.callback_outbox` reports reserved/active/pending plan and event counts.
-Failed attempts increment `callback_failures`; shutdown logs any unresolved
+Failed attempts increment `callback_failures`, dropped events
+`callback_dropped`; shutdown logs any unresolved
 counts without exposing input or callback credentials. The outbox lives in
 process memory. A distributed-tokenizer crash or an unreachable callback endpoint
 leaves claimed Backend reservations unknown, and restarting the

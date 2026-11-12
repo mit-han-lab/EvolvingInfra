@@ -567,6 +567,50 @@ def test_outbox_capacity_rejects_before_take_claim_or_engine_submission():
     asyncio.run(scenario())
 
 
+def test_permanently_rejected_callback_is_dropped_and_later_events_still_arrive():
+    async def scenario():
+        rejected = {}  # request_id -> the one event_id the Backend always rejects
+
+        async def backend(event):
+            # The Backend answers 400 for an execution it no longer knows (e.g. after
+            # a restart); here it rejects the first non-claim event of every plan.
+            if event["state"] != "claimed" and \
+                    rejected.setdefault(event["request_id"], event["event_id"]) == event["event_id"]:
+                return web.json_response({"error": "unknown execution"}, status=400)
+            return web.json_response({"accepted": True})
+
+        async with harness(callback=backend, outbox_max_plans=1) as (service, api, base, seen, events):
+            for rid in ("a", "b", "c"):  # One slot: each plan must release it.
+                info = (await api.post("/prepare", json=body(rid))).json()
+                assert (await api.post("/forward_pd", json=plan(info, base))).status_code == 200
+                await delivered(lambda: service.callback_outbox.summary()["reserved_plans"] == 0)
+            ids = [e["event_id"] for e in events if e["state"] != "claimed"]
+            assert len(ids) == len(set(ids)) == 3 * 4  # Each event is sent exactly once.
+            assert {e["state"] for e in events} >= {"uploaded", "completed"}
+            assert (await api.get("/health")).json()["callback_dropped"] == 3
+    asyncio.run(scenario())
+
+
+def test_transiently_failing_callback_is_given_up_after_the_retry_bound(monkeypatch):
+    from evolving_infra.router.frontend import delivery
+    monkeypatch.setattr(delivery, "RETRY_SECONDS", 0.2, raising=False)
+
+    async def scenario():
+        async def unavailable(event):
+            return web.json_response({}, status=200 if event["state"] == "claimed" else 503)
+
+        async with harness(callback=unavailable, outbox_max_plans=1) as (service, api, base, seen, events):
+            info = (await api.post("/prepare", json=body())).json()
+            assert (await api.post("/forward_pd", json=plan(info, base))).status_code == 200
+            assert service.callback_outbox.summary()["pending_events"] == 4
+            async with asyncio.timeout(5):
+                while service.callback_outbox.summary()["reserved_plans"]:
+                    await asyncio.sleep(0.01)
+            assert service.callback_dropped == 4
+            assert (await api.post("/prepare", json=body("next"))).status_code == 200
+    asyncio.run(scenario())
+
+
 def test_truncated_stream_is_not_reported_as_success():
     async def d(req, value):
         return web.Response(body=b'data: {"text":"incomplete"}\n\n',
@@ -804,6 +848,33 @@ def test_decode_migrated_before_its_first_token_resumes_with_the_same_input():
             assert out[0]["prompt_token_ids"] == list(range(19))
             assert [e["meta_info"]["completion_tokens"] for e in out] == [1, 6]
             assert out[-1]["meta_info"]["cached_tokens"] == 16
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(not HAS_IMAGE_LAYOUT, reason=NO_IMAGE_LAYOUT)
+def test_image_whose_header_exceeds_the_pixel_limit_is_rejected():
+    import base64
+    import struct
+    import zlib
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    # A 67-byte PNG whose header claims 20000x20000 pixels.
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 20000, 20000, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(b"\0\0\0\0")) + chunk(b"IEND", b""))
+    image_cfg = _engine.image_layout().image_config(dict(
+        vision_patch_size=14, vision_downsample_ratio=3, vision_max_n_token=384,
+        vision_min_pixels=147456, vision_max_wh_ratio=8), 100)
+
+    async def scenario():
+        async with harness(image_config=image_cfg, public_url="http://t") as (service, api, base, seen, events):
+            request = body()
+            request["input"] = {"input_ids": [11, 100, 12],
+                                "image_data": ["data:image/png;base64," + base64.b64encode(png).decode()]}
+            response = await api.post("/prepare", json=request)
+            assert response.status_code == 413, response.text
+            assert response.json()["error"]["code"] == "IMAGE_TOO_LARGE"
+            assert not service.store.entries
     asyncio.run(scenario())
 
 

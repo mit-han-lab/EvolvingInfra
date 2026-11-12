@@ -1,9 +1,9 @@
 # Sourced by the launch scripts in this directory. Sets:
-#   EVOLVING_INFRA_URL    the router (default http://localhost:30900; the first host of `evolving-infra serve`)
-#   EVOLVING_INFRA_MODEL  the served model name (default: the first model the router lists)
+#   EVOLVING_INFRA_URL    the agent gateway (default http://localhost:30800; the first host of `evolving-infra serve`)
+#   EVOLVING_INFRA_MODEL  the served model name (default: the first model the stack lists)
 #   TRANSLATOR_URL        the local Anthropic/Responses translator of translator.sh (default http://127.0.0.1:4000)
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EVOLVING_INFRA_URL="${EVOLVING_INFRA_URL:-http://localhost:30900}"
+EVOLVING_INFRA_URL="${EVOLVING_INFRA_URL:-http://localhost:30800}"
 EVOLVING_INFRA_URL="${EVOLVING_INFRA_URL%/}"
 TRANSLATOR_URL="${TRANSLATOR_URL:-http://127.0.0.1:${TRANSLATOR_PORT:-4000}}"
 if [[ -z "${EVOLVING_INFRA_MODEL:-}" ]]; then

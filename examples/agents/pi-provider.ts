@@ -1,9 +1,9 @@
-// Pi provider for an Evolving Infra router (OpenAI chat completions), loaded by pi.sh with `pi -e`.
-// The router and the model come from EVOLVING_INFRA_URL and EVOLVING_INFRA_MODEL.
+// Pi provider for the Evolving Infra agent gateway (OpenAI chat completions), loaded by pi.sh with
+// `pi -e`. The gateway and the model come from EVOLVING_INFRA_URL and EVOLVING_INFRA_MODEL.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-  const url = (process.env.EVOLVING_INFRA_URL ?? "http://localhost:30900").replace(/\/$/, "");
+  const url = (process.env.EVOLVING_INFRA_URL ?? "http://localhost:30800").replace(/\/$/, "");
   const model = process.env.EVOLVING_INFRA_MODEL ?? "glm-5.2";
   pi.registerProvider("evolving-infra", {
     name: "Evolving Infra",

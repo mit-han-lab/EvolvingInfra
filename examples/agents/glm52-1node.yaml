@@ -1,12 +1,8 @@
 # GLM-5.2 on one GB300 node for coding agents: glm52-1node.yaml plus the parsers that turn the
-# model's tool calls and reasoning into OpenAI `tool_calls` and `reasoning_content`, with late
-# decode choice off.
+# model's tool calls and reasoning into OpenAI `tool_calls` and `reasoning_content`.
 base: ../gb300/glm52-1node.yaml
 engine_args:
   - --tool-call-parser=glm47
   - --reasoning-parser=glm45
-  # Each request gets its decode worker at arrival (late decode choice off).
-  - --disaggregation-late-d=off
 router_args:
-  - --pd-late-decode=off
   - --chat-tools-tokenize        # place requests with tools on the engine's token ids
