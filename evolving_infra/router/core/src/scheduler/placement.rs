@@ -66,7 +66,7 @@
 //! `active_decode_reqs` (D-legs dispatched and not finished, as the SGLang
 //! Model Gateway counts load) as the load ([`DSelect::CacheFirst`]).
 //! [`PSelect::Score`] / [`DSelect::Score`] keep the literal formula.
-//! [`PSelect::CostFunction`] takes the one P that the runtime's TRADE cost
+//! [`PSelect::CostFunction`] takes the one P that the runtime's placement cost
 //! function reserved before the call (the runtime leaves no other prefill
 //! candidate). The chosen path is reported as the `p_reason` score term
 //! (`P_REASON_*`) and `d_select` (`D_SELECT_*`).
@@ -412,7 +412,7 @@ pub enum PSelect {
     /// `cache_threshold`, then least-loaded.
     #[default]
     CacheFirst,
-    /// The runtime's TRADE cost function (`--symmetric-pd-p-select
+    /// The runtime's placement cost function (`--symmetric-pd-p-select
     /// cost-function`) reserved one P before placement and left it as the
     /// only prefill candidate; the placement takes that P
     /// ([`P_REASON_COST_FUNCTION`]) and chooses the D-leg by `d_select`.
@@ -660,7 +660,7 @@ pub const P_REASON_IMBALANCE: f64 = 2.0;
 pub const P_REASON_MIN_LOAD: f64 = 3.0;
 /// P-leg pinned by `PlacementRequest::pin` (decision replay).
 pub const P_REASON_REPLAY: f64 = 4.0;
-/// P-leg reserved by the runtime's TRADE cost function ([`PSelect::CostFunction`]).
+/// P-leg reserved by the runtime's placement cost function ([`PSelect::CostFunction`]).
 pub const P_REASON_COST_FUNCTION: f64 = 6.0;
 pub const D_SELECT_SCORE: f64 = 0.0;
 pub const D_SELECT_ROUND_ROBIN: f64 = 1.0;
@@ -2035,7 +2035,7 @@ mod tests {
 
     #[test]
     /// Check the cost-function P selection takes the one prefill candidate that the runtime
-    /// left and reports the TRADE expected hit.
+    /// left and reports the cost-function expected hit.
     ///
     /// # Inputs
     /// No arguments; three P-role workers of which the runtime left only p1 prefill-capable (p1

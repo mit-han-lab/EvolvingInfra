@@ -30,11 +30,11 @@ pub async fn place(
     State(ctx): State<Arc<AppContext>>,
     body: Bytes,
 ) -> Result<Json<PlaceHttpResponse>, ApiError> {
-    let flex = ctx
+    let spd = ctx
         .symmetric_pd
         .as_ref()
         .ok_or(ApiError::SymmetricPdDisabled)?;
-    if flex.cost_function_enabled() {
+    if spd.cost_function_enabled() {
         // The cost ledger needs the dispatch and the end of each request;
         // this endpoint only places.
         return Err(ApiError::BadRequest(
@@ -47,6 +47,6 @@ pub async fn place(
         serde_json::from_slice(&body)
             .map_err(|e| ApiError::BadRequest(format!("invalid /symmetric_pd/place body: {e}")))?
     };
-    let resp = flex.place_http(req).await?;
+    let resp = spd.place_http(req).await?;
     Ok(Json(resp))
 }

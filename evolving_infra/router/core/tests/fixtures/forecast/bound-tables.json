@@ -1,6 +1,6 @@
 {
  "rfng": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -180,7 +180,7 @@
   }
  },
  "fresh": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -363,7 +363,7 @@
   }
  },
  "split": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -546,7 +546,7 @@
   }
  },
  "gpu": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -723,7 +723,7 @@
   }
  },
  "gpu+gpul": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -900,7 +900,7 @@
   }
  },
  "fresh+gpu": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -1089,7 +1089,7 @@
   }
  },
  "fresh+gpu+split": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -1278,7 +1278,7 @@
   }
  },
  "fresh+split": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -1467,7 +1467,7 @@
   }
  },
  "rfng+rq": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -1644,7 +1644,7 @@
   }
  },
  "rfng+rqall": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -1824,7 +1824,7 @@
   }
  },
  "rfng+rq20": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -2001,7 +2001,7 @@
   }
  },
  "rfng+rq50": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -2184,7 +2184,7 @@
   }
  },
  "rfng+rq100": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -2370,7 +2370,7 @@
   }
  },
  "fresh+split+rq": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -2559,7 +2559,7 @@
   }
  },
  "fresh+split+rq50": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -2748,7 +2748,7 @@
   }
  },
  "fresh+gpu+split+rq": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -2937,7 +2937,7 @@
   }
  },
  "rfng+rcal": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -3111,7 +3111,7 @@
   }
  },
  "rfng+rq+rcal": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -3285,7 +3285,7 @@
   }
  },
  "fresh+rq+rcal": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -3468,7 +3468,7 @@
   }
  },
  "fresh+split+rq+rcal": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -3657,7 +3657,7 @@
   }
  },
  "rfng+rq+rcal+null": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -3831,7 +3831,7 @@
   }
  },
  "rfng+rq+rcal+boot": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -4005,7 +4005,7 @@
   }
  },
  "rfng+rq+rcal+rx2": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -4179,7 +4179,7 @@
   }
  },
  "rfng+rq+rcalL": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -4356,7 +4356,7 @@
   }
  },
  "snap+prod": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -4530,7 +4530,7 @@
   }
  },
  "snap+prodL": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -4707,7 +4707,7 @@
   }
  },
  "push+prod": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -4884,7 +4884,7 @@
   }
  },
  "push+prodL": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -5064,7 +5064,7 @@
   }
  },
  "pushslow+prodL": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -5244,7 +5244,7 @@
   }
  },
  "push+gpu+prod": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -5424,7 +5424,7 @@
   }
  },
  "push+split+prodL": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -5610,7 +5610,7 @@
   }
  },
  "pushL+prodL": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -5793,7 +5793,7 @@
   }
  },
  "pushL+gpu+prod": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -5976,7 +5976,7 @@
   }
  },
  "pushL+gpu+split+prod": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -6165,7 +6165,7 @@
   }
  },
  "push+gpu+split+prod": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -6348,7 +6348,7 @@
   }
  },
  "fresh+prodL": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,
@@ -6531,7 +6531,7 @@
   }
  },
  "fresh+gpu+split+prod": {
-  "schema": "router-e3-bound.v2",
+  "schema": "forecast-error-bound.v2",
   "scheme": "idle",
   "min_bound_s": 0.0,
   "min_n": 50,

@@ -5,7 +5,7 @@
 //!
 //! A bound table gives, per bucket (`idle` | `busy` in the shipped scheme)
 //! and level (`"0.8"`, `"0.9"`), a continuous, non-decreasing curve
-//! `b(pred)`. The tables are fitted offline (`router_e3_bounds.py`) and
+//! `b(pred)`. The tables are fitted offline (`router_forecast_bounds.py`) and
 //! shipped in `bound-params.json` with the level of each deploy mode and
 //! `g_min_s`. Table v1 (r3, `pred_edges_s`) is not ported: it is not
 //! monotone and must not be deployed; a v1 table does not parse.
@@ -14,9 +14,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::forecast::Output;
+use super::model::Output;
 use super::numeric::py_max;
-use super::E3Error;
+use super::ForecastError;
 
 /// Bucket scheme of a bound table (the shipped scheme is `idle`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,7 +72,7 @@ pub struct BoundCurve {
     pub n: Option<Vec<u64>>,
 }
 
-/// A bound table v2 (schema `router-e3-bound.v2`). Fields of the fit report
+/// A bound table v2 (schema `forecast-error-bound.v2`). Fields of the fit report
 /// that the bound does not use (`min_n`, `init_edges_s`, `n_fit`) are
 /// ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -152,21 +152,21 @@ pub fn error_bound(
     view: &BucketView,
     table: &BoundTable,
     level: &str,
-) -> Result<Option<f64>, E3Error> {
+) -> Result<Option<f64>, ForecastError> {
     let Some(p) = view.pred_s else {
         return Ok(None);
     };
     let curves = table
         .levels
         .get(level)
-        .ok_or_else(|| E3Error::Bound(format!("no level {level}")))?;
+        .ok_or_else(|| ForecastError::Bound(format!("no level {level}")))?;
     let bucket = bucket_of(view, table.scheme);
     let curve = curves
         .get(bucket)
         .or_else(|| curves.get("all"))
-        .ok_or_else(|| E3Error::Bound(format!("level {level}: no curve {bucket} or all")))?;
+        .ok_or_else(|| ForecastError::Bound(format!("level {level}: no curve {bucket} or all")))?;
     let b = bound_curve(&curve.knots_s, &curve.b_s, p)
-        .ok_or_else(|| E3Error::Bound(format!("level {level}: bad curve {bucket}")))?;
+        .ok_or_else(|| ForecastError::Bound(format!("level {level}: bad curve {bucket}")))?;
     Ok(Some(py_max(table.min_bound_s.unwrap_or(0.0), b)))
 }
 
@@ -189,11 +189,11 @@ pub struct BoundModeParams {
     pub table: BoundTable,
 }
 
-/// `bound-params.json` (schema `router-e3-bound-params.v2`): the shipped
+/// `bound-params.json` (schema `forecast-error-table.v2`): the shipped
 /// tables of the deploy modes, their levels and `g_min_s`. The held-out
 /// statistics of the file are not parsed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BoundParams {
+pub struct ErrorTable {
     pub schema: String,
     /// sha256 of the `bound-tables.json` the tables were copied from.
     pub bound_tables_sha256: String,
@@ -204,13 +204,13 @@ pub struct BoundParams {
     pub modes: BTreeMap<String, BoundModeParams>,
 }
 
-impl BoundParams {
+impl ErrorTable {
     /// Bound of a forecast in `mode` at the mode's shipped level.
-    pub fn bound(&self, mode: &str, view: &BucketView) -> Result<Option<f64>, E3Error> {
+    pub fn bound(&self, mode: &str, view: &BucketView) -> Result<Option<f64>, ForecastError> {
         let m = self
             .modes
             .get(mode)
-            .ok_or_else(|| E3Error::Bound(format!("no deploy mode {mode}")))?;
+            .ok_or_else(|| ForecastError::Bound(format!("no deploy mode {mode}")))?;
         error_bound(view, &m.table, &m.level)
     }
 }
@@ -221,7 +221,7 @@ mod tests {
 
     fn table() -> BoundTable {
         serde_json::from_value(serde_json::json!({
-            "schema": "router-e3-bound.v2", "scheme": "idle", "min_bound_s": 0.0,
+            "schema": "forecast-error-bound.v2", "scheme": "idle", "min_bound_s": 0.0,
             "levels": {"0.8": {"busy": {"knots_s": [0.2, 1.0, 4.0], "b_s": [0.3, 0.5, 1.0]},
                                "all": {"knots_s": [1.0], "b_s": [0.4]}}}}))
         .unwrap()

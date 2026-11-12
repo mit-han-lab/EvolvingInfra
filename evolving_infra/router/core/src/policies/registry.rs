@@ -380,7 +380,7 @@ pub fn select_decode_po2(candidates: &[Arc<Worker>]) -> Option<Arc<Worker>> {
 /// Per-request round-robin decode selection: advance a process-wide
 /// cursor and take `cursor % healthy.len()` — the same healthy-subset +
 /// atomic-counter semantics as sgl-model-gateway's `round_robin` policy,
-/// so a co_schedule deployment on this router and a baseline on the
+/// so a cost function deployment on this router and a baseline on the
 /// gateway share decode behavior.
 ///
 /// Same last-resort contract as the other selectors: when every breaker

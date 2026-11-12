@@ -435,20 +435,20 @@ async fn register_one(
     // is a Symmetric participant with the configured weights and side-channel
     // base port, whatever discovery or an older `/server_info` said. Its
     // capabilities/weights/endpoints are applied after registration.
-    let flex_spec = cfg
+    let spd_spec = cfg
         .as_ref()
         .and_then(|c| c.model.symmetric_pd.as_ref())
         .and_then(|f| f.worker_spec_for(&worker_url))
         .cloned();
-    if let Some(fs) = &flex_spec {
+    if let Some(fs) = &spd_spec {
         spec.mode = WorkerMode::Symmetric;
         if fs.bootstrap_port.is_some() {
             spec.bootstrap_port = fs.bootstrap_port;
         }
     }
-    let flex_info = if spec.mode == WorkerMode::Symmetric {
+    let spd_info = if spec.mode == WorkerMode::Symmetric {
         let mut fi = crate::workers::SymmetricPdWorkerInfo::default();
-        if let Some(fs) = &flex_spec {
+        if let Some(fs) = &spd_spec {
             fi.capabilities = fs.capabilities();
             fi.weight = fs.weight();
         }
@@ -540,7 +540,7 @@ async fn register_one(
             w.set_late_d(info.late_d.clone());
         }
     }
-    if let Some(fi) = flex_info {
+    if let Some(fi) = spd_info {
         if let Some(w) = registry.get(&worker_id) {
             tracing::info!(
                 worker_url = %worker_url,

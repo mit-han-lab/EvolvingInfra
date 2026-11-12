@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! The E3 forecast: inputs, parameters, the pass
+//! The forecast: inputs, parameters, the pass
 //! simulator and the park-gate choice.
 //!
 //! All times are seconds on one monotonic clock (in the router: the router
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::numeric::{ceil_page, py_max, py_min, py_sum};
 use super::{
-    E3Error, CHUNK_TOKENS, DISPATCH_S, GRAPH_TOKENS, MAX_PASSES, NO_MODEL_GPU_S, PAGE_TOKENS,
+    ForecastError, CHUNK_TOKENS, DISPATCH_S, GRAPH_TOKENS, MAX_PASSES, NO_MODEL_GPU_S, PAGE_TOKENS,
     P_AFTER, SCHEMA,
 };
 
@@ -199,7 +199,7 @@ pub struct Params {
     pub arrivals: Option<Arrivals>,
     /// Result of a target whose last pass leaves no known work on a busy P.
     /// Off (the reference): the bare result lag `lag_none_s`. On
-    /// (`--trade-e3-next-pass-lag`, fitted on Kimi-K2.6): the
+    /// (`--forecast-next-pass-lag`, fitted on Kimi-K2.6): the
     /// expected arrivals form the next pass, and the target's result is
     /// processed after that pass launches (`lag_next`), as on an engine that
     /// processes a pass's results after launching the next one.
@@ -238,12 +238,14 @@ impl Params {
 
     /// Parameters for which the reference raises an exception: a page size
     /// below 1 (division by zero) and fewer than 6 launch coefficients.
-    pub fn check(&self) -> Result<(), E3Error> {
+    pub fn check(&self) -> Result<(), ForecastError> {
         if self.page() < 1 {
-            return Err(E3Error::Params("page_tokens must be at least 1"));
+            return Err(ForecastError::Params("page_tokens must be at least 1"));
         }
         if self.launch_coef.len() < 6 {
-            return Err(E3Error::Params("launch_coef needs at least 6 coefficients"));
+            return Err(ForecastError::Params(
+                "launch_coef needs at least 6 coefficients",
+            ));
         }
         Ok(())
     }
@@ -258,7 +260,7 @@ pub enum ForecastPath {
     After,
 }
 
-/// Forecast output (schema `router-e3.v2`).
+/// Forecast output (schema `forecast.v2`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Output {
     pub schema: String,
@@ -346,12 +348,12 @@ pub fn receipt_delays(params: &Params, n_input: i64) -> (f64, f64) {
 /// Time at which a queue row can join a pass, before the loop-top cut
 /// : dispatched rows `decision_time + rxd(input) + boot_s`;
 /// snapshot rows their `ready` (None = ready at or before `t0`).
-pub fn row_ready(row: &QueueRow, params: &Params) -> Result<Option<f64>, E3Error> {
+pub fn row_ready(row: &QueueRow, params: &Params) -> Result<Option<f64>, ForecastError> {
     match row.source {
         RowSource::Dispatched => {
-            let decision_time = row
-                .decision_time
-                .ok_or(E3Error::Input("dispatched queue row without decision_time"))?;
+            let decision_time = row.decision_time.ok_or(ForecastError::Input(
+                "dispatched queue row without decision_time",
+            ))?;
             let rxd = match &params.rx {
                 Some(rx) => py_max(0.0, rx.a + rx.b * row.input as f64),
                 None => params.dispatch(),
@@ -558,7 +560,7 @@ pub fn simulate(
         if eligible.is_empty() {
             // Nothing can join the busy launch: the pass forms after an idle
             // wait. `busy_launch` keeps its value (launch load, expected
-            // start), as in the E3 scripts.
+            // start), as in the forecast scripts.
             idle_formed = true;
             let nxt = min_arrival(&work)?; // the reference raises on empty work
             launch = py_max(nxt, pe.unwrap_or(f64::NEG_INFINITY)) + idle_delay;
@@ -758,7 +760,7 @@ fn finish(out: &mut Output, comp: Option<f64>, trace: &Trace, d: f64) {
 /// queue rows at `t0` (`U > 0` and `U + prefix + remaining > cap_tokens`),
 /// one without them (`F_after`); the forecast is `F_after` when the target
 /// is not held and `F_after / (F_after + F_full) <= p_after`, else `F_full`.
-pub fn forecast(inp: &Input, params: &Params) -> Result<Output, E3Error> {
+pub fn forecast(inp: &Input, params: &Params) -> Result<Output, ForecastError> {
     params.check()?;
     let (d, t0) = (inp.d, inp.t0);
     let (phi, boot) = (params.phi_s, params.boot_s);
@@ -937,7 +939,7 @@ mod tests {
         }
     }
 
-    /// The parameters of the reference self-test (`router_e3._selftest`).
+    /// The parameters of the reference self-test (`router_forecast._selftest`).
     fn params() -> Params {
         Params {
             schema: Some(SCHEMA.to_string()),
@@ -1328,8 +1330,8 @@ mod tests {
         );
     }
 
-    /// `next_pass_lag` (the Kimi-K2.6 fix of the E3 result lag) against the
-    /// reference router_e3.py patched with the same fix, bit for bit. Busy P:
+    /// `next_pass_lag` (the Kimi-K2.6 fix of the forecast result lag) against the
+    /// reference router_forecast.py patched with the same fix, bit for bit. Busy P:
     /// one in-flight pass, the target (1,000 tokens) alone in the queue.
     #[test]
     fn next_pass_lag_prices_the_pass_of_the_expected_arrivals() {

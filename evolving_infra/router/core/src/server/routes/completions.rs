@@ -169,7 +169,7 @@ async fn dispatch(
 
     // Parse the body when anything downstream wants to look inside it:
     // token-aware routing, the kv-pull-hint query (token ids + cache_salt),
-    // co-scheduling (hits + backlog need the ids), or PD bootstrap
+    // symmetric P/D placement (hits + backlog need the ids), or PD bootstrap
     // injection. Load-only plain-mode deployments skip the parse entirely,
     // mirroring the chat route.
     let want_value = headers.contains_key(crate::agent_identity::CONTEXT_HEADER)
@@ -320,26 +320,26 @@ async fn dispatch(
         .with_request_tokens(prompt_ids.as_deref())
         .with_external_prefix(external_prefix.as_ref())
         .with_cache_salt(route_cache_salt);
-    // Worker selection: co-schedule admission (router-side queue + backlog
-    // cap + co-decided pull) when configured, `Policy::select` otherwise.
-    // The co-scheduler may HOLD the request here until capacity frees or
-    // its starvation guard fires.
-    let mut flex_decision: Option<crate::scheduler::Decision> = None;
+    // Worker selection: symmetric_pd admission (router-side queue, backlog
+    // cap and the pull decided with the placement) when configured,
+    // `Policy::select` otherwise. The admission may HOLD the request here
+    // until capacity frees or its starvation guard fires.
+    let mut spd_decision: Option<crate::scheduler::Decision> = None;
     let mut pd_replay_decode: Option<Arc<Worker>> = None;
     // A policy's per-request note (`--policy gateway_cache_aware`), logged
     // with the rid below.
     let mut policy_note: Option<serde_json::Value> = None;
-    let worker = if let Some(flex) = ctx.symmetric_pd.as_ref() {
+    let worker = if let Some(spd) = ctx.symmetric_pd.as_ref() {
         // symmetric_pd placement: the token-id prompt IS the prompt length and
         // the indexer key (the text-prompt fallback estimates from bytes).
-        let prompt_len = flex_prompt_len(
+        let prompt_len = spd_prompt_len(
             request_value.as_ref(),
             prompt_ids.as_deref(),
             &body,
-            flex.cost_function_enabled(),
+            spd.cost_function_enabled(),
         );
         let (session_id, turn) = extract_session(request_value.as_ref());
-        let d = flex
+        let d = spd
             .admit(crate::scheduler::PlaceInput {
                 tokens: prompt_ids.clone(),
                 hashes: None,
@@ -349,26 +349,26 @@ async fn dispatch(
                 session_id,
                 turn,
                 rid: extract_rid(request_value.as_ref()),
-                routing_key: replay_routing_key(flex.replay_header(), &headers),
+                routing_key: replay_routing_key(spd.replay_header(), &headers),
                 ingress_ms: start.elapsed().as_secs_f64() * 1e3,
                 // The cost function's copy price auto (N_active) and
                 // the session-move trace.
-                trade_session: if flex.cost_function_wants_session() {
-                    crate::agent_identity::trade_session_key(&headers)
+                placement_session: if spd.cost_function_wants_session() {
+                    crate::agent_identity::placement_session_key(&headers)
                 } else {
                     None
                 },
-                // The cost function's wait e3: the session key of the
+                // The cost function's wait forecast: the session key of the
                 // target host rule.
-                e3_session: if flex.cost_function_wants_e3_session() {
-                    crate::trade_e3::session_key(&headers, kv_session_identity.as_ref())
+                forecast_session: if spd.cost_function_wants_forecast_session() {
+                    crate::prefill_forecast::session_key(&headers, kv_session_identity.as_ref())
                 } else {
                     None
                 },
             })
             .await?;
         let w = Arc::clone(&d.p_worker);
-        flex_decision = Some(d);
+        spd_decision = Some(d);
         w
     } else {
         let pinned = ctx.pd_replay.as_ref().and_then(|replay| {
@@ -426,8 +426,8 @@ async fn dispatch(
     // Late D choose: the decode is chosen when the prefill binds; this is
     // the arrival pick (and the candidates) instead.
     let mut late_choose: Option<super::late_d::Choose> = None;
-    let mut pending_flex_reservation = flex_decision.as_ref().map(|d| d.ledger.pending_guard());
-    let decode_peer: Option<Arc<Worker>> = if let Some(d) = flex_decision.as_ref() {
+    let mut pending_spd_reservation = spd_decision.as_ref().map(|d| d.ledger.pending_guard());
+    let decode_peer: Option<Arc<Worker>> = if let Some(d) = spd_decision.as_ref() {
         (!d.is_local()).then(|| Arc::clone(&d.d_worker))
     } else if let Some(d) = pd_replay_decode.take() {
         (decode_charge, decode_token_log) =
@@ -454,17 +454,17 @@ async fn dispatch(
     };
     // Late D choose on symmetric workers (symmetric_pd Split): the candidates
     // and the marks; the placement's D is the arrival pick.
-    let mut flex_late: Option<super::late_d::FlexLate> = None;
-    if let (Some(late), Some(d), Some(flex)) = (
+    let mut spd_late: Option<super::late_d::SymmetricLate> = None;
+    if let (Some(late), Some(d), Some(spd)) = (
         ctx.late_bind
             .as_ref()
             .filter(|l| ingress.late_d_choose() && l.symmetric()),
-        flex_decision.as_ref(),
+        spd_decision.as_ref(),
         ctx.symmetric_pd.as_ref(),
     ) {
-        if let Some((choose, marks)) = super::late_d::flex_pick(late, flex, d)? {
+        if let Some((choose, marks)) = super::late_d::spd_pick(late, spd, d)? {
             late_choose = Some(choose);
-            flex_late = Some(marks);
+            spd_late = Some(marks);
         }
     }
     let mut request_headers = headers;
@@ -478,7 +478,7 @@ async fn dispatch(
     let plain_usage = match (usage_asked, ctx.external_workload.as_ref()) {
         (Some(_), Some(workload)) => Some(crate::backend::plain_usage::PlainUsage::new(
             Arc::clone(workload),
-            flex_decision
+            spd_decision
                 .as_ref()
                 .map_or(0, |d| d.prompt_len.saturating_sub(d.ledger.tokens())),
         )),
@@ -504,7 +504,7 @@ async fn dispatch(
     };
 
     // symmetric_pd Splits carry marks, never the bootstrap fields.
-    let bootstrap = if flex_decision.is_some() {
+    let bootstrap = if spd_decision.is_some() {
         None
     } else {
         decode_peer.as_ref().map(|_| BootstrapFields {
@@ -514,11 +514,11 @@ async fn dispatch(
         })
     };
 
-    let admission_queue_wait_ms = flex_decision.as_ref().map_or(0, |d| d.queue_wait_ms);
-    let admission_branch = flex_decision.as_ref().map_or("policy", |d| d.branch());
+    let admission_queue_wait_ms = spd_decision.as_ref().map_or(0, |d| d.queue_wait_ms);
+    let admission_branch = spd_decision.as_ref().map_or("policy", |d| d.branch());
 
-    // kv-p2p pull hint. Co-scheduled requests already carry their co-decided
-    // hint (one indexer answer drove BOTH the routing and the pull — they can
+    // kv-p2p pull hint. symmetric_pd requests already carry the hint decided
+    // with the placement (one indexer answer drove BOTH the routing and the pull — they can
     // never disagree about the owner); otherwise same post-selection
     // semantics as the chat route: fail-open, and in PD mode the hint rides
     // on the PREFILL request only.
@@ -526,13 +526,13 @@ async fn dispatch(
         Option<serde_json::Value>,
         Option<AdmissionLedger>,
         Option<_>,
-    ) = if let Some(d) = flex_decision.as_mut() {
+    ) = if let Some(d) = spd_decision.as_mut() {
         // symmetric_pd: the hint (if any) was decided at admit from the placement
         // indexer reply and rides on the P-leg body only. With the
         // cost function the P-leg task owns the cost reservation.
         (
             d.pull_hint.clone(),
-            Some(AdmissionLedger::Flex(d.ledger.clone())),
+            Some(AdmissionLedger::Symmetric(d.ledger.clone())),
             d.cost_reservation.take(),
         )
     } else {
@@ -559,31 +559,31 @@ async fn dispatch(
     // symmetric_pd session retention. Late D: the P registers alone and its tag
     // rides on the P-leg body only; the admitted decode gets it in the
     // ADMIT frame.
-    let mut flex_late_session: Option<Arc<super::late_d::FlexLateSession>> = None;
-    if let Some(flex) = &ctx.symmetric_pd {
-        if flex_late.is_some() {
+    let mut spd_late_session: Option<Arc<super::late_d::SymmetricLateSession>> = None;
+    if let Some(spd) = &ctx.symmetric_pd {
+        if spd_late.is_some() {
             if let (Some(sessions), Some(tag)) = (
-                flex.kv_sessions(),
+                spd.kv_sessions(),
                 crate::backend::sglang::request::late_kv_session(
-                    flex.kv_sessions().map(Arc::as_ref),
+                    spd.kv_sessions().map(Arc::as_ref),
                     &headers,
                     &worker.url,
                     request_value.as_ref(),
                 )?,
             ) {
-                flex_late_session = Some(Arc::new(super::late_d::FlexLateSession {
+                spd_late_session = Some(Arc::new(super::late_d::SymmetricLateSession {
                     sessions: Arc::clone(sessions),
                     tag,
                 }));
             }
         } else {
-            let d_url = flex_decision
+            let d_url = spd_decision
                 .as_ref()
                 .map(|d| d.d_worker.url.as_str())
                 .or_else(|| decode_peer.as_ref().map(|d| d.url.as_str()))
                 .unwrap_or(&worker.url);
             crate::backend::sglang::request::attach_kv_session(
-                flex.kv_sessions().map(Arc::as_ref),
+                spd.kv_sessions().map(Arc::as_ref),
                 &headers,
                 &worker.url,
                 d_url,
@@ -609,7 +609,7 @@ async fn dispatch(
         _ => None,
     };
     // The late-D key: the bootstrap room (PD) or the transfer id (symmetric_pd).
-    let late_key = flex_late
+    let late_key = spd_late
         .as_ref()
         .map(|f| f.transfer_id)
         .or_else(|| bootstrap.as_ref().map(|b| b.room));
@@ -630,9 +630,9 @@ async fn dispatch(
             .unwrap_or(""),
         policy: ctx.config.model.policy,
         prefill_worker: &worker.url,
-        decode_worker: flex_decision
+        decode_worker: spd_decision
             .as_ref()
-            .filter(|_| flex_late.is_none())
+            .filter(|_| spd_late.is_none())
             .map(|d| d.d_worker.url.as_str())
             .or_else(|| {
                 decode_peer
@@ -645,7 +645,7 @@ async fn dispatch(
         branch: admission_branch,
         ingress_to_dispatch_ms: start.elapsed().as_millis() as u64,
         owner_hint: kv_pull_hint.as_ref(),
-        flex: flex_decision.as_ref(),
+        spd: spd_decision.as_ref(),
         decode_tokens: decode_token_log.as_ref(),
         late_d: late_log.as_ref(),
     });
@@ -660,7 +660,7 @@ async fn dispatch(
     }
 
     // First streamed byte = the decode (or plain worker) started producing,
-    // which implies this request's prefill work is done — the co-schedule
+    // which implies this request's prefill work is done — the cost-function
     // ledger entry stops counting toward the worker's backlog then. The
     // factory hands each dispatch path its own clone (retire is idempotent;
     // a clone that never fires is subsumed by the next /v1/loads poll).
@@ -699,7 +699,7 @@ async fn dispatch(
     // `--late-d-image-source-url` (symmetric_pd late D): this request's images in
     // the router's store while its D-legs go without pixels.
     let mut late_image_hold: Option<crate::image_source::Hold> = None;
-    let late_bodies = match (late_choose.as_ref(), bootstrap.as_ref(), flex_late.as_ref()) {
+    let late_bodies = match (late_choose.as_ref(), bootstrap.as_ref(), spd_late.as_ref()) {
         (Some(choose), Some(b), _) => Some(super::late_d::build_bodies(
             &body,
             request_value.take(),
@@ -711,7 +711,7 @@ async fn dispatch(
         // symmetric_pd: the candidate marks, the symmetric `late_d`, the pull
         // hint and the session tag on the P-leg; one `kv_import` per D-leg.
         (Some(choose), None, Some(marks)) => {
-            let tag = flex_late_session
+            let tag = spd_late_session
                 .as_ref()
                 .map(|s| serde_json::to_value(&s.tag))
                 .transpose()
@@ -725,7 +725,7 @@ async fn dispatch(
                 (Some(url), Some(h)) => Some(crate::image_source::source_value(url, h.token())),
                 _ => None,
             };
-            let (prefill_body, legs, stripped) = super::late_d::build_flex_bodies(
+            let (prefill_body, legs, stripped) = super::late_d::build_spd_bodies(
                 &body,
                 request_value.take(),
                 choose,
@@ -751,7 +751,7 @@ async fn dispatch(
     let (outgoing_body, executing_body) = if late_bodies.is_some() {
         // Late D choose (PD or symmetric_pd): built above.
         (Bytes::new(), Bytes::new())
-    } else if let Some(d) = flex_decision.as_ref() {
+    } else if let Some(d) = spd_decision.as_ref() {
         let (p_body, d_body) = crate::scheduler::build_leg_bodies(
             &body,
             request_value,
@@ -783,7 +783,7 @@ async fn dispatch(
     // carries the token prompt packed.
     let outgoing_body = if ctx.config.proxy.late_decode.packed_prompt
         && late_bodies.is_none()
-        && flex_decision.is_none()
+        && spd_decision.is_none()
         && bootstrap.is_some()
     {
         super::late_d::pack_decode_body(outgoing_body)
@@ -793,14 +793,14 @@ async fn dispatch(
 
     // Body construction and validation above have not submitted anything.
     // From here P may execute independently of the client's connection.
-    if let Some(pending) = pending_flex_reservation.as_mut() {
+    if let Some(pending) = pending_spd_reservation.as_mut() {
         pending.mark_dispatched();
     }
     let result = if let (Some(choose), Some((prefill_body, legs))) = (late_choose, late_bodies) {
         super::late_d::dispatch(
             &ctx,
             super::late_d::ChooseDispatch {
-                session: flex_late_session.map(|s| s as Arc<dyn crate::late_bind::LateSessionHook>),
+                session: spd_late_session.map(|s| s as Arc<dyn crate::late_bind::LateSessionHook>),
                 choose,
                 prefill: Arc::clone(&worker),
                 prefill_holds: Box::new((guard, active_guard)),
@@ -908,7 +908,7 @@ async fn dispatch(
         let (smg_load, smg_arm) = ctx.decode_smg_load(&decode_worker.url, streaming);
         // symmetric_pd: the D-leg's place in its worker's in-flight count
         // lasts as long as the leg (the stream, when streaming).
-        let d_reservation = flex_decision.as_mut().and_then(|d| d.d_reservation.take());
+        let d_reservation = spd_decision.as_mut().and_then(|d| d.d_reservation.take());
         let decode_guard = (
             decode_worker.load_guard(),
             decode_charge.take(),
@@ -988,7 +988,7 @@ async fn dispatch(
             _ = stale_token.cancelled() => Err(ApiError::StaleRequestExpired { model: model_str }),
         };
         // Non-streaming plain: the full generation is done here — retire
-        // the co-schedule ledger entry (later than "prefill done", but the
+        // the cost-function ledger entry (later than "prefill done", but the
         // only completion signal this path has; the poller subsumes it
         // within a poll interval regardless).
         if let Some(l) = co_ledger.take() {
@@ -1059,10 +1059,10 @@ pub(crate) fn replay_routing_key(header: Option<&str>, headers: &HeaderMap) -> O
 ///
 /// # Outputs
 /// The token-id count when there are ids. Without ids, the cost function
-/// uses the estimate of the co_schedule TRADE path (the whole body's bytes /
-/// 4), so both TRADE paths reserve the same backlog for the same request.
+/// uses the estimate of the cost function cost-function path (the whole body's bytes /
+/// 4), so both cost-function paths reserve the same backlog for the same request.
 /// The other P selections estimate from the prompt or message text.
-pub(crate) fn flex_prompt_len(
+pub(crate) fn spd_prompt_len(
     value: Option<&serde_json::Value>,
     ids: Option<&[u32]>,
     body: &Bytes,
@@ -1152,24 +1152,24 @@ mod tests {
         assert_eq!(prompt_token_ids(&json!({"other": 1})), None);
     }
 
-    /// A text prompt: the cost function takes the co_schedule TRADE
+    /// A text prompt: the cost function takes the cost function cost-function
     /// estimate (body bytes / 4); the other P selections keep the prompt
     /// text estimate. Token ids: the id count in both cases.
     #[test]
-    fn flex_prompt_len_uses_the_trade_estimate_for_the_cost_function() {
+    fn spd_prompt_len_uses_the_cost_estimate_for_the_cost_function() {
         let v = json!({"model": "m", "prompt": "abcdefgh".repeat(100), "max_tokens": 4});
         let body = Bytes::from(serde_json::to_vec(&v).unwrap());
-        let trade = estimate_prefill_tokens(&body) as u64;
+        let cost_params = estimate_prefill_tokens(&body) as u64;
         assert!(
-            trade > 200,
+            cost_params > 200,
             "the body estimate must differ from the text estimate"
         );
-        assert_eq!(flex_prompt_len(Some(&v), None, &body, true), trade);
-        assert_eq!(flex_prompt_len(Some(&v), None, &body, false), 200);
+        assert_eq!(spd_prompt_len(Some(&v), None, &body, true), cost_params);
+        assert_eq!(spd_prompt_len(Some(&v), None, &body, false), 200);
         let tv = json!({"prompt": [1, 2, 3]});
         let tbody = Bytes::from(serde_json::to_vec(&tv).unwrap());
         let ids = [1_u32, 2, 3];
-        assert_eq!(flex_prompt_len(Some(&tv), Some(&ids), &tbody, true), 3);
-        assert_eq!(flex_prompt_len(Some(&tv), Some(&ids), &tbody, false), 3);
+        assert_eq!(spd_prompt_len(Some(&tv), Some(&ids), &tbody, true), 3);
+        assert_eq!(spd_prompt_len(Some(&tv), Some(&ids), &tbody, false), 3);
     }
 }

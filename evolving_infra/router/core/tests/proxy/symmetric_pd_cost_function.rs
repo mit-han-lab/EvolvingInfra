@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `--symmetric-pd-p-select cost-function` end to end over mock symmetric
-//! engines: the TRADE cost model of the co-schedule policy picks the P-leg
+//! engines: the placement cost function of the cost-function policy picks the P-leg
 //! among the P-role workers and decides its pull (the P-leg's
 //! `kv_pull_hint`); the D-leg follows the symmetric_pd D selection and never
 //! carries the hint.
 //!
-//! These are the co-schedule TRADE proxy tests of `kv_hint_injection.rs` on
+//! These are the cost-function cost-function proxy tests of `kv_hint_injection.rs` on
 //! symmetric_pd, with the same prompts, indexer replies, expected costs and
 //! choices. Every cost-trace row also carries
 //! `"policy": "symmetric_pd_cost_function"`.
@@ -20,15 +20,15 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sgl_router::config::{
-    ActiveLoadConfig, Config, DiscoveryBackend, ModelConfig, ObservabilityConfig, PdDecodePolicy,
-    PolicyKind, ProxyConfig, ServerConfig, StaticUrlsDiscoveryConfig, SymmetricPdConfig,
-    SymmetricPdCostFunctionConfig, SymmetricPdGwqAutoConfig,
+    ActiveLoadConfig, Config, DiscoveryBackend, GlobalQueueConfig, ModelConfig,
+    ObservabilityConfig, PdDecodePolicy, PolicyKind, ProxyConfig, ServerConfig,
+    StaticUrlsDiscoveryConfig, SymmetricPdConfig, SymmetricPdCostFunctionConfig,
 };
 use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
 use sgl_router::kv_hint::{KvHintConfig, KvWorkerMapEntry};
 use sgl_router::policies::factory::build_registry_with_defaults;
 use sgl_router::proxy::Proxy;
-use sgl_router::scheduler::trade::TradeParams;
+use sgl_router::scheduler::placement_cost::PlacementCostParams;
 use sgl_router::scheduler::{PSelect, RoleWeight};
 use sgl_router::server::app::build_router;
 use sgl_router::server::app_context::AppContext;
@@ -193,19 +193,19 @@ struct Fixture {
 }
 
 /// `--policy symmetric_pd --symmetric-pd-force-split --symmetric-pd-pull-hint
-/// --symmetric-pd-p-select cost-function` with `trade` (load poll 10 ms) over
+/// --symmetric-pd-p-select cost-function` with the cost function (progress poll 10 ms) over
 /// `n_p` P-role engines and one D-role engine. `gate` is the injector's
 /// `min_incremental_tokens`; `reply` is the first indexer reply. The unknown
 /// expiry is 60 s and the upstream request timeout 5 s.
-async fn fixture(n_p: usize, trade: TradeParams, gate: u32, reply: Value) -> Fixture {
-    fixture_with(n_p, trade, gate, reply, 60, Duration::from_secs(5)).await
+async fn fixture(n_p: usize, cost_params: PlacementCostParams, gate: u32, reply: Value) -> Fixture {
+    fixture_with(n_p, cost_params, gate, reply, 60, Duration::from_secs(5)).await
 }
 
 /// [`fixture`] with the unknown expiry `unknown_expire_secs` and the
 /// upstream request timeout `timeout`.
 async fn fixture_with(
     n_p: usize,
-    trade: TradeParams,
+    cost_params: PlacementCostParams,
     gate: u32,
     reply: Value,
     unknown_expire_secs: u64,
@@ -214,7 +214,7 @@ async fn fixture_with(
     let extra = (None, false);
     fixture_full(
         n_p,
-        trade,
+        cost_params,
         gate,
         reply,
         unknown_expire_secs,
@@ -225,7 +225,7 @@ async fn fixture_with(
     .await
 }
 
-/// [`fixture_with`] with `extra` = (`--symmetric-pd-gwq-auto` settings,
+/// [`fixture_with`] with `extra` = (`--global-queue` settings,
 /// `--symmetric-pd-trace-session-moves`) and `any_holder`: `Some(flag)` also maps
 /// the D-role engine in `--kv-worker-map` (indexer id `n_p + 1`, servicer
 /// `d1:18100`), as a dynamic-role deployment maps every worker, plus a worker that
@@ -236,12 +236,12 @@ async fn fixture_with(
 #[allow(clippy::too_many_arguments)]
 async fn fixture_full(
     n_p: usize,
-    trade: TradeParams,
+    cost_params: PlacementCostParams,
     gate: u32,
     reply: Value,
     unknown_expire_secs: u64,
     timeout: Duration,
-    extra: (Option<SymmetricPdGwqAutoConfig>, bool),
+    extra: (Option<GlobalQueueConfig>, bool),
     any_holder: Option<bool>,
 ) -> Fixture {
     let mut ps = Vec::new();
@@ -279,23 +279,23 @@ async fn fixture_full(
             servicer: "ghost:18100".into(),
         });
     }
-    let mut flex = SymmetricPdConfig {
+    let mut spd = SymmetricPdConfig {
         max_queue_wait_ms: 0,
         pull_hint: true,
         cost_function: Some(SymmetricPdCostFunctionConfig {
-            trade,
-            cost_trace: Some(trace.clone()),
+            cost_params,
+            placement_trace: Some(trace.clone()),
             load_poll_ms: 10,
             unknown_expire_secs,
-            gwq_auto: extra.0,
+            global_queue: extra.0,
             trace_session_moves: extra.1,
-            trade_e3: None,
+            forecast: None,
             pull_from_any_holder: any_holder.unwrap_or(false),
         }),
         ..SymmetricPdConfig::default()
     };
-    flex.placement.force_split = true;
-    flex.placement.p_select = PSelect::CostFunction;
+    spd.placement.force_split = true;
+    spd.placement.p_select = PSelect::CostFunction;
     let cfg = Config {
         server: ServerConfig {
             host: "0".into(),
@@ -321,7 +321,7 @@ async fn fixture_full(
             pd_decode_policy: PdDecodePolicy::AffinityMinLoad,
             pd_decision_replay: None,
             pd_decode_tokens: None,
-            symmetric_pd: Some(flex),
+            symmetric_pd: Some(spd),
             gateway_cache_aware: None,
         },
         discovery: DiscoveryBackend::StaticUrls(StaticUrlsDiscoveryConfig {
@@ -394,12 +394,12 @@ impl Fixture {
         assert_eq!(res.status(), StatusCode::OK, "{rid}");
     }
 
-    /// The TRADE decision of the `reserve` row of `rid`.
+    /// The cost-function decision of the `reserve` row of `rid`.
     fn decision(&self, rid: &str) -> Value {
         self.events()
             .into_iter()
             .find(|e| e["event"] == "reserve" && e["entry"]["rid"] == rid)
-            .unwrap_or_else(|| panic!("no reserve event for {rid}"))["trade_decision"]
+            .unwrap_or_else(|| panic!("no reserve event for {rid}"))["placement"]
             .clone()
     }
 
@@ -423,7 +423,7 @@ impl Fixture {
     }
 }
 
-/// The candidate row of P `i` in a TRADE decision.
+/// The candidate row of P `i` in a cost-function decision.
 fn row(f: &Fixture, d: &Value, i: usize) -> Value {
     d["candidates"]
         .as_array()
@@ -434,7 +434,7 @@ fn row(f: &Fixture, d: &Value, i: usize) -> Value {
         .unwrap()
 }
 
-/// TRADE (`kv_hint_injection.rs` `trade_three_p`) on symmetric_pd: three P-role
+/// cost-function (`kv_hint_injection.rs` `cost_three_p`) on symmetric_pd: three P-role
 /// engines (P1, P2, P3), one D-role engine and a 20,000-token prompt. The
 /// indexer reports P1 = 18,000 cached tokens and P3 = 300 (P2 none); the
 /// pull floor is 512.
@@ -449,30 +449,30 @@ fn row(f: &Fixture, d: &Value, i: usize) -> Value {
 ///    is 400 < 512, so `small` moves to P3 WITHOUT a hint (cost 2,400).
 ///
 /// `gate` is the injector's `min_incremental_tokens`. With 0, pick() itself
-/// returns hints for the owner and for the 400-token gain; only the TRADE
+/// returns hints for the owner and for the 400-token gain; only the cost-function
 /// floor (512) drops them.
 #[tokio::test]
-async fn flex_cost_function_moves_with_a_pull_only_when_it_pays() {
-    flex_trade_three_p(0.0, 512).await;
+async fn spd_cost_function_moves_with_a_pull_only_when_it_pays() {
+    three_p_cost(0.0, 512).await;
 }
 
 #[tokio::test]
-async fn flex_cost_function_copy_price_keeps_the_loaded_owner() {
-    flex_trade_three_p(9.2, 512).await;
+async fn spd_cost_function_copy_price_keeps_the_loaded_owner() {
+    three_p_cost(9.2, 512).await;
 }
 
 #[tokio::test]
-async fn flex_cost_function_drops_sub_floor_hints_when_the_injector_gate_is_off() {
-    flex_trade_three_p(0.0, 0).await;
+async fn spd_cost_function_drops_sub_floor_hints_when_the_injector_gate_is_off() {
+    three_p_cost(0.0, 0).await;
 }
 
-async fn flex_trade_three_p(lambda: f64, gate: u32) {
-    let trade = TradeParams {
-        copy_lambda: lambda,
-        ..TradeParams::default()
+async fn three_p_cost(lambda: f64, gate: u32) {
+    let cost_params = PlacementCostParams {
+        copy_price: lambda,
+        ..PlacementCostParams::default()
     };
     let reply = json!({"instances": {"1": {"cpu": 18000}, "3": {"cpu": 300}}});
-    let f = fixture(3, trade, gate, reply).await;
+    let f = fixture(3, cost_params, gate, reply).await;
 
     // 1. Idle pool: the owner P1 takes `busy` without a hint.
     f.send("busy", 20_000, None).await;
@@ -504,7 +504,7 @@ async fn flex_trade_three_p(lambda: f64, gate: u32) {
     let d = f.decision("pull");
     assert_eq!(d["owner"], f.ps[0].url.as_str());
     assert_eq!(row(&f, &d, 0)["backlog_tokens"], "20000");
-    assert_eq!(row(&f, &d, 0)["trade_cost"], 22000.0);
+    assert_eq!(row(&f, &d, 0)["cost"], 22000.0);
     assert_eq!(row(&f, &d, 2)["pulled_tokens"], 17700);
     assert_eq!(row(&f, &d, 1)["pulled_tokens"], 18000);
     if lambda == 0.0 {
@@ -547,7 +547,7 @@ async fn flex_trade_three_p(lambda: f64, gate: u32) {
         let d = f.decision("small");
         assert_eq!(d["detour"], true);
         assert_eq!(d["pulled_tokens"], 0);
-        assert_eq!(row(&f, &d, 2)["trade_cost"], 2400.0);
+        assert_eq!(row(&f, &d, 2)["cost"], 2400.0);
     }
     f.ps[0].release.notify_one();
     f.wait_for("busy finished", |events| {
@@ -564,30 +564,30 @@ async fn flex_trade_three_p(lambda: f64, gate: u32) {
     );
 }
 
-/// `--trade-copy-lambda auto` on symmetric_pd
+/// `--copy-price auto` on symmetric_pd
 /// (`kv_hint_injection.rs`
-/// `trade_copy_lambda_auto_counts_sessions_and_traces_its_inputs`): the
+/// `cost_copy_lambda_auto_counts_sessions_and_traces_its_inputs`): the
 /// fallback lambda before tau, N_active from the session header, and
 /// `POST /kv_sessions/end` removes a session at once (the reply is the
 /// retention-off 400).
 #[tokio::test]
-async fn flex_cost_function_copy_lambda_auto_counts_sessions() {
-    use sgl_router::scheduler::trade::TradeLambdaMode;
-    let trade = TradeParams {
-        copy_lambda: 18.4,
-        copy_lambda_mode: TradeLambdaMode::Auto {
+async fn spd_cost_function_copy_lambda_auto_counts_sessions() {
+    use sgl_router::scheduler::placement_cost::CopyPriceMode;
+    let cost_params = PlacementCostParams {
+        copy_price: 18.4,
+        copy_price_mode: CopyPriceMode::Auto {
             min: 4.6,
             max: 1000.0,
         },
-        ..TradeParams::default()
+        ..PlacementCostParams::default()
     };
-    let f = fixture(2, trade, 512, json!({"instances": {}})).await;
+    let f = fixture(2, cost_params, 512, json!({"instances": {}})).await;
     f.send("a1", 2000, Some("agent-a")).await;
     let d = f.decision("a1");
-    assert_eq!(d["lambda_mode"], "auto", "{d}");
+    assert_eq!(d["copy_price_mode"], "auto", "{d}");
     assert_eq!(d["fallback_reason"], "startup");
-    assert_eq!(d["copy_lambda_used"], 18.4);
-    assert_eq!(d["copy_lambda"], 18.4);
+    assert_eq!(d["copy_price_used"], 18.4);
+    assert_eq!(d["copy_price"], 18.4);
     assert_eq!(d["session_known"], true);
     assert_eq!(d["n_p"], 2);
     assert_eq!(d["n_active"], 0, "a session counts from its own commit on");
@@ -616,7 +616,7 @@ async fn flex_cost_function_copy_lambda_auto_counts_sessions() {
     f.wait_for("busy-period events", |events| {
         let requests: u64 = events
             .iter()
-            .filter(|e| e["event"] == "trade_auto_p_empty")
+            .filter(|e| e["event"] == "auto_price_p_empty")
             .map(|e| e["busy_period_requests"].as_u64().unwrap_or(0))
             .sum();
         requests == 4
@@ -625,20 +625,20 @@ async fn flex_cost_function_copy_lambda_auto_counts_sessions() {
     f.wait_for("an auto snapshot with 4 credited prefills", |events| {
         events
             .iter()
-            .any(|e| e["event"] == "snapshot" && e["trade_auto"]["credited"].as_u64() == Some(4))
+            .any(|e| e["event"] == "snapshot" && e["auto_price"]["credited"].as_u64() == Some(4))
     })
     .await;
     let snapshot = f
         .events()
         .into_iter()
         .rev()
-        .find(|e| e["event"] == "snapshot" && e.get("trade_auto").is_some())
+        .find(|e| e["event"] == "snapshot" && e.get("auto_price").is_some())
         .unwrap();
     assert_eq!(
-        snapshot["trade_auto"]["workers"].as_array().unwrap().len(),
+        snapshot["auto_price"]["workers"].as_array().unwrap().len(),
         2
     );
-    assert_eq!(snapshot["trade_auto"]["credited_tokens"], 8000);
+    assert_eq!(snapshot["auto_price"]["credited_tokens"], 8000);
     assert_eq!(snapshot["policy"], "symmetric_pd_cost_function");
 }
 
@@ -650,11 +650,19 @@ async fn flex_cost_function_copy_lambda_auto_counts_sessions() {
 /// next decision sees that P without the work. With 0 the work stays (the
 /// behaviour before the flag).
 #[tokio::test]
-async fn flex_cost_function_unknown_p_leg_expires_without_engine_progress() {
+async fn spd_cost_function_unknown_p_leg_expires_without_engine_progress() {
     for expire_secs in [1u64, 0] {
         let timeout = Duration::from_millis(300);
         let reply = json!({"instances": {}});
-        let f = fixture_with(2, TradeParams::default(), 512, reply, expire_secs, timeout).await;
+        let f = fixture_with(
+            2,
+            PlacementCostParams::default(),
+            512,
+            reply,
+            expire_secs,
+            timeout,
+        )
+        .await;
         f.send("lost", 4_000, None).await;
         let (p, _) = f.landed_on("lost").await;
         f.wait_for("the unknown row of lost", |events| {
@@ -708,10 +716,16 @@ async fn flex_cost_function_unknown_p_leg_expires_without_engine_progress() {
 }
 
 /// `POST /symmetric_pd/place` cannot report a request's dispatch and end to the
-/// cost ledger, so it is refused (400) and reserves nothing.
+/// work book, so it is refused (400) and reserves nothing.
 #[tokio::test]
-async fn flex_place_endpoint_is_refused_with_cost_function() {
-    let f = fixture(2, TradeParams::default(), 512, json!({"instances": {}})).await;
+async fn spd_place_endpoint_is_refused_with_cost_function() {
+    let f = fixture(
+        2,
+        PlacementCostParams::default(),
+        512,
+        json!({"instances": {}}),
+    )
+    .await;
     let request = Request::builder()
         .method("POST")
         .uri("/symmetric_pd/place")
@@ -729,7 +743,7 @@ async fn flex_place_endpoint_is_refused_with_cost_function() {
     assert!(f.events().iter().all(|e| e["event"] != "reserve"));
 }
 
-/// `--symmetric-pd-gwq-auto` end to end on one P-role engine (C 8192: no
+/// `--global-queue` end to end on one P-role engine (C 8192: no
 /// /server_info chunk; R 13,500). `busy` (20,000 tokens) goes at arrival to
 /// the empty P1, and its first sighting is a T_react sample (tens of ms).
 /// With busy launched, P1 has 11,808 queued tokens, above C + R x T_react:
@@ -738,19 +752,19 @@ async fn flex_place_endpoint_is_refused_with_cost_function() {
 /// `--symmetric-pd-trace-session-moves` busy (with a session) has a
 /// `session_move` record.
 #[tokio::test]
-async fn flex_cost_function_gwq_auto_holds_a_free_request_until_room() {
-    let gwq = Some(SymmetricPdGwqAutoConfig {
+async fn spd_cost_function_queue_auto_holds_a_free_request_until_room() {
+    let queue = Some(GlobalQueueConfig {
         max_wait_ms: 300_000,
         ..Default::default()
     });
     let f = fixture_full(
         1,
-        TradeParams::default(),
+        PlacementCostParams::default(),
         512,
         json!({"instances": {}}),
         60,
         Duration::from_secs(5),
-        (gwq, true),
+        (queue, true),
         None,
     )
     .await;
@@ -760,7 +774,7 @@ async fn flex_cost_function_gwq_auto_holds_a_free_request_until_room() {
     f.wait_for("the T_react sample of busy", |events| {
         events
             .iter()
-            .any(|e| e["event"] == "gwq_lead_sample" && e["rid"] == "busy")
+            .any(|e| e["event"] == "queue_lead_sample" && e["rid"] == "busy")
     })
     .await;
     let checks = async {
@@ -777,17 +791,17 @@ async fn flex_cost_function_gwq_auto_holds_a_free_request_until_room() {
     assert!(held, "free waits while P1 has no room");
     f.landed_on("free").await;
     let events = f.events();
-    let gwq_of = |rid: &str| {
+    let queue_of = |rid: &str| {
         events
             .iter()
             .find(|e| e["event"] == "reserve" && e["entry"]["rid"] == rid)
-            .map(|e| e["gwq"].clone())
+            .map(|e| e["global_queue"].clone())
             .unwrap()
     };
-    let busy = gwq_of("busy");
+    let busy = queue_of("busy");
     assert_eq!(busy["held"], false, "{busy}");
     assert_eq!(busy["lead_sample"], true, "{busy}");
-    let free = gwq_of("free");
+    let free = queue_of("free");
     assert_eq!(free["held"], true, "{free}");
     assert_eq!(free["release"], "room", "{free}");
     assert_eq!(
@@ -807,9 +821,9 @@ async fn flex_cost_function_gwq_auto_holds_a_free_request_until_room() {
         (moved["p_changed"].clone(), moved["prev_p"].clone()),
         (json!(false), Value::Null)
     );
-    f.wait_for("gwq_stats with the release after a hold", |events| {
+    f.wait_for("queue_stats with the release after a hold", |events| {
         events.iter().any(|e| {
-            e["event"] == "gwq_stats"
+            e["event"] == "queue_stats"
                 && e["counters"]["released_after_hold"]
                     .as_u64()
                     .is_some_and(|n| n >= 1)
@@ -823,8 +837,14 @@ async fn flex_cost_function_gwq_auto_holds_a_free_request_until_room() {
 /// the reservation finishes once with reason `prefill_reader_gone` (not
 /// unknown, not an error), and the snapshot counts it.
 #[tokio::test]
-async fn flex_cost_function_reader_gone_prefill_end_is_not_a_failure() {
-    let f = fixture(1, TradeParams::default(), 512, json!({"instances": {}})).await;
+async fn spd_cost_function_reader_gone_prefill_end_is_not_a_failure() {
+    let f = fixture(
+        1,
+        PlacementCostParams::default(),
+        512,
+        json!({"instances": {}}),
+    )
+    .await;
     f.send("gone-1", 2_000, None).await;
     f.wait_for("the P-leg ends", |events| {
         events
@@ -862,28 +882,28 @@ async fn flex_cost_function_reader_gone_prefill_end_is_not_a_failure() {
 /// D1 and servicer `d1:18100`); the D-leg carries no hint. Flag off (D1 still
 /// mapped): the answer is restricted to the P-role pool, so the same request
 /// is a cold prefill without a hint (the behaviour before the flag). Both
-/// also with `--symmetric-pd-gwq-auto`: the cold request is free, goes through
+/// also with `--global-queue`: the cold request is free, goes through
 /// the global waiting queue and keeps the pull source of its arrival.
 #[tokio::test]
-async fn flex_cost_function_any_holder_pulls_from_a_d_role_holder() {
-    for (flag, gwq) in [(true, false), (false, false), (true, true), (false, true)] {
-        let trade = TradeParams {
-            copy_lambda: 0.0,
-            ..TradeParams::default()
+async fn spd_cost_function_any_holder_pulls_from_a_d_role_holder() {
+    for (flag, queue) in [(true, false), (false, false), (true, true), (false, true)] {
+        let cost_params = PlacementCostParams {
+            copy_price: 0.0,
+            ..PlacementCostParams::default()
         };
-        let gwq_cfg = gwq.then(|| SymmetricPdGwqAutoConfig {
+        let queue_cfg = queue.then(|| GlobalQueueConfig {
             max_wait_ms: 2_000,
             ..Default::default()
         });
         let reply = json!({"instances": {"4": {"cpu": 18000}}});
         let f = fixture_full(
             3,
-            trade,
+            cost_params,
             512,
             reply,
             60,
             Duration::from_secs(5),
-            (gwq_cfg, false),
+            (queue_cfg, false),
             Some(flag),
         )
         .await;
@@ -895,10 +915,10 @@ async fn flex_cost_function_any_holder_pulls_from_a_d_role_holder() {
             .into_iter()
             .find(|e| e["event"] == "reserve" && e["entry"]["rid"] == "from-d")
             .unwrap();
-        if gwq {
-            assert_eq!(reserve["gwq"]["class"], "free", "{reserve}");
+        if queue {
+            assert_eq!(reserve["global_queue"]["class"], "free", "{reserve}");
         } else {
-            assert!(reserve.get("gwq").is_none(), "{reserve}");
+            assert!(reserve.get("global_queue").is_none(), "{reserve}");
         }
         if flag {
             let hint = body.get("kv_pull_hint").expect("the P-leg pulls from D1");
@@ -932,10 +952,10 @@ async fn flex_cost_function_any_holder_pulls_from_a_d_role_holder() {
 /// the pull source, however long its prefix; the healthy D-role D1 (18,000)
 /// serves the pull, and P3 is not a target either.
 #[tokio::test]
-async fn flex_cost_function_any_holder_skips_unregistered_and_breaker_open_holders() {
-    let trade = TradeParams {
-        copy_lambda: 0.0,
-        ..TradeParams::default()
+async fn spd_cost_function_any_holder_skips_unregistered_and_breaker_open_holders() {
+    let cost_params = PlacementCostParams {
+        copy_price: 0.0,
+        ..PlacementCostParams::default()
     };
     let reply = json!({"instances": {
         "5": {"cpu": 40000},
@@ -944,7 +964,7 @@ async fn flex_cost_function_any_holder_skips_unregistered_and_breaker_open_holde
     }});
     let f = fixture_full(
         3,
-        trade,
+        cost_params,
         512,
         reply,
         60,

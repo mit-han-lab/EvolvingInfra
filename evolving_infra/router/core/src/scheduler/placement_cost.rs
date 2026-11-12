@@ -1,84 +1,95 @@
 //! The placement cost function of `--symmetric-pd-p-select cost-function`:
 //! each P's predicted time to the request's first token, plus the fetch time
 //! that the P's wait does not hide, plus the copy price of the fetched KV.
+//!
+//! # Glossary
+//!
+//! | Term | Code | Earlier name |
+//! |---|---|---|
+//! | Placement cost function | this module, [`PlacementCostParams`], [`crate::scheduler::cost_function`] | trade |
+//! | Prefill completion forecast | [`crate::forecast`], [`crate::prefill_forecast`] | e3 |
+//! | Global queue | [`crate::global_queue`], `cost_function/queue.rs` | gwq |
+//! | Token-count wait | [`PrefillWait::Tokens`], [`crate::prefill_work::PrefillWorkBook`] | ledger |
+//! | Copy price | [`PlacementCostParams::copy_price`] (`--copy-price`) | copy lambda |
+//! | Move margin | [`PlacementCostParams::move_margin`] (`--move-margin`) | gate m |
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
 /// Default prefill rate R of one P worker, in uncached tokens per second.
-pub const DEFAULT_TRADE_RATE_TOKENS_PER_S: f64 = 13_500.0;
+pub const DEFAULT_PREFILL_RATE_TOKENS_PER_S: f64 = 13_500.0;
 /// Default fixed part of one KV pull, in milliseconds.
-pub const DEFAULT_TRADE_PULL_FIXED_MS: f64 = 450.0;
+pub const DEFAULT_FETCH_FIXED_MS: f64 = 450.0;
 /// Default size-dependent part of one KV pull, in milliseconds per 100k tokens.
-pub const DEFAULT_TRADE_PULL_MS_PER_100K: f64 = 100.0;
-/// TRADE never pulls fewer tokens than this (no pull when the
+pub const DEFAULT_FETCH_MS_PER_100K_TOKENS: f64 = 100.0;
+/// cost-function never pulls fewer tokens than this (no pull when the
 /// best source match minus the target's own match is below 512). The
 /// effective floor is max(--kv-pull-hint-min-incremental-tokens, this).
-pub const TRADE_MIN_PULL_TOKENS: u64 = 512;
+pub const MIN_FETCH_TOKENS: u64 = 512;
 /// Default copy price, in uncached-token equivalents per pulled token: the
 /// value of the paper's runs (half of the simulator estimate, 6.8e-4 s per
 /// pulled token x 13,500 tokens/s = 9.18).
-pub const DEFAULT_TRADE_COPY_LAMBDA: f64 = 4.6;
+pub const DEFAULT_COPY_PRICE: f64 = 4.6;
 
-/// Where TRADE takes a P's wait and the request's own service time from
-/// (`--trade-wait`).
+/// Where cost-function takes a P's wait and the request's own service time from
+/// (`--prefill-wait`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TradeWait {
-    /// backlog / R and u / R from the router's uncached ledger.
+pub enum PrefillWait {
+    /// backlog / R and u / R from the router's work book.
     #[default]
-    Ledger,
-    /// The E3 P completion forecast ([`crate::e3`], [`crate::trade_e3`]):
+    Tokens,
+    /// The prefill completion forecast ([`crate::forecast`], [`crate::prefill_forecast`]):
     /// B_w = `wait_s` (decision to the GPU start of the request's first
     /// pass on P) and S_w = `pred_s - wait_s` (`pred_s` = decision to P's
     /// prefill completion of the request), so the cost is
     /// R x (pred_s + max(0, pull_s - wait_s)) + copy. The selection is
-    /// [`select_trade_e3`]: the request leaves the cache-aware owner only
+    /// [`select_with_forecast`]: the request leaves the cache-aware owner only
     /// when the gain beats the forecasts' error bounds (prediction gate).
-    /// A P without a usable forecast has the ledger terms and never wins a
+    /// A P without a usable forecast has the token-count terms and never wins a
     /// move; the trace counts these fallbacks by reason.
-    E3,
+    Forecast,
 }
 
-impl TradeWait {
+impl PrefillWait {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Ledger => "ledger",
-            Self::E3 => "e3",
+            Self::Tokens => "tokens",
+            Self::Forecast => "forecast",
         }
     }
 }
 
-/// Default age limit of an engine snapshot for `--trade-wait e3`
+/// Default age limit of an engine snapshot for `--prefill-wait forecast`
 /// (the view-age upper bound: poll sent to decision plus the engine's age).
-pub const DEFAULT_TRADE_EFT_MAX_VIEW_AGE_S: f64 = 1.5;
+pub const DEFAULT_MAX_STATE_AGE_S: f64 = 1.5;
 
-/// Default floor of the auto copy price (`--trade-copy-lambda-min`),
+/// Default floor of the auto copy price (`--copy-price-min`),
 /// in uncached-token equivalents per pulled token.
-pub const DEFAULT_TRADE_AUTO_LAMBDA_MIN: f64 = 4.6;
-/// Default cap of the auto copy price (`--trade-copy-lambda-max`).
-pub const DEFAULT_TRADE_AUTO_LAMBDA_MAX: f64 = 1000.0;
+pub const DEFAULT_COPY_PRICE_MIN: f64 = 4.6;
+/// Default cap of the auto copy price (`--copy-price-max`).
+pub const DEFAULT_COPY_PRICE_MAX: f64 = 1000.0;
 /// Default time constant tau of the auto inputs, in seconds. It is also the
 /// start-up period.
-pub const DEFAULT_TRADE_AUTO_TAU_S: f64 = 120.0;
+pub const DEFAULT_AUTO_PRICE_TAU_S: f64 = 120.0;
 /// Default idle window of a session in N_active, in seconds.
-pub const DEFAULT_TRADE_AUTO_SESSION_IDLE_S: f64 = 300.0;
-/// [`TradeAutoState`] tracks at most this many sessions. A new session above
+pub const DEFAULT_AUTO_PRICE_SESSION_IDLE_S: f64 = 300.0;
+/// [`AutoPriceState`] tracks at most this many sessions. A new session above
 /// the limit is not counted (and counted in `sessions_dropped`).
-pub const TRADE_AUTO_MAX_SESSIONS: usize = 100_000;
+pub const AUTO_PRICE_MAX_SESSIONS: usize = 100_000;
 
-/// Where TRADE takes its copy price lambda from
-/// (`--trade-copy-lambda <x|auto>`).
+/// Where cost-function takes its copy price lambda from
+/// (`--copy-price <x|auto>`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum TradeLambdaMode {
-    /// lambda = [`TradeParams::copy_lambda`].
+pub enum CopyPriceMode {
+    /// lambda = [`PlacementCostParams::copy_price`].
     #[default]
     Fixed,
     /// lambda = clamp(q * R / R_hat, min, max) from the router's own
-    /// measurements ([`TradeParams::resolved`]). `copy_lambda` is the price
+    /// measurements ([`PlacementCostParams::resolved`]). `copy_price` is the price
     /// during start-up and when an input is missing.
     Auto { min: f64, max: f64 },
 }
 
-impl TradeLambdaMode {
+impl CopyPriceMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Fixed => "fixed",
@@ -87,19 +98,19 @@ impl TradeLambdaMode {
     }
 }
 
-/// Where TRADE takes its rate R from
-/// (`--trade-rate-tokens-per-s <x|auto>`).
+/// Where cost-function takes its rate R from
+/// (`--prefill-rate-tokens-per-s <x|auto>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TradeRateMode {
-    /// R = [`TradeParams::rate_tokens_per_s`].
+pub enum PrefillRateMode {
+    /// R = [`PlacementCostParams::prefill_rate_tokens_per_s`].
     #[default]
     Fixed,
     /// R = R_hat, the measured prefill tokens per busy second of all P.
-    /// `rate_tokens_per_s` is R during start-up and without R_hat.
+    /// `prefill_rate_tokens_per_s` is R during start-up and without R_hat.
     Auto,
 }
 
-impl TradeRateMode {
+impl PrefillRateMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Fixed => "fixed",
@@ -107,39 +118,39 @@ impl TradeRateMode {
         }
     }
 }
-/// Default multiple m of the combined error bound in the `wait = e3`
-/// prediction gate (`--trade-gate-m`). With m = 1 the gate uses the bounds
+/// Default multiple m of the combined error bound in the forecast wait
+/// prediction gate (`--move-margin`). With m = 1 the gate uses the bounds
 /// of the error table as fitted.
-pub const DEFAULT_TRADE_GATE_M: f64 = 1.0;
+pub const DEFAULT_MOVE_MARGIN: f64 = 1.0;
 
-/// Parameters of the TRADE P-selection cost model (`--trade-*`).
+/// Parameters of the cost-function P-selection cost model (`--copy-price`, `--prefill-wait` and the other cost-function flags).
 ///
-/// All work is in uncached-token units; `rate_tokens_per_s` converts seconds
+/// All work is in uncached-token units; `prefill_rate_tokens_per_s` converts seconds
 /// to tokens. The CLI validates the values (finite, R > 0, others >= 0).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TradeParams {
+pub struct PlacementCostParams {
     /// R: uncached prefill tokens one P worker computes per second.
-    pub rate_tokens_per_s: f64,
+    pub prefill_rate_tokens_per_s: f64,
     /// Fixed time of one KV pull (ms).
-    pub pull_fixed_ms: f64,
+    pub fetch_fixed_ms: f64,
     /// Size-dependent time of one KV pull (ms per 100k pulled tokens).
-    pub pull_ms_per_100k: f64,
+    pub fetch_ms_per_100k_tokens: f64,
     /// lambda: copy cost in uncached-token equivalents per pulled token. It
     /// prices the second copy that a pull leaves in the target's host pool.
-    pub copy_lambda: f64,
-    /// Source of the wait and service terms (default: the ledger).
-    pub wait: TradeWait,
-    /// `wait = e3`: a snapshot whose view age exceeds this (s) is not used.
-    pub eft_max_view_age_s: f64,
-    /// `Fixed` (default): lambda = `copy_lambda`. `Auto`: lambda comes from
-    /// the router's measurements ([`TradeParams::resolved`]) and
-    /// `copy_lambda` is the fallback (start-up, missing input).
-    pub copy_lambda_mode: TradeLambdaMode,
-    /// `Fixed` (default): R = `rate_tokens_per_s`. `Auto`: R = R_hat and
-    /// `rate_tokens_per_s` is the fallback.
-    pub rate_mode: TradeRateMode,
+    pub copy_price: f64,
+    /// Source of the wait and service terms (default: the work book).
+    pub wait: PrefillWait,
+    /// the forecast wait: a snapshot whose view age exceeds this (s) is not used.
+    pub max_state_age_s: f64,
+    /// `Fixed` (default): lambda = `copy_price`. `Auto`: lambda comes from
+    /// the router's measurements ([`PlacementCostParams::resolved`]) and
+    /// `copy_price` is the fallback (start-up, missing input).
+    pub copy_price_mode: CopyPriceMode,
+    /// `Fixed` (default): R = `prefill_rate_tokens_per_s`. `Auto`: R = R_hat and
+    /// `prefill_rate_tokens_per_s` is the fallback.
+    pub prefill_rate_mode: PrefillRateMode,
     /// tau > 0 (s): the time constant of every auto input
-    /// ([`TradeAutoState`]); the auto values apply only after tau seconds
+    /// ([`AutoPriceState`]); the auto values apply only after tau seconds
     /// of history (start-up). No effect while both modes are `Fixed`.
     pub auto_tau_s: f64,
     /// Seconds, above 0: a session without a request on a P counts in
@@ -147,35 +158,35 @@ pub struct TradeParams {
     /// or the prefill end of its last request). An END from the client
     /// removes it at once. No effect while both modes are `Fixed`.
     pub auto_session_idle_s: f64,
-    /// `wait = e3`: m >= 0, the multiple of the combined error bound
-    /// sqrt(b_o^2 + b_w^2) in the prediction gate of [`select_trade_e3`].
-    /// No effect with the ledger wait.
-    pub gate_m: f64,
+    /// the forecast wait: m >= 0, the multiple of the combined error bound
+    /// sqrt(b_o^2 + b_w^2) in the prediction gate of [`select_with_forecast`].
+    /// No effect with the token-count wait.
+    pub move_margin: f64,
 }
 
-impl Default for TradeParams {
-    /// The CLI defaults of the TRADE flags.
+impl Default for PlacementCostParams {
+    /// The CLI defaults of the cost-function flags.
     fn default() -> Self {
         Self {
-            rate_tokens_per_s: DEFAULT_TRADE_RATE_TOKENS_PER_S,
-            pull_fixed_ms: DEFAULT_TRADE_PULL_FIXED_MS,
-            pull_ms_per_100k: DEFAULT_TRADE_PULL_MS_PER_100K,
-            copy_lambda: DEFAULT_TRADE_COPY_LAMBDA,
-            wait: TradeWait::Ledger,
-            eft_max_view_age_s: DEFAULT_TRADE_EFT_MAX_VIEW_AGE_S,
-            copy_lambda_mode: TradeLambdaMode::Fixed,
-            rate_mode: TradeRateMode::Fixed,
-            auto_tau_s: DEFAULT_TRADE_AUTO_TAU_S,
-            auto_session_idle_s: DEFAULT_TRADE_AUTO_SESSION_IDLE_S,
-            gate_m: DEFAULT_TRADE_GATE_M,
+            prefill_rate_tokens_per_s: DEFAULT_PREFILL_RATE_TOKENS_PER_S,
+            fetch_fixed_ms: DEFAULT_FETCH_FIXED_MS,
+            fetch_ms_per_100k_tokens: DEFAULT_FETCH_MS_PER_100K_TOKENS,
+            copy_price: DEFAULT_COPY_PRICE,
+            wait: PrefillWait::Tokens,
+            max_state_age_s: DEFAULT_MAX_STATE_AGE_S,
+            copy_price_mode: CopyPriceMode::Fixed,
+            prefill_rate_mode: PrefillRateMode::Fixed,
+            auto_tau_s: DEFAULT_AUTO_PRICE_TAU_S,
+            auto_session_idle_s: DEFAULT_AUTO_PRICE_SESSION_IDLE_S,
+            move_margin: DEFAULT_MOVE_MARGIN,
         }
     }
 }
 
-/// The router's measurements at one TRADE decision, from [`TradeAutoState`]
-/// (the inputs of [`TradeParams::resolved`]).
+/// The router's measurements at one cost-function decision, from [`AutoPriceState`]
+/// (the inputs of [`PlacementCostParams::resolved`]).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct TradeAutoInputs {
+pub struct AutoPriceInputs {
     /// Seconds since the first auto decision (the start of the history).
     pub elapsed_s: f64,
     /// n_P: the healthy P workers of this decision.
@@ -194,7 +205,7 @@ pub struct TradeAutoInputs {
     pub r_hat: Option<f64>,
 }
 
-impl TradeAutoInputs {
+impl AutoPriceInputs {
     /// q = N_active / n_P x busy: sessions per P times the P busy fraction,
     /// the E2E seconds that one extra second of P work costs (closed-loop
     /// upper bound). None without the input.
@@ -206,77 +217,80 @@ impl TradeAutoInputs {
     }
 }
 
-/// How [`TradeParams::resolved`] set the copy price and the rate of one
+/// How [`PlacementCostParams::resolved`] set the copy price and the rate of one
 /// decision (the trace keys of an auto decision).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TradeAutoResolution {
-    pub lambda_mode: &'static str,
+pub struct AutoPriceResolution {
+    pub copy_price_mode: &'static str,
     pub q: Option<f64>,
     /// q * R / R_hat before the clamp; None on a fallback.
-    pub lambda_raw: Option<f64>,
+    pub copy_price_raw: Option<f64>,
     /// The copy price of this decision.
-    pub copy_lambda_used: f64,
+    pub copy_price_used: f64,
     /// Why lambda is the fallback value; None when the auto inputs were used
     /// (and always None with a fixed lambda).
     pub fallback_reason: Option<&'static str>,
-    pub rate_mode: &'static str,
+    pub prefill_rate_mode: &'static str,
     /// The rate R of this decision.
     pub rate_used: f64,
     /// Why R is the fallback value (rate auto only).
     pub rate_fallback_reason: Option<&'static str>,
 }
 
-impl TradeParams {
+impl PlacementCostParams {
     /// Predicted wall time of one pull of `pulled` tokens, in seconds.
     /// Zero tokens means no pull, which takes no time.
     pub fn pull_seconds(&self, pulled: u64) -> f64 {
         if pulled == 0 {
             return 0.0;
         }
-        (self.pull_fixed_ms + self.pull_ms_per_100k * pulled as f64 / 100_000.0) / 1000.0
+        (self.fetch_fixed_ms + self.fetch_ms_per_100k_tokens * pulled as f64 / 100_000.0) / 1000.0
     }
 
-    /// True with the ledger wait and a fixed copy price and rate: the trace
+    /// True with the token-count wait and a fixed copy price and rate: the trace
     /// then has no forecast or auto keys.
     pub fn is_original(&self) -> bool {
-        self.wait == TradeWait::Ledger && !self.is_auto()
+        self.wait == PrefillWait::Tokens && !self.is_auto()
     }
 
     /// True when the copy price or the rate comes from the router's
     /// measurements (`auto`).
     pub fn is_auto(&self) -> bool {
-        matches!(self.copy_lambda_mode, TradeLambdaMode::Auto { .. })
-            || self.rate_mode == TradeRateMode::Auto
+        matches!(self.copy_price_mode, CopyPriceMode::Auto { .. })
+            || self.prefill_rate_mode == PrefillRateMode::Auto
     }
 
     /// The start-up description of the copy price lambda and of the rate R
     /// (`auto` or fixed), as `(lambda, rate)`.
     pub fn auto_description(&self) -> (String, String) {
-        let lambda = match self.copy_lambda_mode {
-            TradeLambdaMode::Auto { min, max } => format!(
+        let lambda = match self.copy_price_mode {
+            CopyPriceMode::Auto { min, max } => format!(
                 "lambda = clamp(q*R/R_hat, min, max) with q = N_active/n_P*busy, \
                  min = {min}, max = {max}, fallback lambda = {}",
-                self.copy_lambda,
+                self.copy_price,
             ),
-            TradeLambdaMode::Fixed => format!("lambda fixed = {}", self.copy_lambda),
+            CopyPriceMode::Fixed => format!("lambda fixed = {}", self.copy_price),
         };
-        let rate = match self.rate_mode {
-            TradeRateMode::Auto => {
-                format!("R = R_hat (fallback R = {})", self.rate_tokens_per_s)
+        let rate = match self.prefill_rate_mode {
+            PrefillRateMode::Auto => {
+                format!(
+                    "R = R_hat (fallback R = {})",
+                    self.prefill_rate_tokens_per_s
+                )
             }
-            TradeRateMode::Fixed => format!("R fixed = {}", self.rate_tokens_per_s),
+            PrefillRateMode::Fixed => format!("R fixed = {}", self.prefill_rate_tokens_per_s),
         };
         (lambda, rate)
     }
 
-    /// The parameters of one decision, with `copy_lambda` and
-    /// `rate_tokens_per_s` resolved from the router's measurements `auto`,
-    /// and how they were resolved. [`trade_cost_full`] then uses them
+    /// The parameters of one decision, with `copy_price` and
+    /// `prefill_rate_tokens_per_s` resolved from the router's measurements `auto`,
+    /// and how they were resolved. [`placement_cost_full`] then uses them
     /// unchanged. With both modes `Fixed` the returned parameters are `self`
     /// (bit for bit).
     ///
     /// ```text
-    /// R      = R_hat (rate auto), else rate_tokens_per_s
+    /// R      = R_hat (rate auto), else prefill_rate_tokens_per_s
     /// q      = N_active / n_P * busy
     /// lambda = clamp(q * R / R_hat, min, max)    (lambda auto; R / R_hat = 1 with rate auto)
     /// ```
@@ -286,12 +300,12 @@ impl TradeParams {
     /// and each second of P work delays the sessions on that P by q seconds
     /// in total; R converts these seconds into the cost's token units.
     ///
-    /// Fallback: lambda = `copy_lambda` (not clamped), with the first reason
+    /// Fallback: lambda = `copy_price` (not clamped), with the first reason
     /// that applies: `startup` (less than `auto_tau_s` seconds of history),
     /// `no_sessions` (N_active = 0), `no_busy` (no P history), `no_rate`
-    /// (no R_hat), `not_finite`. With rate auto, R = `rate_tokens_per_s` for
+    /// (no R_hat), `not_finite`. With rate auto, R = `prefill_rate_tokens_per_s` for
     /// `startup` and `no_rate`.
-    pub fn resolved(&self, auto: &TradeAutoInputs) -> (TradeParams, TradeAutoResolution) {
+    pub fn resolved(&self, auto: &AutoPriceInputs) -> (PlacementCostParams, AutoPriceResolution) {
         let q = auto.q();
         // Start-up until tau seconds of history (a NaN counts as start-up).
         let startup = matches!(
@@ -299,23 +313,25 @@ impl TradeParams {
             Some(std::cmp::Ordering::Less) | None
         );
         let r_hat = auto.r_hat.filter(|r| r.is_finite() && *r > 0.0);
-        let (rate, rate_fallback_reason) = match (self.rate_mode, startup, r_hat) {
-            (TradeRateMode::Fixed, _, _) => (self.rate_tokens_per_s, None),
-            (TradeRateMode::Auto, true, _) => (self.rate_tokens_per_s, Some("startup")),
-            (TradeRateMode::Auto, false, Some(r)) => (r, None),
-            (TradeRateMode::Auto, false, None) => (self.rate_tokens_per_s, Some("no_rate")),
+        let (rate, rate_fallback_reason) = match (self.prefill_rate_mode, startup, r_hat) {
+            (PrefillRateMode::Fixed, _, _) => (self.prefill_rate_tokens_per_s, None),
+            (PrefillRateMode::Auto, true, _) => (self.prefill_rate_tokens_per_s, Some("startup")),
+            (PrefillRateMode::Auto, false, Some(r)) => (r, None),
+            (PrefillRateMode::Auto, false, None) => {
+                (self.prefill_rate_tokens_per_s, Some("no_rate"))
+            }
         };
-        let mut resolution = TradeAutoResolution {
-            lambda_mode: self.copy_lambda_mode.as_str(),
+        let mut resolution = AutoPriceResolution {
+            copy_price_mode: self.copy_price_mode.as_str(),
             q,
-            lambda_raw: None,
-            copy_lambda_used: self.copy_lambda,
+            copy_price_raw: None,
+            copy_price_used: self.copy_price,
             fallback_reason: None,
-            rate_mode: self.rate_mode.as_str(),
+            prefill_rate_mode: self.prefill_rate_mode.as_str(),
             rate_used: rate,
             rate_fallback_reason,
         };
-        if let TradeLambdaMode::Auto { min, max } = self.copy_lambda_mode {
+        if let CopyPriceMode::Auto { min, max } = self.copy_price_mode {
             let missing = if startup {
                 Some("startup")
             } else if auto.n_active == 0 {
@@ -331,10 +347,10 @@ impl TradeParams {
                 (None, Some(q), Some(r_hat)) => {
                     let raw = q * (rate / r_hat);
                     if raw.is_finite() {
-                        resolution.lambda_raw = Some(raw);
+                        resolution.copy_price_raw = Some(raw);
                         // max/min, not clamp: no panic on a config built in
                         // code with min > max (the CLI rejects it).
-                        resolution.copy_lambda_used = raw.max(min).min(max);
+                        resolution.copy_price_used = raw.max(min).min(max);
                     } else {
                         resolution.fallback_reason = Some("not_finite");
                     }
@@ -342,44 +358,44 @@ impl TradeParams {
                 (reason, _, _) => resolution.fallback_reason = reason,
             }
         }
-        let params = TradeParams {
-            copy_lambda: resolution.copy_lambda_used,
-            rate_tokens_per_s: rate,
+        let params = PlacementCostParams {
+            copy_price: resolution.copy_price_used,
+            prefill_rate_tokens_per_s: rate,
             ..*self
         };
         (params, resolution)
     }
 }
 
-/// The tokens a TRADE candidate pulls from another P: the best source match
+/// The tokens a cost-function candidate pulls from another P: the best source match
 /// minus the target's own match, both clamped to the request length. Returns
 /// 0 (no pull; the target recomputes these tokens) when the gain is below
-/// max(`floor`, [`TRADE_MIN_PULL_TOKENS`]); `floor` is
+/// max(`floor`, [`cost-function_MIN_PULL_TOKENS`]); `floor` is
 /// `--kv-pull-hint-min-incremental-tokens`.
-pub fn trade_pull_tokens(local_hit: u64, remote_hit: u64, input_tokens: u64, floor: u64) -> u64 {
+pub fn fetch_tokens(local_hit: u64, remote_hit: u64, input_tokens: u64, floor: u64) -> u64 {
     let local = local_hit.min(input_tokens);
     let gain = remote_hit.min(input_tokens).saturating_sub(local);
-    if gain < floor.max(TRADE_MIN_PULL_TOKENS) {
+    if gain < floor.max(MIN_FETCH_TOKENS) {
         0
     } else {
         gain
     }
 }
 
-/// The forecast terms of one P (`wait = e3`), in seconds.
+/// The forecast terms of one P (the forecast wait), in seconds.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TradeWaitTerms {
+pub struct WaitTerms {
     /// B_w: predicted time until the P has done the work ahead of the request.
     pub wait_s: f64,
     /// S_w: the request's own prefill service on the P.
     pub service_s: f64,
 }
 
-/// The parts of one candidate's TRADE cost, all in uncached-token units
+/// The parts of one candidate's placement cost, all in uncached-token units
 /// except the times.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TradeCost {
-    /// Work ahead in tokens: the pending uncached ledger, or R x B_w.
+pub struct CandidateCost {
+    /// Work ahead in tokens: the pending uncached work, or R x B_w.
     pub backlog: f64,
     /// This request's own work in tokens: u(P) after the hinted pull, or R x S_w.
     pub uncached: f64,
@@ -399,13 +415,13 @@ pub struct TradeCost {
     pub service_s: f64,
 }
 
-/// TRADE cost of placing one request on one P worker:
+/// placement cost of placing one request on one P worker:
 ///
 /// ```text
 /// cost(P) = backlog(P) + u(P)
 ///         + R * max(0, pull_s(pulled(P)) - backlog(P) / R)
 ///         + lambda * pulled(P)
-/// pull_s(n) = (pull_fixed_ms + pull_ms_per_100k * n / 100000) / 1000,  pull_s(0) = 0
+/// pull_s(n) = (fetch_fixed_ms + fetch_ms_per_100k_tokens * n / 100000) / 1000,  pull_s(0) = 0
 /// ```
 ///
 /// `backlog` = pending uncached tokens on P; `uncached` = u(P), this
@@ -413,27 +429,32 @@ pub struct TradeCost {
 /// when it is below the floor); `pulled` = tokens the pull brings (0 = no
 /// pull). The first three terms equal R x (max(backlog / R, pull_s) + u / R),
 /// that is the predicted completion of the request in token units.
-pub fn trade_cost(params: &TradeParams, backlog: u128, uncached: u64, pulled: u64) -> TradeCost {
-    trade_cost_full(params, backlog, uncached, pulled, None)
+pub fn placement_cost(
+    params: &PlacementCostParams,
+    backlog: u128,
+    uncached: u64,
+    pulled: u64,
+) -> CandidateCost {
+    placement_cost_full(params, backlog, uncached, pulled, None)
 }
 
-/// [`trade_cost`] with the forecast terms:
+/// [`placement_cost`] with the forecast terms:
 ///
 /// ```text
 /// wait = Some(B_w, S_w):
 ///   cost(P) = R * B_w + R * S_w + R * max(0, pull_s - B_w) + lambda * pulled
-/// wait = None (ledger): the formula of trade_cost
+/// wait = None (token count): the formula of placement_cost
 /// ```
-pub fn trade_cost_full(
-    params: &TradeParams,
+pub fn placement_cost_full(
+    params: &PlacementCostParams,
     backlog: u128,
     uncached: u64,
     pulled: u64,
-    wait: Option<TradeWaitTerms>,
-) -> TradeCost {
-    let rate = params.rate_tokens_per_s;
+    wait: Option<WaitTerms>,
+) -> CandidateCost {
+    let rate = params.prefill_rate_tokens_per_s;
     let pull_s = params.pull_seconds(pulled);
-    let copy_tokens = params.copy_lambda * pulled as f64;
+    let copy_tokens = params.copy_price * pulled as f64;
     let (backlog, own, wait_s, service_s) = match wait {
         None => {
             let backlog = backlog as f64;
@@ -457,7 +478,7 @@ pub fn trade_cost_full(
         (pull_s - wait_s).max(0.0)
     };
     let exposed_pull_tokens = rate * exposed_pull_s;
-    TradeCost {
+    CandidateCost {
         backlog,
         uncached: own,
         pull_s,
@@ -470,9 +491,9 @@ pub fn trade_cost_full(
     }
 }
 
-/// One P candidate as seen by [`select_trade`].
+/// One P candidate as seen by [`select_min_cost`].
 #[derive(Debug, Clone, Copy)]
-pub struct TradeInput<'a> {
+pub struct CostInput<'a> {
     pub worker: &'a str,
     /// Pending uncached tokens on this P.
     pub backlog: u128,
@@ -482,46 +503,46 @@ pub struct TradeInput<'a> {
     pub uncached: u64,
     /// Tokens pulled from another P (0 = no pull).
     pub pulled: u64,
-    /// `wait = e3`: this P's forecast terms. None: the ledger terms (wait =
-    /// ledger, or a P without a usable forecast).
-    pub wait: Option<TradeWaitTerms>,
-    /// `wait = e3`: the error bound b (s) of this P's forecast at the bound
-    /// level. None: no usable forecast (the P then has the ledger terms in
+    /// the forecast wait: this P's forecast terms. None: the token-count terms (wait =
+    /// tokens, or a P without a usable forecast).
+    pub wait: Option<WaitTerms>,
+    /// the forecast wait: the error bound b (s) of this P's forecast at the bound
+    /// level. None: no usable forecast (the P then has the token-count terms in
     /// `wait = None`) or another wait source.
     pub bound_s: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
-pub struct TradeSelection {
+pub struct CostSelection {
     pub chosen: usize,
     /// The cache-aware owner: maximum own hit, then the lowest backlog, then
     /// the URL.
     pub owner: usize,
     pub has_owner: bool,
     /// Cost of every input, in input order.
-    pub costs: Vec<TradeCost>,
+    pub costs: Vec<CandidateCost>,
     /// argmin cost (before the prediction gate).
     pub best: usize,
-    /// `wait = e3`: the gate margin m * sqrt(b_o^2 + b_w^2) in seconds, when
+    /// the forecast wait: the gate margin m * sqrt(b_o^2 + b_w^2) in seconds, when
     /// the gate was evaluated (an owner exists and the best is another P).
     pub margin_s: Option<f64>,
     /// (cost(owner) - cost(best)) / R in seconds, when the gate was evaluated.
     pub owner_gain_s: Option<f64>,
     /// The prediction gate kept the owner.
     pub margin_protected: bool,
-    /// `wait = e3` only: why the owner was kept although another P had the
+    /// the forecast wait only: why the owner was kept although another P had the
     /// lower cost (`gate`: the gain did not beat the bound margin;
     /// `owner_no_forecast`: the owner has no usable forecast). None for the
-    /// ledger wait.
+    /// token-count wait.
     pub protect_reason: Option<&'static str>,
 }
 
-/// The TRADE cost of every candidate, in the order of `inputs`.
-fn trade_costs(params: &TradeParams, inputs: &[TradeInput<'_>]) -> Vec<TradeCost> {
+/// The placement cost of every candidate, in the order of `inputs`.
+fn placement_costs(params: &PlacementCostParams, inputs: &[CostInput<'_>]) -> Vec<CandidateCost> {
     inputs
         .iter()
         .map(|input| {
-            trade_cost_full(
+            placement_cost_full(
                 params,
                 input.backlog,
                 input.uncached,
@@ -532,16 +553,16 @@ fn trade_costs(params: &TradeParams, inputs: &[TradeInput<'_>]) -> Vec<TradeCost
         .collect()
 }
 
-/// Choose argmin TRADE cost. Equal costs go to the cache-aware owner, then to
+/// Choose argmin placement cost. Equal costs go to the cache-aware owner, then to
 /// the higher own hit, then to the lower backlog, then to the smaller URL.
-/// With `wait = e3` the selection is [`select_trade_e3`]. Pure: no I/O, no
+/// With the forecast wait the selection is [`select_with_forecast`]. Pure: no I/O, no
 /// reservation. Panics if `inputs` is empty.
-pub fn select_trade(params: &TradeParams, inputs: &[TradeInput<'_>]) -> TradeSelection {
-    if params.wait == TradeWait::E3 {
-        return select_trade_e3(params, inputs);
+pub fn select_min_cost(params: &PlacementCostParams, inputs: &[CostInput<'_>]) -> CostSelection {
+    if params.wait == PrefillWait::Forecast {
+        return select_with_forecast(params, inputs);
     }
     assert!(!inputs.is_empty());
-    let costs = trade_costs(params, inputs);
+    let costs = placement_costs(params, inputs);
     let owner = inputs
         .iter()
         .enumerate()
@@ -567,7 +588,7 @@ pub fn select_trade(params: &TradeParams, inputs: &[TradeInput<'_>]) -> TradeSel
         })
         .unwrap()
         .0;
-    TradeSelection {
+    CostSelection {
         chosen: best,
         owner,
         has_owner: inputs[owner].local_hit > 0,
@@ -580,14 +601,14 @@ pub fn select_trade(params: &TradeParams, inputs: &[TradeInput<'_>]) -> TradeSel
     }
 }
 
-/// `--symmetric-pd-gwq-auto`: the inputs of the release tie-break of the global
-/// waiting queue ([`trade_tie_break`]), one entry per [`TradeInput`].
+/// `--global-queue`: the inputs of the release tie-break of the global
+/// waiting queue ([`break_cost_tie`]), one entry per [`CostInput`].
 #[derive(Debug, Clone, Copy)]
-pub struct TradeTieBreak<'a> {
+pub struct TieBreak<'a> {
     /// The P can take a release now (the queue's lead rule; a stale view
     /// counts as room, as in the walk).
     pub room: &'a [bool],
-    /// Outstanding requests on the P: the cost book's in-flight count
+    /// Outstanding requests on the P: the work book's in-flight count
     /// (reserved, dispatched and unknown entries).
     pub outstanding: &'a [u64],
     /// The URL of the last tie-broken release (None: the rotation starts at
@@ -595,21 +616,21 @@ pub struct TradeTieBreak<'a> {
     pub last: Option<&'a str>,
 }
 
-/// What [`trade_tie_break`] chose.
+/// What [`break_cost_tie`] chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TradeTieOutcome {
+pub struct TieOutcome {
     /// The chosen input.
     pub chosen: usize,
-    /// Inputs whose TRADE total equals the minimum (1: no tie).
+    /// Inputs whose cost-function total equals the minimum (1: no tie).
     pub tied: usize,
     /// The key that decided: `none` (no tie, or the prediction gate kept
     /// the owner), `room`, `local_hit`, `outstanding` or `rotation`.
     pub decided_by: &'static str,
 }
 
-/// `--symmetric-pd-gwq-auto`: the release tie-break of the global waiting queue.
+/// `--global-queue`: the release tie-break of the global waiting queue.
 ///
-/// [`select_trade`] breaks an exact tie of the TRADE total by the owner (for
+/// [`select_min_cost`] breaks an exact tie of the cost-function total by the owner (for
 /// a cold request the smallest backlog, then the smallest URL), the larger
 /// own hit, the smaller backlog and the smaller URL. When several P are idle
 /// at a release, every such release would go to the same P. Among the
@@ -618,12 +639,12 @@ pub struct TradeTieOutcome {
 /// then (4) rotates: the first URL after `last` in URL order (cyclic). A
 /// choice of the prediction gate stays. Pure; the walk and the release
 /// reservation call it with the same inputs, so they agree.
-pub fn trade_tie_break(
-    selection: &TradeSelection,
-    inputs: &[TradeInput<'_>],
-    tie: &TradeTieBreak<'_>,
-) -> TradeTieOutcome {
-    let unchanged = TradeTieOutcome {
+pub fn break_cost_tie(
+    selection: &CostSelection,
+    inputs: &[CostInput<'_>],
+    tie: &TieBreak<'_>,
+) -> TieOutcome {
+    let unchanged = TieOutcome {
         chosen: selection.chosen,
         tied: 1,
         decided_by: "none",
@@ -640,9 +661,9 @@ pub fn trade_tie_break(
         .collect();
     let tied = set.len();
     if tied < 2 {
-        return TradeTieOutcome { tied, ..unchanged };
+        return TieOutcome { tied, ..unchanged };
     }
-    let decided = |chosen: usize, decided_by: &'static str| TradeTieOutcome {
+    let decided = |chosen: usize, decided_by: &'static str| TieOutcome {
         chosen,
         tied,
         decided_by,
@@ -670,13 +691,13 @@ pub fn trade_tie_break(
     decided(next.unwrap_or(set[0]), "rotation")
 }
 
-/// TRADE selection with `wait = e3`: argmin cost with the prediction gate.
+/// cost-function selection with the forecast wait: argmin cost with the prediction gate.
 ///
 /// A candidate is usable when it has a forecast: `wait` (B_w = `wait_s`,
 /// S_w = `pred_s - wait_s`) and `bound_s` (b) are both set. Its cost is
-/// [`trade_cost_full`] on these terms, that is
+/// [`placement_cost_full`] on these terms, that is
 /// `C_w = R x (pred_s + max(0, pull_s - wait_s)) + copy`. A
-/// candidate without a forecast has the ledger cost.
+/// candidate without a forecast has the token-count cost.
 ///
 /// - Owner o: the maximum own hit; ties go to a usable P, then to the lower
 ///   cost, the lower backlog and the smaller URL.
@@ -686,7 +707,7 @@ pub fn trade_tie_break(
 /// - No cached owner (own hit 0 on every P): w*.
 /// - Otherwise the request leaves o for w* only when both are usable and
 ///   `gain - margin > 0`, with `gain = (C_o - C_w*) / R` and
-///   `margin = m x sqrt(b_o^2 + b_w*^2)` (s; m = `gate_m`). Else it stays
+///   `margin = m x sqrt(b_o^2 + b_w*^2)` (s; m = `move_margin`). Else it stays
 ///   on o: `protect_reason` is
 ///   `owner_no_forecast` (o is not usable) or `gate`. A NaN gain keeps o.
 ///
@@ -694,9 +715,12 @@ pub fn trade_tie_break(
 /// only as the owner, or when no P is usable and no P caches the request.
 /// `margin_s`, `owner_gain_s` and `margin_protected` hold the gate numbers
 /// when the gate was evaluated. Pure; panics if `inputs` is empty.
-pub fn select_trade_e3(params: &TradeParams, inputs: &[TradeInput<'_>]) -> TradeSelection {
+pub fn select_with_forecast(
+    params: &PlacementCostParams,
+    inputs: &[CostInput<'_>],
+) -> CostSelection {
     assert!(!inputs.is_empty());
-    let costs = trade_costs(params, inputs);
+    let costs = placement_costs(params, inputs);
     let usable = |i: usize| inputs[i].wait.is_some() && inputs[i].bound_s.is_some();
     let owner = (0..inputs.len())
         .min_by(|&a, &b| {
@@ -724,7 +748,7 @@ pub fn select_trade_e3(params: &TradeParams, inputs: &[TradeInput<'_>]) -> Trade
         })
         .expect("nonempty inputs");
     let has_owner = inputs[owner].local_hit > 0;
-    let mut selection = TradeSelection {
+    let mut selection = CostSelection {
         chosen: best,
         owner,
         has_owner,
@@ -751,9 +775,9 @@ pub fn select_trade_e3(params: &TradeParams, inputs: &[TradeInput<'_>]) -> Trade
         selection.protect_reason = Some("owner_no_forecast");
         return selection;
     }
-    let gain =
-        (selection.costs[owner].total - selection.costs[best].total) / params.rate_tokens_per_s;
-    let margin = params.gate_m * (b_o * b_o + b_w * b_w).sqrt();
+    let gain = (selection.costs[owner].total - selection.costs[best].total)
+        / params.prefill_rate_tokens_per_s;
+    let margin = params.move_margin * (b_o * b_o + b_w * b_w).sqrt();
     selection.owner_gain_s = Some(gain);
     selection.margin_s = Some(margin);
     let moves = gain - margin > 0.0;
@@ -766,24 +790,24 @@ pub fn select_trade_e3(params: &TradeParams, inputs: &[TradeInput<'_>]) -> Trade
 }
 
 /// The session identity string of one agent trajectory for
-/// [`TradeAutoState`]: `subagent_id`, a slash, then `agent_id` (one string
+/// [`AutoPriceState`]: `subagent_id`, a slash, then `agent_id` (one string
 /// per pair: the number has no slash).
-pub fn trade_session_key(agent_id: &str, subagent_id: u64) -> String {
+pub fn placement_session_key(agent_id: &str, subagent_id: u64) -> String {
     format!("{subagent_id}/{agent_id}")
 }
 
-/// The key of one session in [`TradeAutoState`]: a 64-bit hash of its
-/// identity string ([`trade_session_key`]). Stable within one process.
-pub fn trade_session_hash(session: &str) -> u64 {
+/// The key of one session in [`AutoPriceState`]: a 64-bit hash of its
+/// identity string ([`placement_session_key`]). Stable within one process.
+pub fn placement_session_hash(session: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     session.hash(&mut hasher);
     hasher.finish()
 }
 
-/// The estimates of one P worker at one time ([`TradeAutoState::worker`]).
+/// The estimates of one P worker at one time ([`AutoPriceState::worker`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TradeAutoWorkerView {
+pub struct AutoPriceWorkerView {
     /// Requests dispatched to the P whose prefill has not ended (now).
     pub in_flight: u64,
     /// Busy fraction: the time with `in_flight` > 0 (EWMA, corrected).
@@ -791,21 +815,21 @@ pub struct TradeAutoWorkerView {
     /// Time-averaged `in_flight` (EWMA, corrected).
     pub inflight: f64,
     /// Credited prefill tokens per second (EWMA, corrected).
-    pub rate_tokens_per_s: f64,
+    pub prefill_rate_tokens_per_s: f64,
 }
 
 /// A busy period of one P that has just ended: no request dispatched to the
 /// P has a prefill that has not ended.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TradeAutoBusyPeriod {
+pub struct AutoPriceBusyPeriod {
     pub seconds: f64,
     /// Requests dispatched to the P during the period.
     pub requests: u64,
 }
 
-/// One P worker of [`TradeAutoState`].
+/// One P worker of [`AutoPriceState`].
 #[derive(Debug, Clone)]
-struct TradeAutoWorker {
+struct AutoPriceWorker {
     /// The start of this P's history (its EWMAs are 0 there).
     since: Instant,
     /// The EWMAs below are exact at this time.
@@ -824,7 +848,7 @@ struct TradeAutoWorker {
     period_requests: u64,
 }
 
-impl TradeAutoWorker {
+impl AutoPriceWorker {
     fn new(at: Instant) -> Self {
         Self {
             since: at,
@@ -862,34 +886,34 @@ impl TradeAutoWorker {
     /// 1 - exp(-(now - since) / tau), the weight of the history since
     /// `since`. A short history thus gives its own average, not a value
     /// biased to 0. None while that weight is below 1e-9.
-    fn view(&self, now: Instant, tau: f64) -> Option<TradeAutoWorkerView> {
+    fn view(&self, now: Instant, tau: f64) -> Option<AutoPriceWorkerView> {
         let age = now.saturating_duration_since(self.since).as_secs_f64();
         let weight = -(-age / tau).exp_m1();
         if weight.is_nan() || weight < 1e-9 {
             return None;
         }
         let (busy, inflight, rate) = self.at(now, tau);
-        Some(TradeAutoWorkerView {
+        Some(AutoPriceWorkerView {
             in_flight: self.in_flight,
             busy: (busy / weight).clamp(0.0, 1.0),
             inflight: inflight / weight,
-            rate_tokens_per_s: rate / weight,
+            prefill_rate_tokens_per_s: rate / weight,
         })
     }
 }
 
-/// One session of [`TradeAutoState`].
+/// One session of [`AutoPriceState`].
 #[derive(Debug, Clone, Copy)]
-struct TradeAutoSession {
+struct AutoPriceSession {
     /// Requests of the session reserved on a P that have not left it.
     in_flight: u64,
     /// The time of the last event of the session.
     last_seen: Instant,
 }
 
-/// The router's measurements behind `--trade-copy-lambda auto`
-/// and `--trade-rate-tokens-per-s auto`. Every input comes from
-/// the router's own ledger (no engine push state):
+/// The router's measurements behind `--copy-price auto`
+/// and `--prefill-rate-tokens-per-s auto`. Every input comes from
+/// the router's own work book (no engine push state):
 ///
 /// - per P: `in_flight` = requests dispatched to the P whose prefill has not
 ///   ended. The caller reports each dispatch and each end (the engine shows
@@ -900,15 +924,15 @@ struct TradeAutoSession {
 /// - per session: a request on a P, or an event (reservation, prefill end)
 ///   in the last idle window, and no END from the client.
 ///
-/// The cost book owns it under its lock and creates it at the first auto
+/// The work book owns it under its lock and creates it at the first auto
 /// decision. Every time comes from the caller, so the tests use synthetic
 /// times.
 #[derive(Debug)]
-pub struct TradeAutoState {
+pub struct AutoPriceState {
     started: Instant,
     tau_s: f64,
-    workers: BTreeMap<String, TradeAutoWorker>,
-    sessions: HashMap<u64, TradeAutoSession>,
+    workers: BTreeMap<String, AutoPriceWorker>,
+    sessions: HashMap<u64, AutoPriceSession>,
     /// (time, session) of each session event, oldest first: the expiry queue.
     touches: VecDeque<(Instant, u64)>,
     /// Prefill ends that credited tokens, and their tokens.
@@ -916,11 +940,11 @@ pub struct TradeAutoState {
     pub credited_tokens: u64,
     /// Prefill ends without credit (failure, transport error, unknown end).
     pub uncredited: u64,
-    /// New sessions not counted because [`TRADE_AUTO_MAX_SESSIONS`] was reached.
+    /// New sessions not counted because [`cost-function_AUTO_MAX_SESSIONS`] was reached.
     pub sessions_dropped: u64,
 }
 
-impl TradeAutoState {
+impl AutoPriceState {
     /// An empty state whose history starts at `started`; tau in seconds.
     pub fn new(started: Instant, tau_s: f64) -> Self {
         Self {
@@ -951,7 +975,7 @@ impl TradeAutoState {
         for url in pool {
             self.workers
                 .entry(url.to_string())
-                .or_insert_with(|| TradeAutoWorker::new(now));
+                .or_insert_with(|| AutoPriceWorker::new(now));
         }
     }
 
@@ -961,7 +985,7 @@ impl TradeAutoState {
         let w = self
             .workers
             .entry(worker.to_string())
-            .or_insert_with(|| TradeAutoWorker::new(now));
+            .or_insert_with(|| AutoPriceWorker::new(now));
         w.advance(now, tau);
         if w.in_flight == 0 {
             w.busy_since = Some(now);
@@ -981,7 +1005,7 @@ impl TradeAutoState {
         worker: &str,
         tokens: Option<u64>,
         now: Instant,
-    ) -> Option<TradeAutoBusyPeriod> {
+    ) -> Option<AutoPriceBusyPeriod> {
         let tau = self.tau();
         let w = self.workers.get_mut(worker)?;
         if w.in_flight == 0 {
@@ -1001,7 +1025,7 @@ impl TradeAutoState {
             return None;
         }
         let since = w.busy_since.take()?;
-        Some(TradeAutoBusyPeriod {
+        Some(AutoPriceBusyPeriod {
             seconds: now.saturating_duration_since(since).as_secs_f64(),
             requests: std::mem::take(&mut w.period_requests),
         })
@@ -1012,13 +1036,13 @@ impl TradeAutoState {
         if let Some(s) = self.sessions.get_mut(&session) {
             s.in_flight += 1;
             s.last_seen = s.last_seen.max(now);
-        } else if self.sessions.len() >= TRADE_AUTO_MAX_SESSIONS {
+        } else if self.sessions.len() >= AUTO_PRICE_MAX_SESSIONS {
             self.sessions_dropped += 1;
             return;
         } else {
             self.sessions.insert(
                 session,
-                TradeAutoSession {
+                AutoPriceSession {
                     in_flight: 1,
                     last_seen: now,
                 },
@@ -1067,7 +1091,7 @@ impl TradeAutoState {
     /// (after [`Self::observe_pool`]); `idle_s` = the session idle window.
     /// busy and the in-flight mean are means over the P with history;
     /// R_hat = the sum of their token rates / the sum of their busy fractions.
-    pub fn inputs(&mut self, now: Instant, pool: &[&str], idle_s: f64) -> TradeAutoInputs {
+    pub fn inputs(&mut self, now: Instant, pool: &[&str], idle_s: f64) -> AutoPriceInputs {
         let n_active = self.active_sessions(now, idle_s);
         let tau = self.tau();
         let (mut busy, mut inflight, mut rate, mut n) = (0.0, 0.0, 0.0, 0usize);
@@ -1075,11 +1099,11 @@ impl TradeAutoState {
             if let Some(view) = self.workers.get(*url).and_then(|w| w.view(now, tau)) {
                 busy += view.busy;
                 inflight += view.inflight;
-                rate += view.rate_tokens_per_s;
+                rate += view.prefill_rate_tokens_per_s;
                 n += 1;
             }
         }
-        TradeAutoInputs {
+        AutoPriceInputs {
             elapsed_s: now.saturating_duration_since(self.started).as_secs_f64(),
             n_p: pool.len(),
             n_active,
@@ -1090,7 +1114,7 @@ impl TradeAutoState {
     }
 
     /// The estimates of `worker` at `now`; None without history.
-    pub fn worker(&self, worker: &str, now: Instant) -> Option<TradeAutoWorkerView> {
+    pub fn worker(&self, worker: &str, now: Instant) -> Option<AutoPriceWorkerView> {
         self.workers
             .get(worker)
             .and_then(|w| w.view(now, self.tau()))
@@ -1118,13 +1142,13 @@ impl TradeAutoState {
 }
 
 #[cfg(test)]
-mod trade_tests {
+mod placement_cost_tests {
     use super::*;
 
-    fn params(lambda: f64) -> TradeParams {
-        TradeParams {
-            copy_lambda: lambda,
-            ..TradeParams::default()
+    fn params(lambda: f64) -> PlacementCostParams {
+        PlacementCostParams {
+            copy_price: lambda,
+            ..PlacementCostParams::default()
         }
     }
 
@@ -1134,8 +1158,8 @@ mod trade_tests {
         local_hit: u64,
         uncached: u64,
         pulled: u64,
-    ) -> TradeInput<'_> {
-        TradeInput {
+    ) -> CostInput<'_> {
+        CostInput {
             worker,
             backlog,
             local_hit,
@@ -1146,17 +1170,17 @@ mod trade_tests {
         }
     }
 
-    fn eft(input: TradeInput<'_>, wait_s: f64, service_s: f64) -> TradeInput<'_> {
-        TradeInput {
-            wait: Some(TradeWaitTerms { wait_s, service_s }),
+    fn with_forecast(input: CostInput<'_>, wait_s: f64, service_s: f64) -> CostInput<'_> {
+        CostInput {
+            wait: Some(WaitTerms { wait_s, service_s }),
             ..input
         }
     }
 
-    /// A `wait = e3` candidate with a forecast: wait_s, pred_s and bound b.
-    fn e3(input: TradeInput<'_>, wait_s: f64, pred_s: f64, bound_s: f64) -> TradeInput<'_> {
-        TradeInput {
-            wait: Some(TradeWaitTerms {
+    /// A the forecast wait candidate with a forecast: wait_s, pred_s and bound b.
+    fn forecast(input: CostInput<'_>, wait_s: f64, pred_s: f64, bound_s: f64) -> CostInput<'_> {
+        CostInput {
+            wait: Some(WaitTerms {
                 wait_s,
                 service_s: pred_s - wait_s,
             }),
@@ -1165,10 +1189,10 @@ mod trade_tests {
         }
     }
 
-    fn e3_params(lambda: f64, gate_m: f64) -> TradeParams {
-        TradeParams {
-            wait: TradeWait::E3,
-            gate_m,
+    fn forecast_params(lambda: f64, move_margin: f64) -> PlacementCostParams {
+        PlacementCostParams {
+            wait: PrefillWait::Forecast,
+            move_margin,
             ..params(lambda)
         }
     }
@@ -1180,12 +1204,12 @@ mod trade_tests {
     /// sqrt(0.09 + 0.04) = 0.3606 s at m = 1: b wins. m = 3 (margin 1.08 s)
     /// keeps a (`gate`).
     #[test]
-    fn e3_gate_moves_only_when_the_gain_beats_the_bound_margin() {
+    fn forecast_gate_moves_only_when_the_gain_beats_the_bound_margin() {
         let inputs = [
-            e3(input("http://a", 0, 40_000, 2_000, 0), 1.5, 2.0, 0.3),
-            e3(input("http://b", 0, 0, 2_000, 40_000), 0.1, 0.6, 0.2),
+            forecast(input("http://a", 0, 40_000, 2_000, 0), 1.5, 2.0, 0.3),
+            forecast(input("http://b", 0, 0, 2_000, 40_000), 0.1, 0.6, 0.2),
         ];
-        let s = select_trade(&e3_params(0.0, 1.0), &inputs);
+        let s = select_min_cost(&forecast_params(0.0, 1.0), &inputs);
         assert_eq!((s.owner, s.best, s.chosen), (0, 1, 1));
         assert!(!s.margin_protected);
         assert_eq!(s.protect_reason, None);
@@ -1196,33 +1220,33 @@ mod trade_tests {
         assert!(close(s.costs[1].total, 13_500.0 * (0.6 + 0.39)));
         assert!(close(s.costs[0].total, 13_500.0 * 2.0));
         assert!(close(s.costs[1].wait_s, 0.1) && close(s.costs[1].service_s, 0.5));
-        let s = select_trade(&e3_params(0.0, 3.0), &inputs);
+        let s = select_min_cost(&forecast_params(0.0, 3.0), &inputs);
         assert_eq!((s.owner, s.best, s.chosen), (0, 1, 0));
         assert!(s.margin_protected);
         assert_eq!(s.protect_reason, Some("gate"));
         // The copy price is part of C: lambda 9.2 x 40,000 = 368,000 tokens
         // = 27.3 s of R; the owner keeps the request on cost alone.
-        let s = select_trade(&e3_params(9.2, 1.0), &inputs);
+        let s = select_min_cost(&forecast_params(9.2, 1.0), &inputs);
         assert_eq!((s.best, s.chosen), (0, 0));
         assert_eq!(s.protect_reason, None);
         // m = 0: a move needs only a positive gain.
-        let s = select_trade(&e3_params(0.0, 0.0), &inputs);
+        let s = select_min_cost(&forecast_params(0.0, 0.0), &inputs);
         assert_eq!(s.chosen, 1);
     }
 
-    /// A P without a usable forecast (no wait or no bound) has the ledger
+    /// A P without a usable forecast (no wait or no bound) has the work book
     /// cost and never wins a move: as best it is skipped while another P has
     /// a forecast; an owner without a forecast is kept (`owner_no_forecast`).
     #[test]
-    fn e3_candidates_without_a_forecast_never_win_a_move() {
-        let p = e3_params(0.0, 1.0);
-        // b has no forecast and the lowest ledger cost (empty backlog).
+    fn forecast_candidates_without_a_forecast_never_win_a_move() {
+        let p = forecast_params(0.0, 1.0);
+        // b has no forecast and the lowest token-count cost (empty backlog).
         let inputs = [
-            e3(input("http://a", 500_000, 40_000, 2_000, 0), 1.5, 2.0, 0.3),
+            forecast(input("http://a", 500_000, 40_000, 2_000, 0), 1.5, 2.0, 0.3),
             input("http://b", 0, 0, 2_000, 0),
-            e3(input("http://c", 0, 0, 2_000, 0), 1.6, 1.9, 0.3),
+            forecast(input("http://c", 0, 0, 2_000, 0), 1.6, 1.9, 0.3),
         ];
-        let s = select_trade(&p, &inputs);
+        let s = select_min_cost(&p, &inputs);
         assert!(s.costs[1].total < s.costs[2].total);
         assert_eq!(s.best, 2, "the best P with a forecast");
         assert_eq!(s.chosen, 0, "gain 0.1 s does not beat the margin");
@@ -1230,29 +1254,29 @@ mod trade_tests {
         // The owner has no forecast: it is kept, whatever the others cost.
         let inputs = [
             input("http://a", 900_000, 40_000, 2_000, 0),
-            e3(input("http://c", 0, 0, 2_000, 0), 0.0, 0.2, 0.1),
+            forecast(input("http://c", 0, 0, 2_000, 0), 0.0, 0.2, 0.1),
         ];
-        let s = select_trade(&p, &inputs);
+        let s = select_min_cost(&p, &inputs);
         assert_eq!((s.owner, s.best, s.chosen), (0, 1, 0));
         assert_eq!(s.protect_reason, Some("owner_no_forecast"));
         assert_eq!(s.owner_gain_s, None);
         // A forecast without a bound is not usable either.
-        let no_bound = TradeInput {
+        let no_bound = CostInput {
             bound_s: None,
-            ..e3(input("http://c", 0, 0, 2_000, 0), 0.0, 0.2, 0.1)
+            ..forecast(input("http://c", 0, 0, 2_000, 0), 0.0, 0.2, 0.1)
         };
         let inputs = [
-            e3(input("http://a", 0, 40_000, 2_000, 0), 1.5, 2.0, 0.3),
+            forecast(input("http://a", 0, 40_000, 2_000, 0), 1.5, 2.0, 0.3),
             no_bound,
         ];
-        let s = select_trade(&p, &inputs);
+        let s = select_min_cost(&p, &inputs);
         assert_eq!((s.best, s.chosen), (0, 0));
-        // No P is usable: the ledger argmin among all, owner kept.
+        // No P is usable: the token-count argmin among all, owner kept.
         let inputs = [
             input("http://a", 90_000, 40_000, 2_000, 0),
             input("http://b", 0, 0, 2_000, 0),
         ];
-        let s = select_trade(&p, &inputs);
+        let s = select_min_cost(&p, &inputs);
         assert_eq!((s.owner, s.best, s.chosen), (0, 1, 0));
         assert_eq!(s.protect_reason, Some("owner_no_forecast"));
     }
@@ -1260,23 +1284,23 @@ mod trade_tests {
     /// Without a cached owner the request goes to the best forecast; ties of
     /// the own hit choose the usable owner with the lower cost.
     #[test]
-    fn e3_cold_requests_take_the_best_forecast_and_owner_ties_prefer_forecasts() {
-        let p = e3_params(0.0, 1.0);
+    fn forecast_cold_requests_take_the_best_forecast_and_owner_ties_prefer_forecasts() {
+        let p = forecast_params(0.0, 1.0);
         let cold = [
-            e3(input("http://a", 0, 0, 9_000, 0), 1.0, 1.7, 0.4),
+            forecast(input("http://a", 0, 0, 9_000, 0), 1.0, 1.7, 0.4),
             input("http://b", 0, 0, 9_000, 0),
-            e3(input("http://c", 0, 0, 9_000, 0), 0.2, 0.9, 0.4),
+            forecast(input("http://c", 0, 0, 9_000, 0), 0.2, 0.9, 0.4),
         ];
-        let s = select_trade(&p, &cold);
+        let s = select_min_cost(&p, &cold);
         assert!(!s.has_owner);
         assert_eq!((s.best, s.chosen), (2, 2));
         assert_eq!(s.margin_s, None, "no gate without an owner");
         let tie = [
             input("http://a", 0, 16_384, 4_000, 0),
-            e3(input("http://b", 0, 16_384, 4_000, 0), 0.9, 1.2, 0.2),
-            e3(input("http://c", 0, 16_384, 4_000, 0), 0.5, 0.8, 0.2),
+            forecast(input("http://b", 0, 16_384, 4_000, 0), 0.9, 1.2, 0.2),
+            forecast(input("http://c", 0, 16_384, 4_000, 0), 0.5, 0.8, 0.2),
         ];
-        let s = select_trade(&p, &tie);
+        let s = select_min_cost(&p, &tie);
         assert_eq!(s.owner, 2, "usable first, then the lower cost");
         assert_eq!((s.best, s.chosen), (2, 2));
         assert_eq!(s.protect_reason, None);
@@ -1286,28 +1310,28 @@ mod trade_tests {
         (a - b).abs() < 1e-6
     }
 
-    /// The GWQ release tie-break: select_trade sends a cold request on four
-    /// idle P to the smallest URL every time; trade_tie_break keeps the
+    /// The global queue release tie-break: select_min_cost sends a cold request on four
+    /// idle P to the smallest URL every time; break_cost_tie keeps the
     /// exact ties and orders them by room, own hit, outstanding requests,
     /// then the rotation after the last URL (cyclic).
     #[test]
-    fn gwq_tie_break_rotates_exact_ties() {
+    fn queue_tie_break_rotates_exact_ties() {
         let p = params(4.6);
         let urls = ["http://p1", "http://p2", "http://p3", "http://p4"];
         let cold: Vec<_> = urls.iter().map(|u| input(u, 0, 0, 5_000, 0)).collect();
-        let s = select_trade(&p, &cold);
-        assert_eq!(s.chosen, 0, "plain TRADE: the smallest URL");
+        let s = select_min_cost(&p, &cold);
+        assert_eq!(s.chosen, 0, "plain cost function: the smallest URL");
         let room = [true; 4];
         let idle = [0u64; 4];
         let mut last: Option<&str> = None;
         let mut seen = Vec::new();
         for _ in 0..8 {
-            let t = TradeTieBreak {
+            let t = TieBreak {
                 room: &room,
                 outstanding: &idle,
                 last,
             };
-            let o = trade_tie_break(&s, &cold, &t);
+            let o = break_cost_tie(&s, &cold, &t);
             assert_eq!((o.tied, o.decided_by), (4, "rotation"));
             last = Some(urls[o.chosen]);
             seen.push(o.chosen);
@@ -1320,34 +1344,34 @@ mod trade_tests {
         // Room first, then the fewest outstanding requests.
         let room = [false, true, true, true];
         let out = [0u64, 3, 1, 1];
-        let t = TradeTieBreak {
+        let t = TieBreak {
             room: &room,
             outstanding: &out,
             last: Some("http://p3"),
         };
-        let o = trade_tie_break(&s, &cold, &t);
+        let o = break_cost_tie(&s, &cold, &t);
         assert_eq!(
             (o.chosen, o.decided_by),
             (3, "rotation"),
             "p3 and p4 have 1"
         );
         let out = [0u64, 3, 0, 1];
-        let t = TradeTieBreak {
+        let t = TieBreak {
             room: &room,
             outstanding: &out,
             last: None,
         };
-        assert_eq!(trade_tie_break(&s, &cold, &t).decided_by, "outstanding");
-        assert_eq!(trade_tie_break(&s, &cold, &t).chosen, 2);
-        let t = TradeTieBreak {
+        assert_eq!(break_cost_tie(&s, &cold, &t).decided_by, "outstanding");
+        assert_eq!(break_cost_tie(&s, &cold, &t).chosen, 2);
+        let t = TieBreak {
             room: &[false, true, false, false],
             outstanding: &out,
             last: None,
         };
         assert_eq!(
             (
-                trade_tie_break(&s, &cold, &t).chosen,
-                trade_tie_break(&s, &cold, &t).decided_by
+                break_cost_tie(&s, &cold, &t).chosen,
+                break_cost_tie(&s, &cold, &t).decided_by
             ),
             (1, "room")
         );
@@ -1357,35 +1381,35 @@ mod trade_tests {
             input("http://p2", 1_000, 1_000, 4_000, 0),
             input("http://p3", 0, 0, 6_000, 0),
         ];
-        let s = select_trade(&p, &warm);
-        let t = TradeTieBreak {
+        let s = select_min_cost(&p, &warm);
+        let t = TieBreak {
             room: &[true; 3],
             outstanding: &[5, 0, 0],
             last: None,
         };
-        let o = trade_tie_break(&s, &warm, &t);
+        let o = break_cost_tie(&s, &warm, &t);
         assert_eq!((o.chosen, o.tied, o.decided_by), (1, 2, "local_hit"));
         let busy = [
             input("http://p1", 10, 0, 5_000, 0),
             input("http://p2", 0, 0, 5_000, 0),
         ];
-        let s = select_trade(&p, &busy);
-        let t = TradeTieBreak {
+        let s = select_min_cost(&p, &busy);
+        let t = TieBreak {
             room: &[true; 2],
             outstanding: &[0, 9],
             last: None,
         };
-        let o = trade_tie_break(&s, &busy, &t);
+        let o = break_cost_tie(&s, &busy, &t);
         assert_eq!((o.chosen, o.tied, o.decided_by), (1, 1, "none"));
     }
 
     #[test]
     fn defaults_match_the_flag_defaults() {
-        let p = TradeParams::default();
-        assert_eq!(p.rate_tokens_per_s, 13_500.0);
-        assert_eq!(p.pull_fixed_ms, 450.0);
-        assert_eq!(p.pull_ms_per_100k, 100.0);
-        assert_eq!(p.copy_lambda, 4.6);
+        let p = PlacementCostParams::default();
+        assert_eq!(p.prefill_rate_tokens_per_s, 13_500.0);
+        assert_eq!(p.fetch_fixed_ms, 450.0);
+        assert_eq!(p.fetch_ms_per_100k_tokens, 100.0);
+        assert_eq!(p.copy_price, 4.6);
         // 0.45 s + 0.10 s per 100k tokens; no pull takes no time.
         assert!(close(p.pull_seconds(100_000), 0.55));
         assert!(close(p.pull_seconds(50_000), 0.50));
@@ -1394,7 +1418,7 @@ mod trade_tests {
 
     #[test]
     fn no_pull_cost_is_backlog_plus_own_uncached_only() {
-        let c = trade_cost(&params(9.2), 40_000, 12_000, 0);
+        let c = placement_cost(&params(9.2), 40_000, 12_000, 0);
         assert_eq!(c.pull_s, 0.0);
         assert_eq!(c.exposed_pull_s, 0.0);
         assert_eq!(c.copy_tokens, 0.0);
@@ -1404,11 +1428,11 @@ mod trade_tests {
     #[test]
     fn pull_on_an_idle_p_pays_the_whole_pull_time_and_the_copy() {
         // Idle P: nothing hides the pull. 100k pulled -> 0.55 s x 13,500 = 7,425.
-        let c = trade_cost(&params(0.0), 0, 2_000, 100_000);
+        let c = placement_cost(&params(0.0), 0, 2_000, 100_000);
         assert!(close(c.exposed_pull_s, 0.55));
         assert!(close(c.exposed_pull_tokens, 7_425.0));
         assert!(close(c.total, 9_425.0));
-        let c = trade_cost(&params(9.2), 0, 2_000, 100_000);
+        let c = placement_cost(&params(9.2), 0, 2_000, 100_000);
         assert!(close(c.copy_tokens, 920_000.0));
         assert!(close(c.total, 929_425.0));
     }
@@ -1416,16 +1440,16 @@ mod trade_tests {
     #[test]
     fn backlog_hides_the_pull_partly_or_completely() {
         // Wait = 5,400 / 13,500 = 0.4 s < 0.55 s pull -> 0.15 s exposed.
-        let c = trade_cost(&params(0.0), 5_400, 1_000, 100_000);
+        let c = placement_cost(&params(0.0), 5_400, 1_000, 100_000);
         assert!(close(c.exposed_pull_s, 0.15));
         assert!(close(c.total, 5_400.0 + 1_000.0 + 0.15 * 13_500.0));
         // Wait = 2 s >= 0.55 s -> fully hidden; cost = backlog + u.
-        let c = trade_cost(&params(0.0), 27_000, 1_000, 100_000);
+        let c = placement_cost(&params(0.0), 27_000, 1_000, 100_000);
         assert_eq!(c.exposed_pull_s, 0.0);
         assert!(close(c.total, 28_000.0));
         // Equivalent completion form: R x (max(wait, pull) + u / R).
         for backlog in [0u128, 3_000, 7_425, 20_000] {
-            let c = trade_cost(&params(0.0), backlog, 4_000, 100_000);
+            let c = placement_cost(&params(0.0), backlog, 4_000, 100_000);
             let wait = backlog as f64 / 13_500.0;
             assert!(close(
                 c.total,
@@ -1437,21 +1461,21 @@ mod trade_tests {
     #[test]
     fn floor_turns_a_small_gain_into_no_pull() {
         // Gain 511 < 512: no pull, the target recomputes.
-        assert_eq!(trade_pull_tokens(10_000, 10_511, 50_000, 512), 0);
+        assert_eq!(fetch_tokens(10_000, 10_511, 50_000, 512), 0);
         // Gain 512 >= 512: pull.
-        assert_eq!(trade_pull_tokens(10_000, 10_512, 50_000, 512), 512);
+        assert_eq!(fetch_tokens(10_000, 10_512, 50_000, 512), 512);
         // The source match is clamped to the request.
-        assert_eq!(trade_pull_tokens(10_000, 90_000, 50_000, 512), 40_000);
+        assert_eq!(fetch_tokens(10_000, 90_000, 50_000, 512), 40_000);
         // No source better than the target.
-        assert_eq!(trade_pull_tokens(10_000, 8_000, 50_000, 512), 0);
+        assert_eq!(fetch_tokens(10_000, 8_000, 50_000, 512), 0);
         // Floor 0 (gate disabled) or below 512 still uses 512.
-        assert_eq!(trade_pull_tokens(10_000, 10_000, 50_000, 0), 0);
-        assert_eq!(trade_pull_tokens(10_000, 10_001, 50_000, 0), 0);
-        assert_eq!(trade_pull_tokens(10_000, 10_511, 50_000, 1), 0);
-        assert_eq!(trade_pull_tokens(10_000, 10_512, 50_000, 0), 512);
+        assert_eq!(fetch_tokens(10_000, 10_000, 50_000, 0), 0);
+        assert_eq!(fetch_tokens(10_000, 10_001, 50_000, 0), 0);
+        assert_eq!(fetch_tokens(10_000, 10_511, 50_000, 1), 0);
+        assert_eq!(fetch_tokens(10_000, 10_512, 50_000, 0), 512);
         // A floor above 512 is kept.
-        assert_eq!(trade_pull_tokens(10_000, 11_000, 50_000, 1_024), 0);
-        assert_eq!(trade_pull_tokens(10_000, 11_024, 50_000, 1_024), 1_024);
+        assert_eq!(fetch_tokens(10_000, 11_000, 50_000, 1_024), 0);
+        assert_eq!(fetch_tokens(10_000, 11_024, 50_000, 1_024), 1_024);
     }
 
     /// Owner A holds 100k of a 110k prompt and has 60k backlog. B is idle and
@@ -1463,12 +1487,12 @@ mod trade_tests {
             input("http://a", 60_000, 100_000, 10_000, 0),
             input("http://b", 0, 0, 10_000, 100_000),
         ];
-        let s = select_trade(&params(0.0), &inputs);
+        let s = select_min_cost(&params(0.0), &inputs);
         assert_eq!(s.owner, 0);
         assert!(s.has_owner);
         assert_eq!(s.chosen, 1);
         assert!(close(s.costs[1].total, 17_425.0));
-        let s = select_trade(&params(9.2), &inputs);
+        let s = select_min_cost(&params(9.2), &inputs);
         assert_eq!(s.chosen, 0);
         assert!(close(s.costs[0].total, 70_000.0));
     }
@@ -1481,7 +1505,7 @@ mod trade_tests {
             input("http://b", 10_000, 0, 8_000, 0),
             input("http://c", 20_000, 0, 8_000, 0),
         ];
-        let s = select_trade(&params(9.2), &inputs);
+        let s = select_min_cost(&params(9.2), &inputs);
         assert!(!s.has_owner);
         assert_eq!(s.chosen, 1);
     }
@@ -1495,7 +1519,7 @@ mod trade_tests {
             input("http://a", 50_000, 400, 9_600, 0),
             input("http://b", 0, 0, 10_000, 0),
         ];
-        let s = select_trade(&params(9.2), &inputs);
+        let s = select_min_cost(&params(9.2), &inputs);
         assert_eq!(s.owner, 0);
         assert_eq!(s.chosen, 1);
         assert!(close(s.costs[1].total, 10_000.0));
@@ -1509,7 +1533,7 @@ mod trade_tests {
             input("http://b", 5_000, 5_000, 15_000, 0),
             input("http://c", 0, 20_000, 20_000, 0),
         ];
-        let s = select_trade(&params(9.2), &inputs);
+        let s = select_min_cost(&params(9.2), &inputs);
         assert_eq!(s.owner, 2);
         assert_eq!(s.chosen, 2);
         // Without the owner in the tie: higher own hit, then lower backlog.
@@ -1518,14 +1542,14 @@ mod trade_tests {
             input("http://b", 5_000, 5_000, 15_000, 0),
             input("http://c", 0, 30_000, 30_000, 0),
         ];
-        let s = select_trade(&params(9.2), &inputs);
+        let s = select_min_cost(&params(9.2), &inputs);
         assert_eq!(s.owner, 2);
         assert_eq!(s.chosen, 1);
         let inputs = [
             input("http://a", 12_000, 0, 8_000, 0),
             input("http://b", 10_000, 0, 10_000, 0),
         ];
-        let s = select_trade(&params(9.2), &inputs);
+        let s = select_min_cost(&params(9.2), &inputs);
         assert_eq!(s.owner, 1, "no hit anywhere: owner = lowest backlog");
         assert_eq!(s.chosen, 1);
         // Full tie: the smaller URL.
@@ -1533,21 +1557,26 @@ mod trade_tests {
             input("http://b", 10_000, 0, 10_000, 0),
             input("http://a", 10_000, 0, 10_000, 0),
         ];
-        assert_eq!(select_trade(&params(9.2), &inputs).chosen, 1);
+        assert_eq!(select_min_cost(&params(9.2), &inputs).chosen, 1);
     }
 
-    /// The TRADE cost and selection of the first version,
+    /// The placement cost and selection of the first version,
     /// copied here unchanged so that the defaults are pinned against it.
     mod first_version {
-        use crate::scheduler::trade::{TradeInput, TradeParams};
+        use crate::scheduler::placement_cost::{CostInput, PlacementCostParams};
 
         pub struct Cost {
             pub total: f64,
         }
 
-        pub fn trade_cost(params: &TradeParams, backlog: u128, uncached: u64, pulled: u64) -> Cost {
+        pub fn placement_cost(
+            params: &PlacementCostParams,
+            backlog: u128,
+            uncached: u64,
+            pulled: u64,
+        ) -> Cost {
             let backlog = backlog as f64;
-            let rate = params.rate_tokens_per_s;
+            let rate = params.prefill_rate_tokens_per_s;
             let pull_s = params.pull_seconds(pulled);
             let exposed_pull_s = if pulled == 0 {
                 0.0
@@ -1555,20 +1584,20 @@ mod trade_tests {
                 (pull_s - backlog / rate).max(0.0)
             };
             let exposed_pull_tokens = rate * exposed_pull_s;
-            let copy_tokens = params.copy_lambda * pulled as f64;
+            let copy_tokens = params.copy_price * pulled as f64;
             Cost {
                 total: backlog + uncached as f64 + exposed_pull_tokens + copy_tokens,
             }
         }
 
         /// (chosen, owner, has_owner, costs)
-        pub fn select_trade(
-            params: &TradeParams,
-            inputs: &[TradeInput<'_>],
+        pub fn select_min_cost(
+            params: &PlacementCostParams,
+            inputs: &[CostInput<'_>],
         ) -> (usize, usize, bool, Vec<Cost>) {
             let costs: Vec<Cost> = inputs
                 .iter()
-                .map(|i| trade_cost(params, i.backlog, i.uncached, i.pulled))
+                .map(|i| placement_cost(params, i.backlog, i.uncached, i.pulled))
                 .collect();
             let owner = inputs
                 .iter()
@@ -1599,17 +1628,17 @@ mod trade_tests {
         }
     }
 
-    /// wait = eft: R x B_w and R x S_w replace the ledger backlog and u; the
+    /// forecast wait: R x B_w and R x S_w replace the work-book backlog and u; the
     /// pull is hidden behind B_w (not backlog / R).
     #[test]
-    fn eft_terms_replace_the_ledger_wait_and_service() {
+    fn forecast_terms_replace_the_token_wait_and_service() {
         let p = params(0.0);
-        let w = TradeWaitTerms {
+        let w = WaitTerms {
             wait_s: 0.2,
             service_s: 0.3,
         };
-        // Ledger backlog 27,000 (2 s) would hide the 0.55 s pull; B_w = 0.2 s does not.
-        let c = trade_cost_full(&p, 27_000, 1_000, 100_000, Some(w));
+        // Work-book backlog 27,000 (2 s) would hide the 0.55 s pull; B_w = 0.2 s does not.
+        let c = placement_cost_full(&p, 27_000, 1_000, 100_000, Some(w));
         assert!(close(c.backlog, 0.2 * 13_500.0));
         assert!(close(c.uncached, 0.3 * 13_500.0));
         assert!(close(c.exposed_pull_s, 0.35));
@@ -1617,43 +1646,43 @@ mod trade_tests {
         assert_eq!(c.wait_s, 0.2);
         assert_eq!(c.service_s, 0.3);
         // A long B_w hides the pull entirely.
-        let c = trade_cost_full(
+        let c = placement_cost_full(
             &p,
             0,
             1_000,
             100_000,
-            Some(TradeWaitTerms {
+            Some(WaitTerms {
                 wait_s: 3.0,
                 service_s: 0.3,
             }),
         );
         assert_eq!(c.exposed_pull_s, 0.0);
-        // The owner looks idle on the ledger (0 backlog) but its engine
+        // The owner looks idle in the work book (0 backlog) but its engine
         // queue drains in 5 s; an idle peer that pulls wins.
         let inputs = [
-            eft(input("http://a", 0, 18_000, 2_000, 0), 5.0, 0.08),
-            eft(input("http://b", 0, 0, 2_000, 18_000), 0.0, 0.08),
+            with_forecast(input("http://a", 0, 18_000, 2_000, 0), 5.0, 0.08),
+            with_forecast(input("http://b", 0, 0, 2_000, 18_000), 0.0, 0.08),
         ];
-        let s = select_trade(&p, &inputs);
+        let s = select_min_cost(&p, &inputs);
         assert_eq!(s.owner, 0);
         assert_eq!(s.chosen, 1);
         assert_eq!(s.best, 1);
         assert!(!s.margin_protected);
-        // The same inputs on the ledger keep the owner.
-        let ledger: Vec<_> = inputs
+        // The same inputs in the work book keep the owner.
+        let tokens: Vec<_> = inputs
             .iter()
-            .map(|i| TradeInput { wait: None, ..*i })
+            .map(|i| CostInput { wait: None, ..*i })
             .collect();
-        assert_eq!(select_trade(&p, &ledger).chosen, 0);
-        // Mixed: a fallback P (ledger terms) next to an EFT P.
+        assert_eq!(select_min_cost(&p, &tokens).chosen, 0);
+        // Mixed: a fallback P (token-count terms) next to an forecast P.
         let mixed = [
             inputs[0],
-            TradeInput {
+            CostInput {
                 wait: None,
                 ..inputs[1]
             },
         ];
-        let s = select_trade(&p, &mixed);
+        let s = select_min_cost(&p, &mixed);
         assert!(close(
             s.costs[1].total,
             2_000.0 + 13_500.0 * p.pull_seconds(18_000)
@@ -1661,21 +1690,21 @@ mod trade_tests {
         assert_eq!(s.chosen, 1);
     }
 
-    fn auto_lambda() -> TradeParams {
-        TradeParams {
-            copy_lambda: 18.4,
-            copy_lambda_mode: TradeLambdaMode::Auto {
-                min: DEFAULT_TRADE_AUTO_LAMBDA_MIN,
-                max: DEFAULT_TRADE_AUTO_LAMBDA_MAX,
+    fn auto_lambda() -> PlacementCostParams {
+        PlacementCostParams {
+            copy_price: 18.4,
+            copy_price_mode: CopyPriceMode::Auto {
+                min: DEFAULT_COPY_PRICE_MIN,
+                max: DEFAULT_COPY_PRICE_MAX,
             },
-            ..TradeParams::default()
+            ..PlacementCostParams::default()
         }
     }
 
     /// The measurements of a loaded 3P pool after start-up: 90 sessions,
     /// busy 0.75, 9 in-flight requests per P, R_hat 15,000 tokens/s.
-    fn loaded() -> TradeAutoInputs {
-        TradeAutoInputs {
+    fn loaded() -> AutoPriceInputs {
+        AutoPriceInputs {
             elapsed_s: 600.0,
             n_p: 3,
             n_active: 90,
@@ -1688,53 +1717,53 @@ mod trade_tests {
     /// lambda = clamp(q * R / R_hat, min, max); rate auto makes R / R_hat = 1
     /// and sets R = R_hat. The selection then charges the resolved price.
     #[test]
-    fn trade_auto_lambda_is_the_clamped_formula() {
+    fn cost_auto_lambda_is_the_clamped_formula() {
         // sat: q = 90 / 3 x 0.75 = 22.5; lambda = 22.5 x 13,500 / 15,000 = 20.25.
         let (p, r) = auto_lambda().resolved(&loaded());
-        assert_eq!((r.lambda_mode, r.rate_mode), ("auto", "fixed"));
+        assert_eq!((r.copy_price_mode, r.prefill_rate_mode), ("auto", "fixed"));
         assert!(close(r.q.unwrap(), 22.5));
-        assert!(close(r.lambda_raw.unwrap(), 20.25));
-        assert!(close(p.copy_lambda, 20.25));
-        assert_eq!(p.copy_lambda.to_bits(), r.copy_lambda_used.to_bits());
+        assert!(close(r.copy_price_raw.unwrap(), 20.25));
+        assert!(close(p.copy_price, 20.25));
+        assert_eq!(p.copy_price.to_bits(), r.copy_price_used.to_bits());
         assert_eq!(r.fallback_reason, None);
-        assert_eq!(p.rate_tokens_per_s, 13_500.0);
+        assert_eq!(p.prefill_rate_tokens_per_s, 13_500.0);
         assert_eq!(r.rate_used, 13_500.0);
-        assert_eq!(p.copy_lambda_mode, auto_lambda().copy_lambda_mode);
+        assert_eq!(p.copy_price_mode, auto_lambda().copy_price_mode);
         // rate auto: R = R_hat = 15,000, so lambda = q = 22.5.
-        let both = TradeParams {
-            rate_mode: TradeRateMode::Auto,
+        let both = PlacementCostParams {
+            prefill_rate_mode: PrefillRateMode::Auto,
             ..auto_lambda()
         };
         let (p, r) = both.resolved(&loaded());
-        assert_eq!(r.rate_mode, "auto");
-        assert_eq!(p.rate_tokens_per_s, 15_000.0);
+        assert_eq!(r.prefill_rate_mode, "auto");
+        assert_eq!(p.prefill_rate_tokens_per_s, 15_000.0);
         assert_eq!(r.rate_fallback_reason, None);
-        assert!(close(p.copy_lambda, 22.5));
+        assert!(close(p.copy_price, 22.5));
         // Clamps: min 4.6 (q = 30 x 0.05 = 1.5 -> raw 1.35), max (raw 20.25 > 20).
-        let light = TradeAutoInputs {
+        let light = AutoPriceInputs {
             busy: Some(0.05),
             ..loaded()
         };
         let (p, r) = auto_lambda().resolved(&light);
-        assert!(close(r.lambda_raw.unwrap(), 1.35));
-        assert_eq!(p.copy_lambda, 4.6);
+        assert!(close(r.copy_price_raw.unwrap(), 1.35));
+        assert_eq!(p.copy_price, 4.6);
         assert_eq!(r.fallback_reason, None, "a clamp is not a fallback");
-        let capped = TradeParams {
-            copy_lambda_mode: TradeLambdaMode::Auto {
+        let capped = PlacementCostParams {
+            copy_price_mode: CopyPriceMode::Auto {
                 min: 4.6,
                 max: 20.0,
             },
             ..auto_lambda()
         };
-        assert_eq!(capped.resolved(&loaded()).0.copy_lambda, 20.0);
+        assert_eq!(capped.resolved(&loaded()).0.copy_price, 20.0);
         // An idle pool (busy 0) prices at the floor; it is not a fallback.
-        let idle = TradeAutoInputs {
+        let idle = AutoPriceInputs {
             busy: Some(0.0),
             ..loaded()
         };
         let (p, r) = auto_lambda().resolved(&idle);
         assert_eq!(
-            (p.copy_lambda, r.lambda_raw, r.fallback_reason),
+            (p.copy_price, r.copy_price_raw, r.fallback_reason),
             (4.6, Some(0.0), None)
         );
         // The selection charges the resolved price: b pulls 100k at 20.25.
@@ -1743,31 +1772,31 @@ mod trade_tests {
             input("http://b", 0, 0, 10_000, 100_000),
         ];
         let (p, _) = auto_lambda().resolved(&loaded());
-        let s = select_trade(&p, &inputs);
+        let s = select_min_cost(&p, &inputs);
         assert!(close(s.costs[1].copy_tokens, 2_025_000.0));
         assert!(close(s.costs[1].total, 2_025_000.0 + 7_425.0 + 10_000.0));
         assert_eq!(s.chosen, 0);
     }
 
     /// Start-up (less than tau seconds of history) and each missing input
-    /// give the fixed `copy_lambda` (not clamped) and name the reason; rate
-    /// auto falls back to `rate_tokens_per_s`.
+    /// give the fixed `copy_price` (not clamped) and name the reason; rate
+    /// auto falls back to `prefill_rate_tokens_per_s`.
     #[test]
-    fn trade_auto_falls_back_at_startup_and_on_missing_inputs() {
+    fn cost_auto_falls_back_at_startup_and_on_missing_inputs() {
         let sat = auto_lambda();
-        let reason = |p: &TradeParams, i: TradeAutoInputs| {
+        let reason = |p: &PlacementCostParams, i: AutoPriceInputs| {
             let (params, r) = p.resolved(&i);
-            (params.copy_lambda, r.fallback_reason)
+            (params.copy_price, r.fallback_reason)
         };
-        let early = TradeAutoInputs {
+        let early = AutoPriceInputs {
             elapsed_s: 119.9,
             ..loaded()
         };
         assert_eq!(reason(&sat, early), (18.4, Some("startup")));
         let (_, r) = sat.resolved(&early);
         assert!(close(r.q.unwrap(), 22.5), "q is still traced");
-        assert!(r.lambda_raw.is_none());
-        let at_tau = TradeAutoInputs {
+        assert!(r.copy_price_raw.is_none());
+        let at_tau = AutoPriceInputs {
             elapsed_s: 120.0,
             ..loaded()
         };
@@ -1776,17 +1805,17 @@ mod trade_tests {
             None,
             "tau seconds of history end the start-up"
         );
-        let nan = TradeAutoInputs {
+        let nan = AutoPriceInputs {
             elapsed_s: f64::NAN,
             ..loaded()
         };
         assert_eq!(reason(&sat, nan).1, Some("startup"));
-        let no_sessions = TradeAutoInputs {
+        let no_sessions = AutoPriceInputs {
             n_active: 0,
             ..loaded()
         };
         assert_eq!(reason(&sat, no_sessions), (18.4, Some("no_sessions")));
-        let no_history = TradeAutoInputs {
+        let no_history = AutoPriceInputs {
             busy: None,
             inflight: None,
             r_hat: None,
@@ -1800,58 +1829,58 @@ mod trade_tests {
             Some(f64::NAN),
             Some(f64::INFINITY),
         ] {
-            let i = TradeAutoInputs { r_hat, ..loaded() };
+            let i = AutoPriceInputs { r_hat, ..loaded() };
             assert_eq!(reason(&sat, i), (18.4, Some("no_rate")), "{r_hat:?}");
         }
-        let huge = TradeAutoInputs {
+        let huge = AutoPriceInputs {
             n_active: usize::MAX,
             busy: Some(f64::MAX),
             ..loaded()
         };
         assert_eq!(reason(&sat, huge), (18.4, Some("not_finite")));
         // Rate auto: R falls back at start-up and without R_hat.
-        let both = TradeParams {
-            rate_mode: TradeRateMode::Auto,
+        let both = PlacementCostParams {
+            prefill_rate_mode: PrefillRateMode::Auto,
             ..sat
         };
         let (p, r) = both.resolved(&early);
         assert_eq!(
-            (p.rate_tokens_per_s, r.rate_fallback_reason),
+            (p.prefill_rate_tokens_per_s, r.rate_fallback_reason),
             (13_500.0, Some("startup"))
         );
-        let (p, r) = both.resolved(&TradeAutoInputs {
+        let (p, r) = both.resolved(&AutoPriceInputs {
             r_hat: None,
             ..loaded()
         });
         assert_eq!(
-            (p.rate_tokens_per_s, r.rate_fallback_reason),
+            (p.prefill_rate_tokens_per_s, r.rate_fallback_reason),
             (13_500.0, Some("no_rate"))
         );
-        assert_eq!((p.copy_lambda, r.fallback_reason), (18.4, Some("no_rate")));
+        assert_eq!((p.copy_price, r.fallback_reason), (18.4, Some("no_rate")));
         // Fixed lambda with rate auto: the fixed price, never clamped.
-        let rate_only = TradeParams {
-            copy_lambda: 2.0,
-            rate_mode: TradeRateMode::Auto,
-            ..TradeParams::default()
+        let rate_only = PlacementCostParams {
+            copy_price: 2.0,
+            prefill_rate_mode: PrefillRateMode::Auto,
+            ..PlacementCostParams::default()
         };
         let (p, r) = rate_only.resolved(&loaded());
         assert_eq!(
-            (p.copy_lambda, r.fallback_reason, r.lambda_mode),
+            (p.copy_price, r.fallback_reason, r.copy_price_mode),
             (2.0, None, "fixed")
         );
-        assert_eq!(p.rate_tokens_per_s, 15_000.0);
+        assert_eq!(p.prefill_rate_tokens_per_s, 15_000.0);
     }
 
-    /// The per-P ledger: busy, in-flight and the credited token rate as
+    /// The per-P work book: busy, in-flight and the credited token rate as
     /// continuous-time EWMAs with the start-up correction, the busy period
     /// at an empty P, and no change for an end without a dispatch.
     #[test]
-    fn trade_auto_state_measures_busy_inflight_and_rate() {
+    fn cost_auto_state_measures_busy_inflight_and_rate() {
         let t0 = Instant::now();
         let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
         let e = |x: f64| (-x).exp();
         let tau = 120.0;
-        let mut st = TradeAutoState::new(t0, tau);
+        let mut st = AutoPriceState::new(t0, tau);
         st.observe_pool(["http://a", "http://b"], t0);
         assert!(
             st.worker("http://a", t0).is_none(),
@@ -1874,9 +1903,12 @@ mod trade_tests {
         assert_eq!(v.in_flight, 0);
         assert!(close(v.busy, busy_a), "{v:?}");
         assert!(close(v.inflight, busy_a), "{v:?}");
-        assert!(close(v.rate_tokens_per_s, rate_a), "{v:?}");
+        assert!(close(v.prefill_rate_tokens_per_s, rate_a), "{v:?}");
         let b = st.worker("http://b", at(120.0)).unwrap();
-        assert_eq!((b.busy, b.inflight, b.rate_tokens_per_s), (0.0, 0.0, 0.0));
+        assert_eq!(
+            (b.busy, b.inflight, b.prefill_rate_tokens_per_s),
+            (0.0, 0.0, 0.0)
+        );
         let inputs = st.inputs(at(120.0), &["http://a", "http://b"], 300.0);
         assert_eq!((inputs.n_p, inputs.n_active), (2, 0));
         assert!(close(inputs.elapsed_s, 120.0));
@@ -1904,7 +1936,9 @@ mod trade_tests {
         assert!(st.prefill_done("http://z", Some(5), at(300.0)).is_none());
         assert_eq!((st.credited, st.uncredited), (2, 1));
         assert_eq!(
-            st.worker("http://b", at(300.0)).unwrap().rate_tokens_per_s,
+            st.worker("http://b", at(300.0))
+                .unwrap()
+                .prefill_rate_tokens_per_s,
             0.0
         );
         assert_eq!(
@@ -1914,7 +1948,7 @@ mod trade_tests {
         // Steady state: busy 3 s of every 6 s with 30k tokens per period
         // (10,000 per busy second) for 20 tau: busy -> 0.5, R_hat -> 10,000
         // (the EWMA ripple at the measured phase is about 1 %).
-        let mut st = TradeAutoState::new(t0, tau);
+        let mut st = AutoPriceState::new(t0, tau);
         st.observe_pool(["http://p"], t0);
         let mut t = 0.0;
         while t < 20.0 * tau {
@@ -1935,20 +1969,20 @@ mod trade_tests {
     /// window after its last event; END removes it at once; a request of an
     /// ended session never underflows; the session limit holds.
     #[test]
-    fn trade_auto_sessions_count_in_flight_recent_and_not_ended() {
+    fn cost_auto_sessions_count_in_flight_recent_and_not_ended() {
         let t0 = Instant::now();
         let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
-        assert_eq!(trade_session_key("agent-1", 0), "0/agent-1");
-        assert_ne!(trade_session_key("a", 1), trade_session_key("a", 0));
-        let [s1, s2, s3] =
-            ["agent-1", "agent-2", "agent-3"].map(|a| trade_session_hash(&trade_session_key(a, 0)));
+        assert_eq!(placement_session_key("agent-1", 0), "0/agent-1");
+        assert_ne!(placement_session_key("a", 1), placement_session_key("a", 0));
+        let [s1, s2, s3] = ["agent-1", "agent-2", "agent-3"]
+            .map(|a| placement_session_hash(&placement_session_key(a, 0)));
         assert!(s1 != s2 && s2 != s3 && s1 != s3);
         assert_eq!(
             s1,
-            trade_session_hash("0/agent-1"),
+            placement_session_hash("0/agent-1"),
             "stable within the process"
         );
-        let mut st = TradeAutoState::new(t0, 120.0);
+        let mut st = AutoPriceState::new(t0, 120.0);
         let idle = 300.0;
         st.session_started(s1, at(0.0));
         st.session_started(s2, at(10.0));
@@ -1991,28 +2025,28 @@ mod trade_tests {
         assert_eq!(st.active_sessions(at(3_899.0), idle), 1);
         assert_eq!(st.active_sessions(at(3_901.0), idle), 0);
         // The limit: a new session above it is not counted.
-        let mut st = TradeAutoState::new(t0, 120.0);
-        for i in 0..TRADE_AUTO_MAX_SESSIONS as u64 {
+        let mut st = AutoPriceState::new(t0, 120.0);
+        for i in 0..AUTO_PRICE_MAX_SESSIONS as u64 {
             st.session_started(i, at(0.0));
         }
         st.session_started(u64::MAX, at(1.0));
         st.session_finished(u64::MAX, at(2.0));
-        assert_eq!(st.active_sessions(at(2.0), idle), TRADE_AUTO_MAX_SESSIONS);
+        assert_eq!(st.active_sessions(at(2.0), idle), AUTO_PRICE_MAX_SESSIONS);
         assert_eq!(st.sessions_dropped, 1);
         st.session_started(7, at(3.0));
         assert_eq!(st.sessions_dropped, 1, "a counted session is not new");
     }
 
-    /// From the ledger to the price: 3 P, each busy 3 s of every 4 s with
+    /// From the work book to the price: 3 P, each busy 3 s of every 4 s with
     /// 10,000 tokens per busy second, and 90 sessions. After 20 tau,
     /// q = 90 / 3 x 0.75 and lambda = q x 13,500 / 10,000 = 30.4 (the EWMA
     /// ripple at the measured phase is below 2 %).
     #[test]
-    fn trade_auto_state_feeds_the_resolved_price() {
+    fn cost_auto_state_feeds_the_resolved_price() {
         let t0 = Instant::now();
         let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
         let pool = ["http://a", "http://b", "http://c"];
-        let mut st = TradeAutoState::new(t0, 120.0);
+        let mut st = AutoPriceState::new(t0, 120.0);
         st.observe_pool(pool, t0);
         let mut t = 0.0;
         while t < 2_400.0 {
@@ -2031,27 +2065,27 @@ mod trade_tests {
         let (p, r) = auto_lambda().resolved(&inputs);
         assert_eq!(r.fallback_reason, None);
         assert!((r.q.unwrap() / 22.5 - 1.0).abs() < 0.01, "{r:?}");
-        assert!((p.copy_lambda / 30.375 - 1.0).abs() < 0.03, "{r:?}");
+        assert!((p.copy_price / 30.375 - 1.0).abs() < 0.03, "{r:?}");
         // Before tau seconds of history the fixed price applies.
-        let mut fresh = TradeAutoState::new(at(t), 120.0);
+        let mut fresh = AutoPriceState::new(at(t), 120.0);
         fresh.observe_pool(pool, at(t));
         let early = fresh.inputs(at(t + 60.0), &pool, 300.0);
         let (p, r) = auto_lambda().resolved(&early);
-        assert_eq!((p.copy_lambda, r.fallback_reason), (18.4, Some("startup")));
+        assert_eq!((p.copy_price, r.fallback_reason), (18.4, Some("startup")));
     }
 
     /// Fixed copy price and fixed rate: `resolved` returns the parameters
     /// unchanged (bit for bit) for any measurements, so selection and costs
     /// equal the first version; the defaults are fixed and is_original.
     #[test]
-    fn trade_auto_fixed_mode_resolves_to_the_same_params_bit_for_bit() {
-        let d = TradeParams::default();
-        assert_eq!(d.copy_lambda_mode, TradeLambdaMode::Fixed);
-        assert_eq!(d.rate_mode, TradeRateMode::Fixed);
+    fn cost_auto_fixed_mode_resolves_to_the_same_params_bit_for_bit() {
+        let d = PlacementCostParams::default();
+        assert_eq!(d.copy_price_mode, CopyPriceMode::Fixed);
+        assert_eq!(d.prefill_rate_mode, PrefillRateMode::Fixed);
         assert_eq!(d.auto_tau_s, 120.0);
         assert_eq!(d.auto_session_idle_s, 300.0);
         assert!(!d.is_auto() && d.is_original());
-        assert!(TradeParams {
+        assert!(PlacementCostParams {
             auto_tau_s: 5.0,
             auto_session_idle_s: 1.0,
             ..d
@@ -2059,25 +2093,25 @@ mod trade_tests {
         .is_original());
         let lam = auto_lambda();
         assert!(lam.is_auto() && !lam.is_original());
-        let rate = TradeParams {
-            rate_mode: TradeRateMode::Auto,
+        let rate = PlacementCostParams {
+            prefill_rate_mode: PrefillRateMode::Auto,
             ..d
         };
         assert!(rate.is_auto() && !rate.is_original());
         let measurements = [
-            TradeAutoInputs::default(),
+            AutoPriceInputs::default(),
             loaded(),
-            TradeAutoInputs {
+            AutoPriceInputs {
                 elapsed_s: 1.0,
                 ..loaded()
             },
-            TradeAutoInputs {
+            AutoPriceInputs {
                 busy: None,
                 inflight: None,
                 r_hat: None,
                 ..loaded()
             },
-            TradeAutoInputs {
+            AutoPriceInputs {
                 r_hat: Some(f64::NAN),
                 ..loaded()
             },
@@ -2091,40 +2125,46 @@ mod trade_tests {
         };
         let workers = ["http://a", "http://b", "http://c", "http://d"];
         for round in 0..2_000 {
-            let p = TradeParams {
-                copy_lambda: [0.0, 9.2, 18.4][next(3) as usize],
-                rate_tokens_per_s: [13_500.0, 20_000.0][next(2) as usize],
-                wait: TradeWait::Ledger,
+            let p = PlacementCostParams {
+                copy_price: [0.0, 9.2, 18.4][next(3) as usize],
+                prefill_rate_tokens_per_s: [13_500.0, 20_000.0][next(2) as usize],
+                wait: PrefillWait::Tokens,
                 auto_tau_s: [1.0, 120.0][next(2) as usize],
                 ..d
             };
             let (r, res) = p.resolved(&measurements[next(5) as usize]);
             assert_eq!(r, p, "round {round}");
-            assert_eq!(r.copy_lambda.to_bits(), p.copy_lambda.to_bits());
-            assert_eq!(r.rate_tokens_per_s.to_bits(), p.rate_tokens_per_s.to_bits());
-            assert_eq!((res.lambda_mode, res.rate_mode), ("fixed", "fixed"));
-            assert_eq!(res.copy_lambda_used.to_bits(), p.copy_lambda.to_bits());
+            assert_eq!(r.copy_price.to_bits(), p.copy_price.to_bits());
+            assert_eq!(
+                r.prefill_rate_tokens_per_s.to_bits(),
+                p.prefill_rate_tokens_per_s.to_bits()
+            );
+            assert_eq!(
+                (res.copy_price_mode, res.prefill_rate_mode),
+                ("fixed", "fixed")
+            );
+            assert_eq!(res.copy_price_used.to_bits(), p.copy_price.to_bits());
             assert_eq!(
                 (res.fallback_reason, res.rate_fallback_reason),
                 (None, None)
             );
-            assert!(res.lambda_raw.is_none());
+            assert!(res.copy_price_raw.is_none());
             let n = 1 + next(4) as usize;
-            let inputs: Vec<TradeInput<'_>> = (0..n)
-                .map(|i| TradeInput {
+            let inputs: Vec<CostInput<'_>> = (0..n)
+                .map(|i| CostInput {
                     worker: workers[i],
                     backlog: u128::from(next(4) * 10_000),
                     local_hit: next(3) * 8_192,
                     uncached: 1 + next(3) * 4_000,
                     pulled: [0, 0, 512, 18_000][next(4) as usize],
-                    wait: (next(2) == 1).then_some(TradeWaitTerms {
+                    wait: (next(2) == 1).then_some(WaitTerms {
                         wait_s: next(5) as f64 * 0.75,
                         service_s: 0.05 + next(4) as f64 * 0.25,
                     }),
                     bound_s: None,
                 })
                 .collect();
-            let (a, b) = (select_trade(&r, &inputs), select_trade(&p, &inputs));
+            let (a, b) = (select_min_cost(&r, &inputs), select_min_cost(&p, &inputs));
             assert_eq!((a.chosen, a.owner, a.best), (b.chosen, b.owner, b.best));
             for (x, y) in a.costs.iter().zip(&b.costs) {
                 assert_eq!(x.total.to_bits(), y.total.to_bits(), "round {round}");
@@ -2135,7 +2175,7 @@ mod trade_tests {
                 );
             }
             if p.is_original() {
-                let (chosen, _, _, costs) = first_version::select_trade(&r, &inputs);
+                let (chosen, _, _, costs) = first_version::select_min_cost(&r, &inputs);
                 if inputs.iter().all(|i| i.wait.is_none()) {
                     assert_eq!(a.chosen, chosen, "round {round}");
                     for (x, y) in a.costs.iter().zip(&costs) {

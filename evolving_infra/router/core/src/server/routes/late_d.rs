@@ -205,7 +205,7 @@ pub(crate) fn pack_decode_body(body: Bytes) -> Bytes {
 /// A symmetric_pd Split under late D choose: the candidates (the `Choose`) and
 /// the marks. The P-leg names every candidate in `kv_export.candidates`;
 /// each D-leg carries its own `kv_import`.
-pub(crate) struct FlexLate {
+pub(crate) struct SymmetricLate {
     pub(crate) transfer_id: u64,
     pub(crate) kv_export: Value,
     /// Per candidate, in `cand_idx` order.
@@ -220,17 +220,17 @@ pub(crate) struct FlexLate {
 /// decision comes in time. `None`: a Local placement (no transfer; not
 /// counted), or, counted `plain`, an owner without a link or no candidate;
 /// the request then takes the plain symmetric_pd dispatch.
-pub(crate) fn flex_pick(
+pub(crate) fn spd_pick(
     late: &Arc<LateBind>,
-    flex: &crate::scheduler::SymmetricPdRuntime,
+    spd: &crate::scheduler::SymmetricPdRuntime,
     d: &crate::scheduler::Decision,
-) -> Result<Option<(Choose, FlexLate)>, ApiError> {
+) -> Result<Option<(Choose, SymmetricLate)>, ApiError> {
     let Some(transfer_id) = d.placement.transfer_id.filter(|_| !d.is_local()) else {
         return Ok(None);
     };
     let owner = late_bind::link_endpoint(&d.p_worker)
         .filter(|_| d.p_worker.mode() == crate::discovery::WorkerMode::Symmetric);
-    let capable: Vec<Arc<Worker>> = flex
+    let capable: Vec<Arc<Worker>> = spd
         .decode_workers()
         .into_iter()
         .filter(|w| w.url != d.p_worker.url && late_bind::is_choose_decode(w))
@@ -244,7 +244,7 @@ pub(crate) fn flex_pick(
         .position(|w| w.url == d.d_worker.url)
         .unwrap_or(0);
     let (candidates, default_idx) = late.candidates(&capable, d0);
-    let (kv_export, imports) = flex
+    let (kv_export, imports) = spd
         .late_marks(transfer_id, &d.p_worker, &candidates, d.prompt_len)
         .map_err(ApiError::from)?;
     Ok(Some((
@@ -254,7 +254,7 @@ pub(crate) fn flex_pick(
             candidates,
             default_idx,
         },
-        FlexLate {
+        SymmetricLate {
             transfer_id,
             kv_export,
             imports,
@@ -274,11 +274,11 @@ pub(crate) fn flex_pick(
 /// `prepared_image_source` instead ([`crate::image_source`]); the removed
 /// `image_data` list is returned for the router's image store. The P-leg
 /// keeps the pixels.
-pub(crate) fn build_flex_bodies(
+pub(crate) fn build_spd_bodies(
     body: &Bytes,
     value: Option<Value>,
     choose: &Choose,
-    marks: &FlexLate,
+    marks: &SymmetricLate,
     hint: Option<&Value>,
     kv_session: Option<&Value>,
     d_image_source: Option<&Value>,
@@ -344,12 +344,12 @@ pub(crate) fn build_flex_bodies(
 /// Session KV retention of one symmetric_pd late-D request: the registry and the
 /// P-leg's tag. Candidates are recorded in the session history before they
 /// can receive the tag; the bound decode becomes the decode home.
-pub(crate) struct FlexLateSession {
+pub(crate) struct SymmetricLateSession {
     pub(crate) sessions: Arc<crate::backend::kv_sessions::KvSessions>,
     pub(crate) tag: crate::backend::kv_sessions::KvSession,
 }
 
-impl late_bind::LateSessionHook for FlexLateSession {
+impl late_bind::LateSessionHook for SymmetricLateSession {
     fn candidate(&self, worker_url: &str) {
         self.sessions.note_candidate(&self.tag, worker_url);
     }
@@ -377,9 +377,9 @@ pub(crate) struct ChooseDispatch {
     pub(crate) room: u64,
     /// The d1 charge (prompt + capped output tokens).
     pub(crate) charge_tokens: u64,
-    /// The co-schedule ledger entry; retired when the P call ends.
+    /// The cost-function ledger entry; retired when the P call ends.
     pub(crate) ledger: Option<AdmissionLedger>,
-    pub(crate) cost: Option<crate::cost_balance::Reservation>,
+    pub(crate) cost: Option<crate::prefill_work::Reservation>,
     /// The stale-request token of the P-leg's active-load entry.
     pub(crate) stale: CancellationToken,
     pub(crate) model: String,
@@ -679,7 +679,7 @@ pub(crate) async fn dispatch(
             // A symmetric_pd P-leg without an answer keeps its work as unknown,
             // as in the plain symmetric_pd Split.
             match (ledger, outcome.status) {
-                (Some(AdmissionLedger::Flex(handle)), None) => handle.mark_unknown(),
+                (Some(AdmissionLedger::Symmetric(handle)), None) => handle.mark_unknown(),
                 (Some(l), _) => l.retire(),
                 (None, _) => {}
             }

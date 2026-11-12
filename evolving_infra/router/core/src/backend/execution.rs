@@ -228,8 +228,8 @@ impl PreparedConfig {
             rid: Some(rid.into()),
             routing_key: None,
             ingress_ms: 0.0,
-            trade_session: None,
-            e3_session: None,
+            placement_session: None,
+            forecast_session: None,
         })
     }
 }
@@ -378,11 +378,11 @@ struct Execution {
     decode_usage: Option<LegUsage>,
     /// The D-leg was aborted to move it off a worker draining toward prefill.
     migrating: bool,
-    /// The P-leg's TRADE cost entry (`--symmetric-pd-p-select cost-function`). It
+    /// The P-leg's placement cost entry (`--symmetric-pd-p-select cost-function`). It
     /// follows the P-leg like `ledger`: dispatched on upload, finished on
     /// terminal P evidence, unknown on an uncertain failure. Dropped with the
     /// execution (before dispatch: rolled back; after: unknown).
-    cost: Option<crate::cost_balance::Reservation>,
+    cost: Option<crate::prefill_work::Reservation>,
     /// Late D choose (`--pd-late-decode choose`): the candidates and the
     /// late-bind table entry. `workers[1]` is the arrival pick until a
     /// candidate binds, then the bound candidate.
@@ -439,12 +439,12 @@ impl LateLeg {
         self.late.drop_pending_charge(self.guard.entry());
     }
 }
-/// Apply one prepared P-leg observation to the TRADE cost entry, if any.
+/// Apply one prepared P-leg observation to the placement cost entry, if any.
 /// A failed trace write is logged; the engine request is already out.
 fn observe_cost(
-    cost: &mut Option<crate::cost_balance::Reservation>,
+    cost: &mut Option<crate::prefill_work::Reservation>,
     rid: &str,
-    f: impl FnOnce(&mut crate::cost_balance::Reservation) -> Result<(), String>,
+    f: impl FnOnce(&mut crate::prefill_work::Reservation) -> Result<(), String>,
 ) {
     if let Some(entry) = cost.as_mut() {
         if let Err(error) = f(entry) {
@@ -1121,7 +1121,7 @@ impl Executions {
         }
         if leg == 0 && x.terminal[0] {
             x.ledger.retire();
-            // Only a completed P credits its tokens to the TRADE auto rate.
+            // Only a completed P credits its tokens to the cost-function auto rate.
             let reason = if e.state == LegState::Completed {
                 "prefill_response_success"
             } else {
@@ -1424,11 +1424,15 @@ mod tests {
         );
         (executions, state)
     }
-    /// The fixture plan with a TRADE cost entry for its P-leg (`http://p`).
-    fn fixture_with_cost() -> (Executions, BackendState, Arc<crate::cost_balance::CostBook>) {
+    /// The fixture plan with a placement cost entry for its P-leg (`http://p`).
+    fn fixture_with_cost() -> (
+        Executions,
+        BackendState,
+        Arc<crate::prefill_work::PrefillWorkBook>,
+    ) {
         let (e, s) = fixture();
-        let book = crate::cost_balance::CostBook::new(None, "test", None).unwrap();
-        let candidate = crate::cost_balance::Candidate {
+        let book = crate::prefill_work::PrefillWorkBook::new(None, "test", None).unwrap();
+        let candidate = crate::prefill_work::Candidate {
             worker_url: "http://p".into(),
             local_hit: 0,
             gpu_hit: None,
@@ -1436,7 +1440,7 @@ mod tests {
             hint: None,
         };
         let (_, reservation, _) = book
-            .reserve_trade(
+            .reserve_cost(
                 4096,
                 Some("req".into()),
                 vec![candidate],

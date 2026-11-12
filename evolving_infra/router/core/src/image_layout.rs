@@ -389,7 +389,7 @@ pub fn image_info_from_data_uri(uri: &str) -> Result<ImageInfo, Skip> {
 }
 
 /// [`image_info_from_data_uri`] for every entry, on up to 4 threads for
-/// multi-image requests (a CUA request carries ~19 screenshots, ~6.5 MB).
+/// multi-image requests (a long agent request can carry ~19 screenshots, ~6.5 MB).
 fn image_infos(list: &[Value]) -> Result<Vec<ImageInfo>, Skip> {
     let uris: Vec<&str> = list
         .iter()

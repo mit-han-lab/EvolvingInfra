@@ -181,7 +181,7 @@ pub(crate) fn include_rejected(error: &anyhow::Error) -> bool {
 /// The fields of one `/v1/loads` progress poll ([`fetch_progress_poll`]):
 /// the prefill-work progress, the rest of the load row (the trace's
 /// `engine_load`) and the raw `prefill_routing` snapshot.
-pub(crate) type ProgressPoll = (crate::cost_balance::PrefillProgress, Value, Option<Value>);
+pub(crate) type ProgressPoll = (crate::prefill_work::PrefillProgress, Value, Option<Value>);
 
 /// One `/v1/loads` poll: the prefill-work progress, the rest of the load row
 /// for the trace, and with `routing` the raw `prefill_routing` snapshot. The

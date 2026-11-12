@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 /// abort `err_type` or the message).
 pub const READER_GONE_ERR_TYPE: &str = "symmetric_reader_gone";
 
-/// The reason that closes the cost-book reservation of such a P-leg.
+/// The reason that closes the work-book reservation of such a P-leg.
 pub const READER_GONE_FINISH_REASON: &str = "prefill_reader_gone";
 
 /// Response extension: the answer is a [`READER_GONE_ERR_TYPE`] P-leg end.

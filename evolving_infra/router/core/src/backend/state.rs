@@ -6,7 +6,7 @@
 //! ([`BackendState::with_progress`]) replaces each request's initial estimate
 //! with its observed remaining work; missing/truncated snapshots preserve
 //! estimates.
-pub use crate::cost_balance::PrefillProgress;
+pub use crate::prefill_work::PrefillProgress;
 use crate::scheduler::placement::{WorkerLoad, WorkerLoads};
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -152,7 +152,7 @@ impl LedgerHandle {
 /// non-truncated replies, for `empty_queue` while the worker also reported an
 /// empty waiting queue the whole time (a queued request is not listed until
 /// its first chunk launches), or for `quiet` whatever the queue (`None` =
-/// never; the bound of the cost book's `--symmetric-pd-unknown-expire-secs`). A
+/// never; the bound of the work book's `--symmetric-pd-unknown-expire-secs`). A
 /// listed RID is never retired; a worker without applied replies keeps its
 /// entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

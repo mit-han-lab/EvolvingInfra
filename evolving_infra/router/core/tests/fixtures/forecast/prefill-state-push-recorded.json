@@ -1,5 +1,5 @@
 {
-  "schema": "e3-push-fixture.v1",
+  "schema": "state-push-fixture.v1",
   "inputs": {
     "prefill_state_push_py_sha256": "0150c8ab73401a583cd4f403be4a1d0c07328d6828afa0439ac1daaed15a0ad0",
     "routing_snapshot_sha256": "b1c99ea30d3d209554316c2ec3e9732243d0cfa9e8dce2a36c76d1e8b4fb3ebf",
