@@ -852,6 +852,33 @@ def test_decode_migrated_before_its_first_token_resumes_with_the_same_input():
 
 
 @pytest.mark.skipif(not HAS_IMAGE_LAYOUT, reason=NO_IMAGE_LAYOUT)
+def test_image_whose_header_exceeds_the_pixel_limit_is_rejected():
+    import base64
+    import struct
+    import zlib
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    # A 67-byte PNG whose header claims 20000x20000 pixels.
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 20000, 20000, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(b"\0\0\0\0")) + chunk(b"IEND", b""))
+    image_cfg = _engine.image_layout().image_config(dict(
+        vision_patch_size=14, vision_downsample_ratio=3, vision_max_n_token=384,
+        vision_min_pixels=147456, vision_max_wh_ratio=8), 100)
+
+    async def scenario():
+        async with harness(image_config=image_cfg, public_url="http://t") as (service, api, base, seen, events):
+            request = body()
+            request["input"] = {"input_ids": [11, 100, 12],
+                                "image_data": ["data:image/png;base64," + base64.b64encode(png).decode()]}
+            response = await api.post("/prepare", json=request)
+            assert response.status_code == 413, response.text
+            assert response.json()["error"]["code"] == "IMAGE_TOO_LARGE"
+            assert not service.store.entries
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(not HAS_IMAGE_LAYOUT, reason=NO_IMAGE_LAYOUT)
 @pytest.mark.parametrize("kind", ["dsv4", "kimi_k25"])
 def test_uploaded_images_go_only_to_p_and_remain_available_for_decode_recovery(kind):
     import base64

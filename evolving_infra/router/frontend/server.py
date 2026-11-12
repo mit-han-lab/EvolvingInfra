@@ -272,6 +272,9 @@ class TokenizerService:
             if not isinstance(message, dict):
                 raise ProtocolError(400, "INVALID_REQUEST", "Each message must be an object.")
             content = message.get("content")
+            if content is not None and not isinstance(content, (str, list)):
+                raise ProtocolError(400, "INVALID_REQUEST",
+                                    "Message content must be a string, an array of parts or null.")
             if isinstance(content, list) and any(
                 not isinstance(p, dict) or p.get("type") not in {"text", "image_url"} for p in content
             ):
@@ -400,6 +403,8 @@ class TokenizerService:
             if image_data is not None:
                 if self.config.image_config is None:
                     raise ProtocolError(422, "UNSUPPORTED_INPUT", "This configuration does not accept images.")
+                from PIL import Image
+
                 from ._engine import image_layout
 
                 prepare_image_layout = image_layout().prepare_image_layout
@@ -408,6 +413,8 @@ class TokenizerService:
                     layout, _expanded, cache_ids, _items = prepare_image_layout(
                         ids, image_data, self.config.image_config
                     )
+                except Image.DecompressionBombError as exc:
+                    raise ProtocolError(413, "IMAGE_TOO_LARGE", "An uploaded image exceeds the pixel limit.") from exc
                 except (ValueError, TypeError, KeyError, OSError) as exc:
                     raise ProtocolError(400, "INVALID_IMAGE", "Uploaded images or their layout are invalid.") from exc
                 image_fields = {"image_data": image_data, "prepared_image_layout": layout}

@@ -81,7 +81,8 @@ retains the text-only deployment contract.
 The client uploads PNG/JPEG contents as Base64 strings or data URLs in
 `input.image_data`, alongside `input_ids` or `prompt`. Chat requests instead use
 uploaded data URLs in `messages[].content[].image_url.url`. Local paths and remote
-image URLs are rejected. Supplied token IDs contain one image placeholder per
+image URLs are rejected, and an image whose header exceeds Pillow's pixel limit
+(`2 * Image.MAX_IMAGE_PIXELS`) returns 413 `IMAGE_TOO_LARGE`. Supplied token IDs contain one image placeholder per
 uploaded image, in the same order; callers must not expand the placeholders.
 
 The distributed-tokenizer reads image headers, hashes the original file contents

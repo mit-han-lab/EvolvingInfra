@@ -210,6 +210,8 @@ def test_prepare_only_tokenizes_and_forward_preserves_payload_and_frees_cache():
         ({"input": {"prompt": ["batch"], "add_special_tokens": False}}, 400),
         ({"input": {"prompt": "a", "add_special_tokens": "false"}}, 400),
         ({"input": {"model": "/wrong", "prompt": "a", "add_special_tokens": False}}, 409),
+        ({"input": {"messages": [{"role": "user", "content": 5}]}}, 400),
+        ({"input": {"messages": [{"role": "user", "content": {"type": "text"}}]}}, 400),
         (
             {
                 "input": {
