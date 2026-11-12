@@ -1,8 +1,7 @@
 # Provenance
 
 `evolving_infra/router/core/` is derived from SGLang's experimental `sgl-router` (Apache-2.0)
-at upstream base `9a489f8d2f`, imported through a private SGLang fork and then
-developed for this project. The import kept the Rust workspace and its
+at upstream commit `9a489f8d2f` and developed for this project. The import kept the Rust workspace and its
 `sgl-kv-indexer` path dependency. Original SPDX and "SGLang Authors" notices are
 kept; `LICENSE` here is the Apache-2.0 text of the imported repository.
 

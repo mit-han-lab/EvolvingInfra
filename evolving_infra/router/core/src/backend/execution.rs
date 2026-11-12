@@ -2344,8 +2344,8 @@ mod tests {
         );
     }
 
-    /// The MO-A / MO-B smoke freeze: a D->P drain migrates the D-leg, the
-    /// router aborts the queued P-leg, the tokenizer reports the P-leg only
+    /// A migrated D-leg with an aborted P-leg does not stay owed: a D->P
+    /// drain migrates the D-leg, the router aborts the queued P-leg, the tokenizer reports the P-leg only
     /// `cancelled` (unknown). The worker stops listing the RID; after 10 s
     /// with an empty queue the reservation is retired, the P-leg is no longer
     /// owed, the execution leaves the registry and a late callback is
