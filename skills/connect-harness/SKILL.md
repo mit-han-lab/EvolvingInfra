@@ -23,8 +23,8 @@ harness installed on the machine where it runs.
 
 ## Inputs
 
-- The router URL: `router_url` in the `stack.json` of the work directory of `evolving-infra serve`
-  on the first host, reachable from the machine that runs the harness.
+- The gateway URL: `gateway_url` in the `stack.json` of the work directory of `evolving-infra serve`
+  on the first host (port 30800), reachable from the machine that runs the harness.
 - Which harness, and whether it is installed (`pi --version`, `claude --version`,
   `codex --version`). Do not install a harness without asking.
 - Never ask for a token or password: the scripts use no credential of the person's.
@@ -53,7 +53,7 @@ HTTP 400 about prepared lifecycle callbacks means the stack runs with `--planner
 Pi speaks chat completions and needs no translator: go to step 3.
 
 ```bash
-EVOLVING_INFRA_URL=<router url> bash examples/agents/translator.sh &
+EVOLVING_INFRA_URL=<gateway url> bash examples/agents/translator.sh &
 ```
 
 **Check**: `curl -s 127.0.0.1:4000/health/liveliness` answers `"I'm alive!"`. Start only one
@@ -62,7 +62,7 @@ translator: a second one rewrites the key file and the first one then refuses ev
 ### 3. Run one prompt
 
 ```bash
-export EVOLVING_INFRA_URL=<router url>
+export EVOLVING_INFRA_URL=<gateway url>
 bash examples/agents/pi.sh -p "Reply with the word ready"
 bash examples/agents/claude-code.sh -p "Reply with the word ready"
 bash examples/agents/codex.sh exec --skip-git-repo-check "Reply with the word ready"
@@ -81,7 +81,8 @@ Text that looks like a tool call but does not run means the parser is missing (s
 
 ## Returns
 
-- The harness, its version, the router URL and the served model.
+- The harness, its version, the gateway URL and the served model, and `GET <gateway url>/gateway/stats`
+  after the run (agents and branches the gateway inferred).
 - The reply of step 3 and the tool run of step 4.
 - The limits that apply ([examples/agents](../../examples/agents/README.md#limits)): no agent
   identity, no `--planner`; decisions about them are the owner's.

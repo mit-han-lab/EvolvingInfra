@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The translator that Claude Code and Codex need: the router serves OpenAI chat completions only,
+# The translator that Claude Code and Codex need: the gateway serves OpenAI chat completions only,
 # Claude Code sends Anthropic Messages (/v1/messages) and Codex sends OpenAI Responses (/v1/responses).
-# A LiteLLM proxy on this machine turns both into chat completions for the router. Leave it running.
+# A LiteLLM proxy on this machine turns both into chat completions for the gateway. Leave it running.
 #   bash examples/agents/translator.sh            # listens on 127.0.0.1:${TRANSLATOR_PORT:-4000}
 set -euo pipefail
 source "$(dirname "$0")/common.sh"

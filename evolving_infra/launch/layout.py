@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 
 ROUTER_PORT = 30900
+GATEWAY_PORT = 30800  # agent gateway: identities for coding-agent harnesses (router/gateway)
 FRONTEND_PORT = 28100
 INDEXER_PORT, INDEXER_QUERY_PORT = 8090, 8091
 TRACE_PORT = 18500

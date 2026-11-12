@@ -25,7 +25,7 @@ and the harness installed.
 
 - The harness, its version and its documentation for custom providers or base URLs. Ask for the
   documentation link when it is not clear which API the harness sends.
-- The router URL of the running stack.
+- The gateway URL of the running stack (`gateway_url` in `stack.json`, port 30800).
 - Never ask for a token or password: the stack needs none, and the translator's key is local.
 
 ## Steps
@@ -36,11 +36,11 @@ Read the harness's provider documentation and find:
 
 | The harness sends | Path | Example |
 |---|---|---|
-| OpenAI chat completions (`/v1/chat/completions`) | to the router directly: `$EVOLVING_INFRA_URL/v1` | `examples/agents/pi.sh` |
+| OpenAI chat completions (`/v1/chat/completions`) | to the gateway directly: `$EVOLVING_INFRA_URL/v1` | `examples/agents/pi.sh` |
 | Anthropic Messages (`/v1/messages`) | through the translator: `$TRANSLATOR_URL` | `examples/agents/claude-code.sh` |
 | OpenAI Responses (`/v1/responses`) | through the translator: `$TRANSLATOR_URL/v1` | `examples/agents/codex.sh` |
 
-The router serves chat completions only (`docs/api-reference.md`); the translator turns the other
+The gateway serves chat completions only (`evolving_infra/router/gateway/`); the translator turns the other
 two into chat completions. Another API needs a translator change: stop and ask the owner.
 
 **Check**: the documentation names one of the three APIs and how to set its base URL.
@@ -52,7 +52,7 @@ In order of preference: command-line flags (Codex `-c`), a provider file loaded 
 environment variable. Do not write into the harness's files in the home directory.
 
 Set: the base URL from step 1, the model name (`$EVOLVING_INFRA_MODEL`), and an API key. Directly
-to the router any key works (`unused`); through the translator the key is `$TRANSLATOR_KEY`, which
+to the gateway any key works (`unused`); through the translator the key is `$TRANSLATOR_KEY`, which
 `need_translator` reads. If the harness has separate model slots (a small model for background
 work, a model for sub-agents), set every slot to the served model.
 
@@ -78,7 +78,7 @@ the script name go to the harness.
 ### 4. Run one prompt and one tool call
 
 ```bash
-export EVOLVING_INFRA_URL=<router url>
+export EVOLVING_INFRA_URL=<gateway url>
 bash examples/agents/<harness>.sh <the harness's one-shot flag> "Reply with the word ready"
 bash examples/agents/<harness>.sh <the harness's one-shot flag> "List the files in this directory"
 ```
