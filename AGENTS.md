@@ -32,7 +32,7 @@ moves through it.
 | `evolving_infra/router/frontend/`, `evolving_infra/router/indexer/`, `evolving_infra/router/client/` | Tokenizer service, KV directory, Python client | [`evolving_infra/router/frontend/README.md`](evolving_infra/router/frontend/README.md), [`evolving_infra/router/indexer/README.md`](evolving_infra/router/indexer/README.md) |
 | `evolving_infra/planner/` | Online P/D planner | [`evolving_infra/planner/README.md`](evolving_infra/planner/README.md) |
 | `evolving_infra/launch/` | `evolving-infra serve`: starts every component on one or more hosts | [`examples/gb300/README.md`](examples/gb300/README.md) |
-| `examples/` | A config per hardware and model (`gb300/`, `h200/`); running one under Slurm (`slurm/`) or on Modal (`modal/`) | [`examples/README.md`](examples/README.md) |
+| `examples/` | A config per hardware and model (`gb300/`, `h200/`) and running one under Slurm (`slurm/`); the Modal H200 benchmark (`modal/`), whose settings are constants in `modal/stack.py` | [`examples/README.md`](examples/README.md) |
 | `benchmarks/` | Trie replay client, replay adapters, run checks, scoring | [`benchmarks/README.md`](benchmarks/README.md) |
 | `docker/` | The runtime image | [`docker/README.md`](docker/README.md) |
 | `docs/` | User documentation; [`docs/paper.md`](docs/paper.md) maps the paper to the code | [`docs/README.md`](docs/README.md) |
@@ -47,8 +47,8 @@ directory, planner) and `/opt/trie-venv` (replay client).
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[planner,test]"                              # launcher, planner, test tools
-python -m pytest -q tests/launch tests/planner tests/engine tests/tools   # no GPU needed
+pip install -e ".[client,frontend,indexer,planner,test]"      # launcher, every Python component, test tools
+python -m pytest -q tests                                     # no GPU; tests that need decoupled-engine skip
 (cd evolving_infra/router/core && cargo test --locked)   # router: unit and proxy tests
 python3 -m venv .venv-trie && .venv-trie/bin/pip install -e 'benchmarks/trie[test]'
 .venv-trie/bin/python -m pytest -q benchmarks/trie/tests      # replay client
@@ -82,7 +82,7 @@ Skills live in `skills/`. To use one, read its `SKILL.md` and follow it.
 | [`connect-harness`](skills/connect-harness/SKILL.md) | `examples/agents/`, read-only | run Pi, Claude Code or Codex on a running stack with the launch scripts |
 | [`add-harness`](skills/add-harness/SKILL.md) | `examples/agents/` | add a launch script for another agent harness and check it with one prompt and one tool call |
 | [`run-benchmark`](skills/run-benchmark/SKILL.md) | `examples/`, `benchmarks/` | run the paper's replay benchmark, score it and compare it with the reference |
-| [`diagnose-run`](skills/diagnose-run/SKILL.md) | repository, read-only | find why a run did not start, failed a request, or scored below the reference |
+| [`diagnose-run`](skills/diagnose-run/SKILL.md) | repository; writes the fix once the cause is named | find why a run did not start, failed a request, or scored below the reference |
 
 Each skill follows [`skills/SKILL_TEMPLATE.md`](skills/SKILL_TEMPLATE.md): its scope (what it
 reads, writes, never changes, and does outside the repository), its inputs, numbered steps that
