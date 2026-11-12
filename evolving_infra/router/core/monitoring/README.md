@@ -3,20 +3,20 @@ SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# sgl-router (experimental) monitoring
+# sgl-router monitoring
 
-Grafana dashboard for the experimental router's Prometheus metrics, exposed
-on `/metrics` (text/plain, version 0.0.4) on the router's serving port
-(default `30000`).
+The router exposes Prometheus metrics on `/metrics` (text/plain, version 0.0.4) on its
+serving port: `--port`, `30900` under `evolving-infra serve`.
 
 ## Files
 
-- `grafana-dashboard.json` — importable Grafana dashboard, **SGLang Router
-  (experimental)** (uid `sgl-router-experimental`).
+- `grafana-dashboard.json` — importable Grafana dashboard, **SGLang Router**
+  (uid `sgl-router-experimental`).
 
-## Metrics covered
+## Metrics
 
-The dashboard graphs every family the router emits:
+Every scrape returns these families. The dashboard graphs all of them except
+`sgl_router_requests_total` and `sgl_router_ingress_tokenize_errors_total`.
 
 | Metric | Type | What it shows |
 |---|---|---|
@@ -34,10 +34,23 @@ The dashboard graphs every family the router emits:
 | `sgl_router_stale_requests_total` | Counter | Stale-request cancellations |
 | `sgl_router_decode_affinity_total` | Counter | PD decode-affinity outcomes |
 | `sgl_router_sticky_total` | Counter | Sticky-session selection outcomes |
+| `sgl_router_ingress_tokenize_errors_total` | Counter | Chat requests whose router-side tokenization failed and fell back to engine-side tokenization |
 
 The `sgl_router_workers` / `sgl_router_worker_*` gauges are sampled from the
 live worker registry on every scrape, so a removed worker stops emitting
 series immediately rather than leaving a stale value.
+
+These families appear only when the setting that produces them is on; the dashboard does not
+graph them:
+
+| Families | Emitted with |
+|---|---|
+| `sgl_router_decode_charged_tokens`, `sgl_router_decode_charged_requests` (gauges, per decode worker) | `--pd-decode-policy min-inflight-tokens` or `po2-tokens`, or `--pd-late-decode choose` |
+| `sgl_router_late_d_*`: requests, decisions, role gate, rebinds, fit none, finals, mismatch, legs, failures, link messages dropped, pending, link up | `--pd-late-decode choose` (the `paper` preset under `--policy symmetric_pd`) |
+| `sgl_router_late_d_packed_prompts_total`, `sgl_router_late_d_worker_refused_total` | `--pd-late-decode choose` or `--pd-late-decode-packed-prompt` |
+| `sgl_router_decode_po2_smg_*` | `--pd-decode-policy power-of-two-smg` |
+| `sgl_router_image_layout_*` | `--image-layout-config` |
+| `sgl_router_late_d_image_source_*` | `--late-d-image-source-url` |
 
 ## Prometheus scrape config
 
@@ -49,7 +62,7 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets:
-          - '127.0.0.1:30000'   # router host:port
+          - '127.0.0.1:30900'   # router host:port
 ```
 
 ## Import into Grafana
@@ -62,9 +75,3 @@ scrape_configs:
 
 The top bar exposes `model_id` and `worker_url` template variables (both
 default to *All*) to scope the panels.
-
-## Regenerating
-
-The JSON is generated programmatically to keep the ~20 panels consistent. If
-the metric surface changes, update the generator and overwrite the JSON
-rather than hand-editing — hand-edits drift from the panel conventions.
