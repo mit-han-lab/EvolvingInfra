@@ -8,6 +8,7 @@ unified host KV cache with session retention, and DeepSeek-V4 attention changes.
 
 ```bash
 pip install -e evolving_infra/engine               # Python >= 3.10, CUDA 13 GPU host
+pip install mooncake-transfer-engine-cuda13==0.3.13   # KV transfer between workers (RDMA)
 decoupled-engine --model-path <model> [options]   # = python -m decoupled_engine.launch_server
 ```
 
