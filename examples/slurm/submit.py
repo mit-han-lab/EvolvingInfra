@@ -5,8 +5,9 @@
         --account A --partition P --image IMG
 
 The config is any `evolving-infra serve` config with a `benchmarks` section, after resolving
-`base:`; `slurm` holds site settings. A benchmark's `router_args`, `engine_args` and `planner` are
-added to the served config.
+`base:`; `slurm` holds site settings. A benchmark's `router_args` and `engine_args` replace the
+served config's flags of the same name (the name before `=`) and add the others; its `planner`
+is merged key by key.
 
 Results go to <output-dir>/<job id>/: score.json, the replay's results and every service's logs.
 The job script runs `evolving-infra serve` on every node, so the cluster only needs Slurm with Pyxis.
@@ -20,7 +21,7 @@ import sys
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from evolving_infra.launch.__main__ import load  # noqa: E402  (resolves `base:`)
+from evolving_infra.launch.__main__ import _flag, load  # noqa: E402  (resolves `base:`)
 
 SCRIPT = """#!/bin/bash
 #SBATCH -N {nodes} --ntasks-per-node=1 --exclusive -t {time} -J evolving-infra {account}{partition}{extra}
@@ -95,9 +96,10 @@ def main():
     if name not in benchmarks:
         sys.exit(f"benchmark {name!r} is not in the config; it has {', '.join(benchmarks)}")
     slurm, bench = dict(cfg.pop("slurm", None) or {}), benchmarks[name]
-    for key in ("router_args", "engine_args"):  # the benchmark's flags follow the model's
+    for key in ("router_args", "engine_args"):  # the benchmark's flags win over the model's
         if bench.get(key):
-            cfg[key] = list(cfg.get(key) or []) + list(bench[key])
+            replaced = {_flag(a) for a in bench[key]}
+            cfg[key] = [a for a in cfg.get(key) or [] if _flag(a) not in replaced] + list(bench[key])
     if bench.get("planner"):
         cfg["planner"] = {**(cfg.get("planner") or {}), **bench["planner"]}
     for key in ("account", "partition", "image", "mounts", "time", "nodes", "extra_args"):

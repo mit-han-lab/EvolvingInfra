@@ -39,3 +39,21 @@ def test_osworld_unpacks_the_screenshot_archive_and_points_the_shards_at_it():
     assert "tar -xf $T/osworld/screenshots.tar -C $T/osworld" in script and "[ -d $T/osworld/screenshots ] ||" in script
     assert "[ -e $T/$f ] ||" in script, "files already there are not downloaded again"
     assert "--image-root $T/osworld/screenshots\n" in script and "processes=16" in script and "concurrency=128" in script
+
+
+def test_a_benchmark_flag_replaces_the_served_flag_of_the_same_name(tmp_path):
+    config = tmp_path / "bench.yaml"
+    config.write_text(
+        f"base: {SUBMIT.parents[1] / 'gb300/glm52.yaml'}\n"
+        "benchmarks:\n"
+        "  claude-code:\n"
+        "    prefill_workers: 6\n"
+        "    workload: claude-code/cc062126-stationary-full-v1.jsonl\n"
+        "    concurrency: 8\n"
+        "    duration: 600\n"
+        "    warmup: 60\n"
+        "    router_args: [--prefill-wait=forecast, --global-queue, --symmetric-pd-decode-host-return]\n")
+    served = dry_run("--config", str(config)).split("<<'CONFIG'")[1].split("CONFIG")[0]
+    assert "- --prefill-wait=forecast" in served and "--prefill-wait=tokens" not in served
+    assert "- --global-queue\n" in served and "--global-queue=false" not in served
+    assert "- --symmetric-pd-decode-host-return" in served, "a new flag is added"
