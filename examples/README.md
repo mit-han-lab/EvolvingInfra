@@ -1,7 +1,8 @@
 # Examples
 
 A config says what to serve on one kind of hardware. It does not say where the machines come
-from: the same config runs on a host you log in to, under Slurm, or on Modal.
+from: the same config runs on a host you log in to or under Slurm. The Modal harness keeps its
+own settings in [`modal/stack.py`](modal/stack.py).
 
 | Hardware and model | Config | Status |
 |---|---|---|
@@ -13,7 +14,7 @@ from: the same config runs on a host you log in to, under Slurm, or on Modal.
 |---|---|
 | A host with a shell | `evolving-infra serve --config <config>` on every host ([`deploy-stack`](../skills/deploy-stack/SKILL.md) skill) |
 | Slurm with Pyxis | [`slurm/submit.py`](slurm/submit.py)` --config <config>`: serve, replay and score as one job |
-| Modal | [`modal/`](modal/README.md): builds the image and runs two H200 benchmarks |
+| Modal | [`modal/`](modal/README.md): builds the image and runs the H200 benchmarks on one, two and eight nodes |
 
 [`agents/`](agents/README.md) runs Pi, Claude Code and Codex on a running stack: configs with tool-call
 parsers and one launch script per harness.

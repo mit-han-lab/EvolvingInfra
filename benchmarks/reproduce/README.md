@@ -77,8 +77,9 @@ requests except the first Putnam run at 256 agents.
 
 ## Benchmarks on Modal
 
-[`examples/modal`](../../examples/modal/README.md) runs two benchmarks on Modal H200 nodes. A correct
-build should land in these ranges (one run takes 20–30 minutes plus cold start):
+[`examples/modal`](../../examples/modal/README.md) runs benchmarks on Modal H200 nodes. A correct
+build should land in these ranges for the two small ones (one run takes 20–30 minutes plus cold
+start):
 
 | Benchmark | Topology | Requests in window | Failures | Prefix hit | TTFT p50 |
 |---|---|---|---|---|---|
@@ -104,9 +105,13 @@ Common setup:
   router: a role switch is one `PUT /symmetric_pd/roles` on the router and no engine restarts, so
   worker request counters stay monotonic.
 
-A run is valid only when the four checks in [`benchmarks/replay`](../replay/README.md) pass:
-input conformance, quiet window, steady-state zero failures and monotonic request counters.
+A run is valid only when the four checks in [`benchmarks/replay`](../replay/README.md) pass
+(input conformance, quiet window, steady-state zero failures and monotonic request counters) and,
+on Modal, the conformance probe and the method evidence of
+[`examples/modal`](../../examples/modal/README.md#how-a-run-is-judged).
 Prefix hit is token-weighted (`cached_prompt_tokens / completed_prompt_tokens` over the window).
 
-[`examples/modal`](../../examples/modal/README.md) runs both benchmarks with these checks.
+[`examples/modal`](../../examples/modal/README.md) runs both benchmarks with these checks, and
+`app.py::paper` runs the paper's H200 experiment on eight nodes (64 GPUs): 12P4D with the live
+planner, Claude Code at 384 agents, scored on [1800 s, 5400 s).
 The [quickstart](../../docs/quickstart.md) shows the same stack on one node.

@@ -79,7 +79,8 @@ A run counts only if all four checks pass:
 1. **Input conformance.** Before starting GPUs and again on the files the replay reads:
    `python check_inputs.py --workload W --tokenizer-dir T` (report default `W.validate.json`,
    written by `benchmarks/trie/scripts/convert_traces_to_strict.py validate --report`). Then the
-   live conformance probe against the router:
+   live conformance probe against the router's `/generate` (or each worker directly, as the Modal
+   harness does):
    `python capture_conformance.py --script benchmarks/trie/scripts/sglang_strict_replay_conformance.py --event-log <run>/conformance-events.jsonl -- --endpoint http://127.0.0.1:30900/v1 --model deepseek-v4-flash --output <run>/conformance.json`.
 2. **Quiet window** before load: `python checks.py quiet --worker http://<w0> --worker http://<w1>`
    waits until every worker's queues are empty and its request counter has not moved for 60 s
@@ -90,9 +91,9 @@ A run counts only if all four checks pass:
    requests cancelled at the end of the window are truncations, not failures. `window` also
    prints the token-weighted prefix hit rate (`cached_prompt_tokens / completed_prompt_tokens`).
 4. **Monotonic counters.** Run `python checks.py scrape --worker ... --out <run>/metrics` during
-   the replay, then `python checks.py metrics --dir <run>/metrics --workers N`. With a planner
-   that restarts workers on role switches, pass `--resets-allowed`: resets are reported, not
-   fatal.
+   the replay, then `python checks.py metrics --dir <run>/metrics --workers N`. A role switch does
+   not restart an engine, so a reset means a worker restarted; `--resets-allowed` reports resets
+   instead of failing, for harnesses that restart workers.
 
 The checks read the engine's `sglang:num_requests_total`, `sglang:num_running_reqs` and
 `sglang:*queue_reqs` metrics.

@@ -1,6 +1,6 @@
 # DeepSeek-V4-Flash on H200, as in the paper's H200 runs: two TP4 workers per 8-GPU node, DSPARK
-# speculative decoding. `evolving-infra serve --config` reads the top part; `slurm/submit.py` and
-# `modal/app.py` also read `benchmarks`.
+# speculative decoding. `evolving-infra serve --config` reads the top part; `slurm/submit.py` also
+# reads `benchmarks`. The Modal harness (modal/stack.py) holds the same settings as constants.
 
 model: /models/DeepSeek-V4-Flash
 served_model_name: deepseek-v4-flash

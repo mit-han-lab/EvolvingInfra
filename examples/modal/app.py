@@ -96,7 +96,7 @@ def source() -> dict:
     """Where this run's code came from (recorded, never used to refuse a run)."""
     git = lambda *a: subprocess.run(["git", "-C", str(REPO), *a], capture_output=True, text=True).stdout.strip()
     return dict(commit=git("rev-parse", "HEAD"), branch=git("rev-parse", "--abbrev-ref", "HEAD"),
-                dirty=bool(git("status", "--porcelain")), engine_tree=git("rev-parse", "HEAD:engine"),
+                dirty=bool(git("status", "--porcelain")), engine_tree=git("rev-parse", "HEAD:evolving_infra/engine"),
                 app=APP, results_volume=RESULTS, image="docker/Dockerfile (built on Modal)")
 
 
@@ -121,7 +121,8 @@ def static(duration: int = 0):
 
 @app.local_entrypoint()
 def dynamic(duration: int = 0):
-    """duration 0: 1800 s (fit at 600 s, 2P2D -> 1P3D at 900 s, back to 2P2D at 1350 s; scored 900-1800 s)."""
+    """duration 0: 1800 s; the planner learns for 600 s once the cold start is over, switches 2P2D -> 1P3D
+    150 s after the fit and back 300 s later; scored 900-1800 s."""
     launch(new_config(True, duration), run_dynamic)
 
 

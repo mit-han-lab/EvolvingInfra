@@ -20,7 +20,7 @@ MODEL = ("/weights/hub/models--deepseek-ai--DeepSeek-V4-Flash-0731/snapshots/"
 SERVED = "deepseek-v4-flash"
 # Claude Code (CC) semi-synthetic workload of the reference runs, with its offline validation report
 # beside it (<workload>.validate.json).
-WORKLOAD = "/inputs/workloads/cc-semi-062126-kh20261001.v3.jsonl"
+WORKLOAD = "/inputs/workloads/cc062126-dsv4-flash.jsonl"
 
 REPO = "/opt/evolving-infra"
 REPLAY_DIR = f"{REPO}/benchmarks/replay"
@@ -47,7 +47,7 @@ ENGINE = dict(
     late_d=dict(mode="choose", lead_mode="need", allocation_trigger="first_chunk", control_port_base=21776),
 )
 
-# Engine environment. Kept names: SGLANG_* (see the root README). Session-retention words
+# Engine environment. Kept names: SGLANG_* (see docs/architecture.md). Session-retention words
 # (SGLANG_KV_SESSION_RETENTION_*, host-evict fraction) are left out: retention is off and the engine
 # ignores them; the session ADMIT tag belongs to late D and stays.
 ENGINE_ENV = {
@@ -219,6 +219,8 @@ def router_command(cfg: dict, ips: list, rundir: str, query_url: str) -> list[st
     cmd = [ROUTER_BIN, "--host", "0.0.0.0", "--port", str(ROUTER_PORT), "--model-id", SERVED,
            "--tokenizer-path", f"{MODEL}/tokenizer.json", *ROUTER_ARGS,
            "--kv-indexer-url", query_url, "--co-schedule-cost-trace", f"{rundir}/router-cost.jsonl"]
+    # DSV4's FULL+SWA cache tree has no KV session retention; the router's paper preset would turn it on.
+    cmd += ["--symmetric-pd-no-kv-session-retention"]
     if c := cfg.get("controller"):
         cmd += ["--symmetric-pd-external-role-control", "--symmetric-pd-role-drain-timeout-secs", str(c["role_drain_timeout_s"])]
     for w in ws:
@@ -280,9 +282,9 @@ def trie_command(cfg: dict, shard: str, concurrency: int, outdir: str, i: int) -
 
 
 def conformance_command(outdir: str, worker_url_: str, name: str) -> list[str]:
-    """Trie's strict-replay conformance probe against one worker. The router has no native /generate
-    route (the probe's boundary, mixed-batch and replay steps need it), so every worker is probed
-    directly; a request without router marks runs prefill and decode on that worker."""
+    """Trie's strict-replay conformance probe against one worker (default `--mixed-batch-lag strict`).
+    Every worker is probed directly, so each engine is checked on its own; a request without router
+    marks runs prefill and decode on that worker."""
     return [TRIE_PY, f"{REPLAY_DIR}/capture_conformance.py",
             "--script", f"{TRIE_DIR}/scripts/sglang_strict_replay_conformance.py",
             "--event-log", f"{outdir}/conformance-{name}-events.jsonl", "--",
@@ -312,12 +314,12 @@ def bench_controller(duration: int) -> dict:
 
 def paper_config(run_id: str, duration: int = 5400) -> dict:
     """The paper's H200 run: 8 nodes, 16 workers starting 12P4D, CC at 384 concurrent agents from 32
-    Trie processes; the planner learns for 1800 s once the cold start is over and decides every 600 s.
-    The first 1800 s are warm-up; the score covers [1800 s, duration)."""
+    Trie processes; the planner learns for 1800 s from the first completed request, as the paper's runs
+    did, and decides every 600 s. The first 1800 s are warm-up; the score covers [1800 s, duration)."""
     return dict(run_id=run_id, name="paper-cc-c384", n_nodes=8, n_workers=16, n_p=12,
                 concurrency=384, trie_procs=32, duration=duration, warmup_s=1800,
                 workload=WORKLOAD, metrics_period_s=60, trie_grace_s=900, cold_start_deadline_s=3600,
-                controller=dict(CONTROLLER))
+                controller=dict(CONTROLLER, cold_start_max_wait_secs=1))
 
 
 def bench_config(run_id: str, dynamic: bool, duration: int = 0, concurrency: int = 16, trie_procs: int = 2,
