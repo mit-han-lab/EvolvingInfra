@@ -49,6 +49,11 @@ class Stack:
         # KV session retention needs a FULL-only cache tree; the engine preset decides the same way per
         # model. `retention: false` in the config turns it off in the router for the other models.
         self.retention = cfg.get("retention", True)
+        # The agent gateway for coding-agent harnesses runs only with a `gateway` section; its `host`
+        # is the bind address (default 127.0.0.1: this host only).
+        self.gateway = cfg.get("gateway")
+        if self.gateway is not None and not isinstance(self.gateway, dict):
+            raise SystemExit("gateway: give a mapping, e.g. {host: 0.0.0.0}")
         self.procs = []
 
     # ------------------------------------------------------------------------------------------ processes
@@ -202,12 +207,24 @@ class Stack:
             env["EVOLVING_INFRA_ROLE_CONTROL_TOKEN_FILE"] = str(token)
         self.start("router", argv + list(cfg.get("router_args", [])), env)
         self.wait("router", f"http://127.0.0.1:{ROUTER_PORT}/readyz", 600)
-        self.start("gateway", [sys.executable, "-m", "evolving_infra.router.gateway",
-                               "--router-url", f"http://127.0.0.1:{ROUTER_PORT}", "--port", str(GATEWAY_PORT)]
-                   + ([] if self.retention else ["--no-retention"]))
-        self.wait("gateway", f"http://127.0.0.1:{GATEWAY_PORT}/gateway/stats", 60)
+        if self.gateway is not None:
+            self.start("gateway", self.gateway_argv())
+            self.wait("gateway", f"{self.gateway_url(local=True)}/gateway/stats", 60)
         if self.planner is not None:
             self.start_planner(token)
+
+    def gateway_argv(self) -> list:
+        return ([sys.executable, "-m", "evolving_infra.router.gateway", "--router-url",
+                 f"http://127.0.0.1:{ROUTER_PORT}", "--host", self.gateway.get("host", "127.0.0.1"),
+                 "--port", str(GATEWAY_PORT)] + ([] if self.retention else ["--no-retention"]))
+
+    def gateway_url(self, local=False) -> str:
+        """The gateway's URL; bound to every interface it is reached at the first host's address
+        (``local``: at 127.0.0.1)."""
+        host = self.gateway.get("host", "127.0.0.1")
+        if host == "0.0.0.0":
+            host = "127.0.0.1" if local else self.head
+        return f"http://{host}:{GATEWAY_PORT}"
 
     def start_planner(self, token):
         args = dict(self.planner)
@@ -235,7 +252,8 @@ class Stack:
                       f"{sum(w.role == 'decode' for w in self.workers)}D)", flush=True)
                 self.write("stack.json", {  # what a client needs; benchmarks/replay/run_trie.py stack=<this dir>
                     "router_url": f"http://{self.head}:{ROUTER_PORT}",
-                    "gateway_url": f"http://{self.head}:{GATEWAY_PORT}",  # for clients without agent identities
+                    # for clients without agent identities; only with a `gateway` section
+                    **({"gateway_url": self.gateway_url()} if self.gateway is not None else {}),
                     "tokenizer_url": f"http://{self.head}:{FRONTEND_PORT}",
                     "model": self.cfg["served_model_name"], "model_path": self.cfg["model"],
                     "page_size": self.cfg["page_size"], "config_id": "default", "retention": self.retention,

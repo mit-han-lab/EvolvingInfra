@@ -25,7 +25,8 @@ and the harness installed.
 
 - The harness, its version and its documentation for custom providers or base URLs. Ask for the
   documentation link when it is not clear which API the harness sends.
-- The gateway URL of the running stack (`gateway_url` in `stack.json`, port 30800).
+- The gateway URL of the running stack (`gateway_url` in `stack.json`, port 30800; a config with
+  a `gateway` section, such as `examples/agents/*.yaml`, starts the gateway).
 - Never ask for a token or password: the stack needs none, and the translator's key is local.
 
 ## Steps

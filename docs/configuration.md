@@ -201,6 +201,7 @@ holds what it cannot detect.
 | `tokenizer` | the `tokenizers` file the router reads | `<model>/tokenizer.json` |
 | `engine_env` | environment variables of every engine | none |
 | `frontend` | settings added to the tokenizer frontend's config: `image_config` for image input, body and staging limits | none |
+| `gateway` | start the agent gateway for coding-agent harnesses on port 30800 (`evolving_infra/router/gateway`); `host` is its bind address | off; `host` 127.0.0.1 |
 | `engine_args`, `router_args` | flags appended to every engine and to the router | `--trust-remote-code`; none |
 | `planner` | planner arguments ([Dynamic P/D](dynamic-pd.md)); used with `--planner` | none |
 | `base` | another config file to start from; `engine_args` replace the base's flags of the same name | none |

@@ -11,7 +11,8 @@ changing their own settings.
 | [Codex](https://github.com/openai/codex) | OpenAI Responses | [`translator.sh`](translator.sh) | [`codex.sh`](codex.sh) |
 
 Harnesses talk to the agent gateway (port 30800), which `evolving-infra serve` starts next to the
-router. A harness sends no agent identity; the gateway infers it from the messages (a request
+router when the config has a `gateway` section. The configs here bind it to every interface
+(`host: 0.0.0.0`); without `host` it listens on 127.0.0.1 only. A harness sends no agent identity; the gateway infers it from the messages (a request
 that starts with an earlier request's messages continues that branch; any other starts a new
 agent), sends the request to the router with `x-agent-context`, and ends a branch after 600 s
 without a request. The router then keeps the KV of each live conversation for its next turn.

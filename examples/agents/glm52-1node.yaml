@@ -6,3 +6,5 @@ engine_args:
   - --reasoning-parser=glm45
 router_args:
   - --chat-tools-tokenize        # place requests with tools on the engine's token ids
+gateway:
+  host: 0.0.0.0                  # the agent gateway (port 30800) for harnesses on other machines

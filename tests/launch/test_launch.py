@@ -88,6 +88,17 @@ def test_config_and_planner(stack):
     assert argv[argv.index("--context-length") + 1] == "1048576"
 
 
+def test_the_gateway_runs_only_with_a_gateway_section(stack, tmp_path):
+    assert stack(["--config", "examples/gb300/glm52-1node.yaml"]).gateway is None, "off without a section"
+    s = stack(["--config", "examples/agents/glm52-1node.yaml"])
+    argv = s.gateway_argv()
+    assert argv[argv.index("--host") + 1] == "0.0.0.0" and s.gateway_url() == "http://10.0.0.1:30800"
+    (tmp_path / "local.yaml").write_text("model: /m\ngateway: {}\n")
+    s = stack(["--config", str(tmp_path / "local.yaml")])
+    argv = s.gateway_argv()
+    assert argv[argv.index("--host") + 1] == "127.0.0.1" and s.gateway_url() == "http://127.0.0.1:30800"
+
+
 def test_own_index(monkeypatch):
     monkeypatch.setattr(hardware.socket, "gethostname", lambda: "rack02-node07")
     monkeypatch.setattr(hardware.socket, "getfqdn", lambda: "rack02-node07.cluster")
