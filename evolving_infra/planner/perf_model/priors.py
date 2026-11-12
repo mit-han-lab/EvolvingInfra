@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Predeclared prefill step-model shapes, used only when a worker's own fit is not identifiable.
 
 Coefficients are ``[s/step, s/new token, s/causal attention pair, s/restored token]``, plus ``s/vision matmul

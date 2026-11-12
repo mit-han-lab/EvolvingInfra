@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 # The translator that Claude Code and Codex need: the gateway serves OpenAI chat completions only,
 # Claude Code sends Anthropic Messages (/v1/messages) and Codex sends OpenAI Responses (/v1/responses).
 # A LiteLLM proxy on this machine turns both into chat completions for the gateway. Leave it running.

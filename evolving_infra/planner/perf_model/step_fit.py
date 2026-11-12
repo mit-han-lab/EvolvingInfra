@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The nonnegative least-squares step-time fit shared by the P and D models, and its train/holdout split.
 
 All times are seconds. This is a capacity model, not a queue-time simulator or a tail-latency proof.

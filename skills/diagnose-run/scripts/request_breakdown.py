@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Per-request work and latency in one window of a replay, from the Trie lifecycle files.
 
     python request_breakdown.py RUN_DIR --skip-s 1800 --window-s 3600

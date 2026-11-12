@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Agent identities for clients that send none.
 
 A coding-agent harness resends the whole conversation on every turn and never names its agent

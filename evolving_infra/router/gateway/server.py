@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Agent gateway: an OpenAI-compatible endpoint that adds agent identities for coding-agent harnesses.
 
 Harnesses (Pi, Claude Code, Codex, ...) send plain chat completions without `x-agent-context`.

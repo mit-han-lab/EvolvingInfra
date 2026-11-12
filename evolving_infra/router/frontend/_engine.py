@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Lazy access to the two engine modules the frontend shares with DecoupledEngine.
 
 Both are optional: a text-only deployment with ``hash_mode="dynamo"`` needs

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 # Sourced by the launch scripts in this directory. Sets:
 #   EVOLVING_INFRA_URL    the agent gateway (default http://localhost:30800; the first host of `evolving-infra serve`)
 #   EVOLVING_INFRA_MODEL  the served model name (default: the first model the stack lists)

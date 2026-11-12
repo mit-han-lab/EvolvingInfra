@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Commands and configs of the reference benchmark stack (pure functions, no Modal, no I/O).
 
 One 8-GPU node holds two TP-4 DecoupledEngine workers in symmetric mode. Worker `idx` lives on node

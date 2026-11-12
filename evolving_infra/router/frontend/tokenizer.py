@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Reuse engine/indexer hashing; never substitute one hash contract for another."""
 
 import hashlib

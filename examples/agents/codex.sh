@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 # Codex on Evolving Infra, through translator.sh (OpenAI Responses -> chat completions).
 #   bash examples/agents/translator.sh &          # once
 #   bash examples/agents/codex.sh [codex arguments...]   e.g. bash examples/agents/codex.sh exec "Summarize README.md"

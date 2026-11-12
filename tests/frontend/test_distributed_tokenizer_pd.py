@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """CPU protocol tests with real local TCP upstreams; these are not GPU benchmarks."""
 import asyncio
 import json

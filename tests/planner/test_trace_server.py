@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The per-host trace server and the controller's incremental copies of its files."""
 from pathlib import Path
 

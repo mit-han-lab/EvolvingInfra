@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Upload prepared inputs once and relay single-engine or split P/D responses.
 
 Own local upload buffers, validate terminal engine responses, and report

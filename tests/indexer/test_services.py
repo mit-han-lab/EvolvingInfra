@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Exercise the supervisor's HTTP contract, including Dynamo's empty health body."""
 import http.server
 import threading

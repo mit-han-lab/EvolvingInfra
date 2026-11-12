@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Check AGENTS.md files and skills against docs/contributing/agent-instructions.md.
 
     python tools/check_agent_files.py

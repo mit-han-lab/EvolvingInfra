@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Environment defaults that follow from the symmetric P/D server arguments."""
 import importlib.util
 from pathlib import Path

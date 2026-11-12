@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Environment variables for planner internals, in the style of vLLM's ``envs.py``.
 
 These are not part of the method: HTTP timeouts and how many round trips a clock probe takes. Read one as

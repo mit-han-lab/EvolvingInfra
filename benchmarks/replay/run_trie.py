@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Run the unchanged Trie CLI through the router's prepared path, with agent identities.
 
 Usage: python run_trie.py stack=<serve work dir> workload_path=<file> concurrency=<n> duration=<s> output_dir=<dir>

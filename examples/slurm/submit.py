@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Run one of a config's benchmarks as one Slurm job: serve on every node, replay the workload, score it.
 
     python examples/slurm/submit.py --config examples/gb300/glm52.yaml --benchmark claude-code \\

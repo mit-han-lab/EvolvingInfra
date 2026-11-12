@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Planner command line: ``python -m evolving_infra.planner <command> ...``.
 
 Commands:

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The learning-end fit: freeze the learning interval's traces, cut P windows, fit every worker once.
 
 ``python -m evolving_infra.planner fit --config <run_dir>/planner_args.json`` runs ``calibrate``; the planner

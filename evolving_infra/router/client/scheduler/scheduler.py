@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Python frontend to the single Rust scheduler that owns node placement."""
 from collections.abc import AsyncIterator
 from typing import Any, Mapping

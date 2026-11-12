@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The launcher's layout, NIC detection and generated commands (no GPUs needed)."""
 import json
 from pathlib import Path

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """A model step and its stable identity, shared by all backend clients."""
 from dataclasses import dataclass, field
 from typing import Any, Mapping

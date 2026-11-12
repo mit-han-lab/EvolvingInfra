@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The engine endpoints the planner reads: capacities and TP size at start, the served model's expert counts."""
 import json
 from pathlib import Path

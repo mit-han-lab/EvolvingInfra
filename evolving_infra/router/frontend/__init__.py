@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Frontend (T service): CPU token preparation and one-shot P/D input forwarding.
 
 Importing this package starts no service. Run it with

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Agent gateway: identities inferred from messages, and END for idle branches."""
 import asyncio
 import json

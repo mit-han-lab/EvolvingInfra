@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Stable problem / agent-branch / model-step identity, independent of KV salt."""
 from dataclasses import dataclass
 import hashlib

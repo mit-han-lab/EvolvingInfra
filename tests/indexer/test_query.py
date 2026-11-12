@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Prepared-query wire equivalence and rejection of ambiguous inputs."""
 import unittest
 

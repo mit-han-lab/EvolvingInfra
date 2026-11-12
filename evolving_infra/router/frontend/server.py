@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Serve CPU input preparation, staging, forwarding, and release over HTTP.
 
 SGLang performs text tokenization; this service validates tokens, computes

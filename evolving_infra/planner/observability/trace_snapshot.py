@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Freeze the complete trace records of one interval (token-free), with exact physical worker identity."""
 import gzip
 import hashlib

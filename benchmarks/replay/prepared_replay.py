@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Opt-in adapter for token-authoritative trie replay through the frontend (T).
 
 Call ``install(trie.client.Client, Config(...))`` before replay. The frozen

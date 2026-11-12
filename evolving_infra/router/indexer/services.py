@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Run the existing Dynamo indexer and wire adapters from a deployment JSON.
 
 This foreground supervisor owns only its subprocesses. Run it in a dedicated

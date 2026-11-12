@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Holds before a decision while an earlier role change is still visible."""
 from evolving_infra.planner.managers import transition_guard as transition
 

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Expose the Python Scheduler facade (agent and backend classes are re-exported lazily).
 """
 from evolving_infra.router.client.types import Request, RequestIdentity

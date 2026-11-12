@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """tools/scrub_transcript.py: what it replaces, what it flags, what it leaves."""
 import importlib.util
 import json

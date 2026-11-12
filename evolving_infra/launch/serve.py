@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Start this host's part of the stack and keep it running.
 
 Every host runs its engines (and, with the planner, a trace server). The first host also runs the

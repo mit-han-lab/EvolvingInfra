@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Write tokenizer.json for a model that ships a tiktoken vocabulary (Kimi-K2.6).
 
     python export_tokenizer.py MODEL_DIR [OUTPUT]

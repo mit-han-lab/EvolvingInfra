@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Shared Python request contracts; no node state or duplicate load accounting.
 
 ``RequestIdentity.request_id`` is a numeric step within one subagent;

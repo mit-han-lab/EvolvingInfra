@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """``evolving-infra serve``: start the stack on one host, or this host's part of a multi-host stack."""
 import argparse
 from pathlib import Path

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Low-frequency role control; no per-request or engine scheduling changes.
 
 Inputs are completed usage and a sampled execution population, not trace future

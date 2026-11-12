@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """When the cold start is over: the per-minute share of input tokens served from cache stops rising."""
 import pytest
 
