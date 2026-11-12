@@ -138,7 +138,9 @@ We welcome contributions, and we recommend making them with a coding agent:
 
 ### Community
 
-Join the InferenceRSI WeChat group to discuss the project:
+Join the InferenceRSI community to discuss the project, on [Discord](https://discord.gg/UEffTj99N) or in the WeChat group:
+
+<p align="center"><a href="https://discord.gg/UEffTj99N"><img src="https://img.shields.io/badge/Discord-Inference--RSI-5865F2.svg?logo=discord&logoColor=white" alt="Join the Inference-RSI Discord"></a></p>
 
 <p align="center"><img src="docs/assets/wechat-group.png" alt="InferenceRSI WeChat group QR code" width="240"></p>
 
