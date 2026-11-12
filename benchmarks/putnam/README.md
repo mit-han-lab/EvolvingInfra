@@ -13,8 +13,8 @@ prompt with the model's chat template and asks for the recorded number of output
 
 ## Reproduce the paper
 
-Nine GB300 nodes, GLM-5.2, starting as 6P3D, planning window 600 s, router wait model `ledger`
-with λ = 4.6; the engine and router settings are those of
+Nine GB300 nodes, GLM-5.2, starting as 6P3D, planning window 600 s, token-count wait
+(`--prefill-wait tokens`) with λ = 4.6; the engine and router settings are those of
 [`examples/gb300/glm52.yaml`](../../examples/gb300/glm52.yaml), plus the router's
 `--symmetric-pd-decode-host-return`: a decode worker returns the KV it decoded to the
 request's prefill worker. The replay uses 16 client processes: each replays one shard at 1/16

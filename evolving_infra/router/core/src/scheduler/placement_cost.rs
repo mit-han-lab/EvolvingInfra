@@ -7,14 +7,14 @@
 //!
 //! # Glossary
 //!
-//! | Term | Code | Earlier name |
-//! |---|---|---|
-//! | Placement cost function | this module, [`PlacementCostParams`], [`crate::scheduler::cost_function`] | trade |
-//! | Prefill completion forecast | [`crate::forecast`], [`crate::prefill_forecast`] | e3 |
-//! | Global queue | [`crate::global_queue`], `cost_function/queue.rs` | gwq |
-//! | Token-count wait | [`PrefillWait::Tokens`], [`crate::prefill_work::PrefillWorkBook`] | ledger |
-//! | Copy price | [`PlacementCostParams::copy_price`] (`--copy-price`) | copy lambda |
-//! | Move margin | [`PlacementCostParams::move_margin`] (`--move-margin`) | gate m |
+//! | Term | Code |
+//! |---|---|
+//! | Placement cost function | this module, [`PlacementCostParams`], [`crate::scheduler::cost_function`] |
+//! | Prefill completion forecast | [`crate::forecast`], [`crate::prefill_forecast`] |
+//! | Global queue | [`crate::global_queue`], `cost_function/queue.rs` |
+//! | Token-count wait | [`PrefillWait::Tokens`], [`crate::prefill_work::PrefillWorkBook`] |
+//! | Copy price | [`PlacementCostParams::copy_price`] (`--copy-price`) |
+//! | Move margin | [`PlacementCostParams::move_margin`] (`--move-margin`) |
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 

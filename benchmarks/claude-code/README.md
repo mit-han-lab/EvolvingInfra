@@ -22,7 +22,7 @@ user waits longer than 120 s are clipped to 120 s.
 ## Reproduce the paper
 
 Nine GB300 nodes, GLM-5.2, starting as 6P3D, one replay client process, planning window 600 s,
-router wait model `ledger` with λ = 4.6. [`examples/gb300`](../../examples/gb300/README.md)
+token-count wait (`--prefill-wait tokens`) with λ = 4.6. [`examples/gb300`](../../examples/gb300/README.md)
 runs it at 126 concurrent agents as one Slurm job:
 
 ```bash
