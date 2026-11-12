@@ -46,6 +46,10 @@ Results of the paper's runs on [1800 s, 5400 s), two runs per setting:
 | 144 | 4.29, 4.30 | 93.9 %, 94.0 % | 24.4 s, 24.1 s | 38.6 s, 39.1 s | 28.0 s, 28.0 s | 6P3D → 8P1D |
 | 160 | 4.33, 4.35 | 93.9 %, 93.9 % | 27.3 s, 27.2 s | 43.3 s, 41.4 s | 31.4 s, 31.3 s | 6P3D → 8P1D |
 
+The 128-agent experiment run from this repository with `slurm/submit.py` scored 4.22
+requests/s on the same window with no failed request: prefix hit 94.0 %, TTFT p50 20.8 s,
+p95 34.0 s, end-to-end mean 24.7 s. The planner went from 6P3D to 8P1D at 1863 s and held.
+
 ## Another model
 
 The rows are bound to Kimi-K2.6: its token ids and its image token layout. Bind the messages
