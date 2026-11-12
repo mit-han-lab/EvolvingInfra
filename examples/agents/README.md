@@ -24,7 +24,7 @@ the launch scripts read.
 ## Run
 
 1. Serve a model with the config of this directory: it adds the tool-call and reasoning parsers,
-   so the harness gets OpenAI `tool_calls`, and turns late decode choice off (see Limits). Start the stack
+   so the harness gets OpenAI `tool_calls`, and places requests with tools on their cached prefix. Start the stack
    without `--planner` (see Limits):
 
    ```bash
@@ -62,8 +62,6 @@ writes its launch script.
 - The gateway sends chat completions on the plain path. A stack started with `--planner` (KV
   retention on) refuses plain requests, and the planner learns only from the prepared path, so
   harnesses need a stack without `--planner`.
-- The configs here turn late decode choice off on engines and router: each request gets its
-  decode worker at arrival.
 - The router's chat encoder renders messages only. The configs here pass `--chat-tools-tokenize`,
   so for a request with tools the router asks an engine's `/v1/tokenize` for the token ids and
   places the request on them; this adds one tokenization per request. Without the flag such a
