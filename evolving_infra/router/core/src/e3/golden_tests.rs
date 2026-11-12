@@ -14,7 +14,7 @@
 //! Every float must be within 1e-9 of the reference (the port is expected to
 //! be exact; set `E3_GOLDENS_EXACT=1` to require exact equality). Integers,
 //! booleans, strings, nulls and key sets must be equal. The ignored test
-//! `full_nsc_goldens_match_the_reference` runs all 8,880 forecast and 445
+//! `full_goldens_match_the_reference` runs all 8,880 forecast and 445
 //! fit goldens from `E3_GOLDENS_DIR` (the r5 bounds directory; not committed).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -443,7 +443,7 @@ fn bound_params_match_the_bound_tables() {
 
 #[test]
 #[ignore = "needs the full r5 goldens: E3_GOLDENS_DIR=<dir with goldens.jsonl, fit-goldens.jsonl, bound-tables.json>"]
-fn full_nsc_goldens_match_the_reference() {
+fn full_goldens_match_the_reference() {
     let dir = PathBuf::from(std::env::var_os("E3_GOLDENS_DIR").expect(
         "set E3_GOLDENS_DIR to the r5 bounds dir (goldens.jsonl, fit-goldens.jsonl, bound-tables.json)",
     ));
