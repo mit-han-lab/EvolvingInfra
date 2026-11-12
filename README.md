@@ -2,11 +2,7 @@
   <img src="docs/assets/logo.png" width="120" alt="Evolving Infra logo">
 </p>
 
-<h1 align="center">Evolving Infra</h1>
-
-<h3 align="center">
-Agent-Adaptive LLM Serving at Scale
-</h3>
+<h1 align="center">Evolving Infra: Agent-Adaptive LLM Serving at Scale</h1>
 
 <p align="center">
   <img src="docs/assets/affiliations.svg" width="860" alt="Georgia Institute of Technology, University of Illinois Urbana-Champaign, University of California, Berkeley, NVIDIA, OpenAI, Massachusetts Institute of Technology">
@@ -22,7 +18,7 @@ Agent-Adaptive LLM Serving at Scale
   <a href="https://inference-rsi.com/"><img src="https://img.shields.io/badge/Website-inference--rsi.com-2A78D6.svg" alt="Website"></a>
   <a href="https://arxiv.org/abs/2611.12304"><img src="https://img.shields.io/badge/arXiv-2611.12304-b31b1b.svg" alt="Paper on arXiv"></a>
   <a href="docs/README.md"><img src="https://img.shields.io/badge/Docs-evolving--infra-6f42c1.svg" alt="Documentation"></a>
-  <a href="https://deepwiki.com/mit-han-lab/EvolvingInfra"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+  <a href="https://deepwiki.com/mit-han-lab/EvolvingInfra"><img src="https://img.shields.io/badge/Wiki-DeepWiki-1F6FEB.svg" alt="Wiki on DeepWiki"></a>
   <a href="https://huggingface.co/datasets/crmsndu/evolving-infra-traces"><img src="https://img.shields.io/badge/Traces-Hugging_Face-FFD21E.svg?logo=huggingface&logoColor=FFD21E" alt="Agent traces on Hugging Face"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"></a>
 </p>
