@@ -70,6 +70,7 @@ class TokenizerService:
         self.ready = False
         self.upload_bytes = self.peak_upload_bytes = 0
         self.callback_failures = 0
+        self.callback_dropped = 0
         self.callback_outbox = CallbackOutbox(self)
         # The outbox reserves a bounded slot before an exchange enters this set.
         # It also owns disconnected exchanges until their original responses drain.
@@ -846,6 +847,7 @@ class TokenizerService:
                     "upload_bytes": self.upload_bytes,
                     "peak_upload_bytes": self.peak_upload_bytes,
                     "callback_failures": self.callback_failures,
+                    "callback_dropped": self.callback_dropped,
                     "callback_outbox": self.callback_outbox.summary(),
                 }
             ),

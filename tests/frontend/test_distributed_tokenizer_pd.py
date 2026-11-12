@@ -567,6 +567,50 @@ def test_outbox_capacity_rejects_before_take_claim_or_engine_submission():
     asyncio.run(scenario())
 
 
+def test_permanently_rejected_callback_is_dropped_and_later_events_still_arrive():
+    async def scenario():
+        rejected = {}  # request_id -> the one event_id the Backend always rejects
+
+        async def backend(event):
+            # The Backend answers 400 for an execution it no longer knows (e.g. after
+            # a restart); here it rejects the first non-claim event of every plan.
+            if event["state"] != "claimed" and \
+                    rejected.setdefault(event["request_id"], event["event_id"]) == event["event_id"]:
+                return web.json_response({"error": "unknown execution"}, status=400)
+            return web.json_response({"accepted": True})
+
+        async with harness(callback=backend, outbox_max_plans=1) as (service, api, base, seen, events):
+            for rid in ("a", "b", "c"):  # One slot: each plan must release it.
+                info = (await api.post("/prepare", json=body(rid))).json()
+                assert (await api.post("/forward_pd", json=plan(info, base))).status_code == 200
+                await delivered(lambda: service.callback_outbox.summary()["reserved_plans"] == 0)
+            ids = [e["event_id"] for e in events if e["state"] != "claimed"]
+            assert len(ids) == len(set(ids)) == 3 * 4  # Each event is sent exactly once.
+            assert {e["state"] for e in events} >= {"uploaded", "completed"}
+            assert (await api.get("/health")).json()["callback_dropped"] == 3
+    asyncio.run(scenario())
+
+
+def test_transiently_failing_callback_is_given_up_after_the_retry_bound(monkeypatch):
+    from evolving_infra.router.frontend import delivery
+    monkeypatch.setattr(delivery, "RETRY_SECONDS", 0.2, raising=False)
+
+    async def scenario():
+        async def unavailable(event):
+            return web.json_response({}, status=200 if event["state"] == "claimed" else 503)
+
+        async with harness(callback=unavailable, outbox_max_plans=1) as (service, api, base, seen, events):
+            info = (await api.post("/prepare", json=body())).json()
+            assert (await api.post("/forward_pd", json=plan(info, base))).status_code == 200
+            assert service.callback_outbox.summary()["pending_events"] == 4
+            async with asyncio.timeout(5):
+                while service.callback_outbox.summary()["reserved_plans"]:
+                    await asyncio.sleep(0.01)
+            assert service.callback_dropped == 4
+            assert (await api.post("/prepare", json=body("next"))).status_code == 200
+    asyncio.run(scenario())
+
+
 def test_truncated_stream_is_not_reported_as_success():
     async def d(req, value):
         return web.Response(body=b'data: {"text":"incomplete"}\n\n',
