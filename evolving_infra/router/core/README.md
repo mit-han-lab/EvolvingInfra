@@ -8,7 +8,9 @@ for KV retention. It started from SGLang's router; see [PROVENANCE.md](PROVENANC
 ## Build
 
 From `evolving_infra/router/core/`. The toolchain comes from `rust-toolchain.toml`; `protoc` must be on `PATH`
-or set in `PROTOC`.
+or set in `PROTOC`. The build fetches the `dynamo-tokenizers` crate from
+`https://github.com/ai-dynamo/dynamo` (a git dependency pinned by commit in `Cargo.toml`), so it
+needs network access to GitHub.
 
 ```bash
 cargo build --release --locked       # binary: target/release/sgl-router
