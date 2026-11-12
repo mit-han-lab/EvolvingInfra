@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Late D choose (`--pd-late-decode choose`) on POST /v1/completions: the
+//! Late D choose (`--pd-late-decode choose`) on POST /v1/completions and
+//! POST /v1/chat/completions: the
 //! arrival pick, the leg bodies and the dispatch of one P-leg and K D-legs.
 //! The table, the prefill links and the bind-time choice are in
 //! [`crate::late_bind`].
@@ -44,7 +45,6 @@ use crate::server::app_context::AppContext;
 use crate::server::error::ApiError;
 use crate::workers::Worker;
 
-const PATH: &str = "/v1/completions";
 /// Read limit for the body of a failed D-leg that is passed to the client.
 const ERROR_BODY_WAIT: Duration = Duration::from_secs(2);
 
@@ -367,6 +367,8 @@ pub(crate) struct ChooseDispatch {
     pub(crate) prefill: Arc<Worker>,
     /// The P-leg's load guards; the P task holds them until the P call ends.
     pub(crate) prefill_holds: Box<dyn Send + 'static>,
+    /// The engines' route of every leg: the route the request arrived on.
+    pub(crate) path: &'static str,
     pub(crate) headers: HeaderMap,
     pub(crate) prefill_body: Bytes,
     pub(crate) legs: LegBodies,
@@ -469,6 +471,7 @@ pub(crate) async fn dispatch(
         choose,
         prefill,
         prefill_holds,
+        path,
         headers,
         prefill_body,
         legs: bodies,
@@ -548,7 +551,7 @@ pub(crate) async fn dispatch(
                 }
                 _ => {
                     let result = proxy
-                        .send_late_leg(&prefill.url, PATH, &headers, prefill_body, false)
+                        .send_late_leg(&prefill.url, path, &headers, prefill_body, false)
                         .await;
                     let outcome = match result {
                         Ok(res) => {
@@ -667,7 +670,7 @@ pub(crate) async fn dispatch(
         let body = bodies.leg(idx);
         legs.push(async move {
             let result = proxy
-                .send_late_leg(&url, PATH, &headers, body, streaming)
+                .send_late_leg(&url, path, &headers, body, streaming)
                 .await;
             (idx, result)
         });

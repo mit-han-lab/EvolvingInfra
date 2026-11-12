@@ -48,7 +48,7 @@ reduced to the decision (88,704 input tokens) and one candidate P with its raw `
 reply, the poll envelope and the router rows the snapshot did not show. The reply has an in-flight
 pass, a partial request, 33 waiting rows (one without a published prefix) and 64 timeline samples.
 
-## State-push payloads (TRADE wait e3 with `--co-schedule-trade-e3-push-port`)
+## State-push payloads (TRADE wait e3 with `--trade-e3-push-port`)
 
 `prefill-state-push-recorded.msgpack`, `prefill-state-push-oversize.msgpack` and
 `prefill-state-push-recorded.json` (the values a decoder must read back) are frame 3 (the payload)
@@ -59,7 +59,7 @@ sets at send time (`sequence`, `age_s`, `stale`); the oversize message omits the
 (`snapshot_omitted` `over_max_bytes`). Both payloads decode to maps with string keys only, with no
 `bin`, `ext` or float32 values.
 
-## Frozen fit (`--co-schedule-trade-e3-frozen-fit`)
+## Frozen fit (`--trade-e3-frozen-fit`)
 
 `kimi-frozen-fit.json` is `kimi.e3_constants` of an offline Kimi-K2.6 step model (TP4 GB300, 6P3D,
 concurrency 128, fit window 300-1800 s after the benchmark start), with a `source` note. The GPU

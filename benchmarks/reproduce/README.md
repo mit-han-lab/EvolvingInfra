@@ -34,7 +34,7 @@ Every run uses nine GB300 nodes with four GPUs each, on one RDMA network:
 | Concurrent agents | 224, 256, 288 | 90, 108, 126 | 128, 144, 160 |
 | Replay client processes | 16 | 1 | 16 |
 | Planning window | 600 s | 600 s | 300 s |
-| Router wait model (`--co-schedule-trade-wait`) | `ledger`, λ = 4.6 | `ledger`, λ = 4.6 | `e3`, λ and rate `auto` |
+| Router wait model (`--trade-wait`) | `ledger`, λ = 4.6 | `ledger`, λ = 4.6 | `e3`, λ and rate `auto` |
 | Decode worker returns decoded KV to the prefill worker (`--symmetric-pd-decode-host-return`) | on | off | off |
 | Workload ([Hugging Face](https://huggingface.co/datasets/crmsndu/evolving-infra-traces)) | `putnam/decode-heavy-100.stationary.jsonl` | `claude-code/cc062126-stationary-full-v1.jsonl` | `osworld/osworld2-kimi-formal.jsonl` and `osworld/screenshots/` |
 

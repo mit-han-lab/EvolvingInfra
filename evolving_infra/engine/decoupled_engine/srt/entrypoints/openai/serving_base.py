@@ -211,6 +211,19 @@ class OpenAIServingBase(ABC):
         )
         return ORJSONResponse(content=error.model_dump(), status_code=status_code)
 
+    def late_d_error_response(self, ended) -> ORJSONResponse:
+        """A late-D choose leg that ended before its first chunk
+        (``LateDLegEnded``): its status and an error body, no stream, with
+        X-Late-D-Reason for a late-D outcome."""
+        from decoupled_engine.srt.disaggregation.late_d import LATE_D_REASON_HEADER
+
+        response = self.create_error_response(
+            ended.message, ended.err_type, ended.status_code
+        )
+        if ended.reason is not None:
+            response.headers[LATE_D_REASON_HEADER] = ended.reason
+        return response
+
     def create_streaming_error_response(
         self,
         message: str,

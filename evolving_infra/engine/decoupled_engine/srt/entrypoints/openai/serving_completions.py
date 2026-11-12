@@ -11,11 +11,10 @@ from fastapi import Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 
 from decoupled_engine.srt.disaggregation.late_d import (
-    LATE_D_LEG_HEADER,
-    LATE_D_OUTCOME_LOCAL,
-    LATE_D_REASON_HEADER,
+    LATE_D_OUTCOME_ATTR,
     LATE_D_STATUS_ROUTE_ATTR,
     LateDLegEnded,
+    late_d_leg_headers,
 )
 from decoupled_engine.srt.entrypoints.openai.protocol import (
     CompletionRequest,
@@ -51,23 +50,6 @@ if TYPE_CHECKING:
     from decoupled_engine.srt.parser.template_manager import TemplateManager
 
 logger = logging.getLogger(__name__)
-
-# Process-local: the late-D outcome of a stream's first chunk.
-_LATE_D_OUTCOME_ATTR = "_late_d_outcome"
-
-
-def _late_d_leg_headers(
-    adapted_request: GenerateReqInput, outcome: Optional[str]
-) -> Optional[Dict[str, str]]:
-    """X-Late-D-Leg for a symmetric choose P-leg (kv_export + late_d):
-    "local" when its owner runs it as a Local request (the client stream),
-    else "stub" (one token; a D-leg is the stream). None for other requests,
-    PD legs included (no header means stub)."""
-    if adapted_request.late_d is None or adapted_request.kv_export is None:
-        return None
-    leg = LATE_D_OUTCOME_LOCAL if outcome == LATE_D_OUTCOME_LOCAL else "stub"
-    return {LATE_D_LEG_HEADER: leg}
-
 
 class OpenAIServingCompletion(OpenAIServingBase):
     """Handler for /v1/completion requests"""
@@ -316,7 +298,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
         except ValueError as e:
             return self.create_error_response(str(e))
         except LateDLegEnded as ended:
-            return self._late_d_error_response(ended)
+            return self.late_d_error_response(ended)
 
         async def prepend_first_chunk():
             yield first_chunk
@@ -327,8 +309,8 @@ class OpenAIServingCompletion(OpenAIServingBase):
             prepend_first_chunk(),
             media_type="text/event-stream",
             background=self.tokenizer_manager.create_abort_task(adapted_request),
-            headers=_late_d_leg_headers(
-                adapted_request, getattr(adapted_request, _LATE_D_OUTCOME_ATTR, None)
+            headers=late_d_leg_headers(
+                adapted_request, getattr(adapted_request, LATE_D_OUTCOME_ATTR, None)
             ),
         )
 
@@ -372,7 +354,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     # P-leg runs Local (read by _handle_streaming_request).
                     setattr(
                         adapted_request,
-                        _LATE_D_OUTCOME_ATTR,
+                        LATE_D_OUTCOME_ATTR,
                         content["meta_info"].get("late_d_outcome"),
                     )
 
@@ -636,7 +618,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
         except ValueError as e:
             return self.create_error_response(str(e))
         except LateDLegEnded as ended:
-            return self._late_d_error_response(ended)
+            return self.late_d_error_response(ended)
 
         if not isinstance(ret, list):
             ret = [ret]
@@ -646,22 +628,11 @@ class OpenAIServingCompletion(OpenAIServingBase):
             ret,
             int(time.time()),
         )
-        headers = _late_d_leg_headers(
+        headers = late_d_leg_headers(
             adapted_request, ret[0]["meta_info"].get("late_d_outcome")
         )
         if headers is not None:
             return ORJSONResponse(content=response.model_dump(), headers=headers)
-        return response
-
-    def _late_d_error_response(self, ended: LateDLegEnded) -> ORJSONResponse:
-        """A late-D choose leg that ended before its first chunk: its status and
-        an error body, no stream, with X-Late-D-Reason for a late-D
-        outcome."""
-        response = self.create_error_response(
-            ended.message, ended.err_type, ended.status_code
-        )
-        if ended.reason is not None:
-            response.headers[LATE_D_REASON_HEADER] = ended.reason
         return response
 
     def _build_completion_response(

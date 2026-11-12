@@ -51,7 +51,6 @@ fn build_sticky_ctx(header_name: &str, worker_urls: &[String]) -> Arc<AppContext
                 eviction_interval_secs: 3600,
             }),
             kv_hint: None,
-            co_schedule: None,
             pd_decode_policy: sgl_router::config::PdDecodePolicy::AffinityMinLoad,
             pd_decision_replay: None,
             pd_decode_tokens: None,

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! TRADE `--co-schedule-trade-wait e3`: the E3 P completion forecast
+//! TRADE `--trade-wait e3`: the E3 P completion forecast
 //! ([`crate::e3`], a port of the Python reference `router_e3.py` r5) in the
 //! TRADE P selection, with the prediction gate.
 //!
@@ -33,7 +33,7 @@
 //!   the router's own rows that the snapshot does not show, sorted by ready
 //!   time (ties by decision time). A row is kept only when its ready time is
 //!   at most the target's ready time minus the margin
-//!   (`--co-schedule-trade-e3-rq-margin-ms`, default 0).
+//!   (`--trade-e3-rq-margin-ms`, default 0).
 //! - A snapshot row with a pending pull (`plan.pull_tokens`): the pulled
 //!   tokens count as cached and restored from host (the engine's
 //!   `remaining_compute_tokens` still counts them as compute until the pull
@@ -91,7 +91,7 @@
 //! Without a GPU model (no service sample yet) a P has no forecast
 //! (`no_fit`): the selection keeps the cache-aware owner.
 //!
-//! With `--co-schedule-trade-e3-frozen-fit FILE` ([`FrozenFit`]) every fit
+//! With `--trade-e3-frozen-fit FILE` ([`FrozenFit`]) every fit
 //! takes the GPU model, the launch model and the calibration constants of
 //! FILE (offline warmup constants, source `frozen` in the `e3_fit` event);
 //! the online samples still give the arrival rates. A P that is never idle
@@ -102,7 +102,7 @@
 //!
 //! Every routed request gets one `e3_shadow` line (rid, chosen P, its
 //! `pred_s`, decision time) in the cost trace, or in
-//! `--co-schedule-trade-e3-shadow PATH`. When the router later receives the
+//! `--trade-e3-shadow PATH`. When the router later receives the
 //! request's `request_complete` timeline sample from the chosen P, it writes
 //! an `e3_label` line: `done` on the router clock is within
 //! `[poll sent, poll received] - age_s - completed_age_s`, so
@@ -113,7 +113,7 @@
 //! the evaluator's clock-offset interval (`decision_unix_s` is the router
 //! wall clock at the decision).
 //!
-//! # State push (`--co-schedule-trade-e3-push-port`)
+//! # State push (`--trade-e3-push-port`)
 //!
 //! With the push on, [`crate::trade_e3_push`] subscribes to each P's state
 //! push (engine wire contract v1, `prefill_state_push.py`). A pushed
@@ -145,7 +145,7 @@ use crate::e3::{
     GpuSample, GpuSources, InflightPass, Input, LagSample, LaunchAnchor, LaunchFit, LaunchSample,
     Output, Params, Partial, QueueRow, RowSource, RxLine, RxParams, Target,
 };
-use crate::eft_cheap::{is_true, nonneg_int};
+use crate::prefill_snapshot::{is_true, nonneg_int};
 
 /// The deploy mode of the router's poll path: snapshot poll,
 /// router calibration without GPU times, the production rules.
@@ -215,8 +215,8 @@ fn nonneg_f64(v: Option<&Value>) -> Option<f64> {
 // Configuration: the error-bound table.
 // ---------------------------------------------------------------------------
 
-/// `--co-schedule-trade-wait e3` settings that are not `Copy`
-/// ([`crate::scheduler::co_schedule::TradeParams`] holds the gate numbers).
+/// `--trade-wait e3` settings that are not `Copy`
+/// ([`crate::scheduler::trade::TradeParams`] holds the gate numbers).
 #[derive(Debug, Clone)]
 pub struct TradeE3Config {
     /// Error-bound table of [`Self::mode`] (table v2).
@@ -235,32 +235,32 @@ pub struct TradeE3Config {
     /// bound-tables.json file).
     pub file_level: Option<String>,
     /// `g_min_s` recorded in bound-params.json (the threshold of its pair
-    /// statistics; the gate uses `--co-schedule-trade-gate-gmin-ms`).
+    /// statistics; the gate uses `--trade-gate-gmin-ms`).
     pub file_g_min_s: Option<f64>,
     /// sha256 of the bound-tables.json that bound-params.json was cut from.
     pub file_tables_sha256: Option<String>,
     /// rq margin m (s): a router or bootstrap row is kept only when its
     /// ready time is at most the target's ready time minus m.
     pub rq_margin_s: f64,
-    /// `--co-schedule-trade-e3-shadow`: the shadow log; None = the cost trace.
+    /// `--trade-e3-shadow`: the shadow log; None = the cost trace.
     pub shadow_path: Option<PathBuf>,
-    /// `--co-schedule-trade-e3-push-port`: the state push; None = poll only.
+    /// `--trade-e3-push-port`: the state push; None = poll only.
     pub push: Option<PushConfig>,
-    /// `--co-schedule-trade-e3-next-pass-lag`: forecasts take
+    /// `--trade-e3-next-pass-lag`: forecasts take
     /// [`crate::e3::Params::next_pass_lag`] (off = the reference).
     pub next_pass_lag: bool,
-    /// `--co-schedule-trade-e3-frozen-fit`: offline warmup constants in
+    /// `--trade-e3-frozen-fit`: offline warmup constants in
     /// place of the online GPU, launch and lag fits (None: the online fits).
     pub frozen_fit: Option<Arc<FrozenFit>>,
 }
 
-/// `--co-schedule-trade-e3-push-port`: the port of each P's state push and
+/// `--trade-e3-push-port`: the port of each P's state push and
 /// the error-bound table of the forecasts that start from a pushed state.
 #[derive(Debug, Clone)]
 pub struct PushConfig {
     /// The router connects to `tcp://<P host>:port` (routing rank 0).
     pub port: u16,
-    /// Deploy mode of the push table (`--co-schedule-trade-e3-push-bound-mode`;
+    /// Deploy mode of the push table (`--trade-e3-push-bound-mode`;
     /// default: the poll mode).
     pub mode: String,
     pub level: String,
@@ -332,7 +332,7 @@ fn resolve_level(
         (None, Some(l)) => Ok(l.to_string()),
         (None, None) => Err(format!(
             "{}: a bound-tables.json file has no level; give \
-             --co-schedule-trade-e3-bound-level",
+             --trade-e3-bound-level",
             path.display()
         )),
     }
@@ -416,14 +416,14 @@ impl TradeE3Config {
         })
     }
 
-    /// `--co-schedule-trade-e3-frozen-fit`: every (P, step) fit takes the
+    /// `--trade-e3-frozen-fit`: every (P, step) fit takes the
     /// GPU, launch and lag parameters of `frozen` ([`FrozenFit::apply`]).
     pub fn with_frozen_fit(mut self, frozen: Option<Arc<FrozenFit>>) -> Self {
         self.frozen_fit = frozen;
         self
     }
 
-    /// `--co-schedule-trade-e3-next-pass-lag`: on a busy P, the result of a
+    /// `--trade-e3-next-pass-lag`: on a busy P, the result of a
     /// request whose last pass leaves no known work waits for the next pass
     /// of the expected arrivals ([`crate::e3::Params::next_pass_lag`]).
     pub fn with_next_pass_lag(mut self, on: bool) -> Self {
@@ -514,11 +514,11 @@ impl TradeE3Config {
     }
 }
 
-/// The source label of a parameter from `--co-schedule-trade-e3-frozen-fit`
+/// The source label of a parameter from `--trade-e3-frozen-fit`
 /// (the GPU sources of the `e3_fit` trace event).
 pub const FROZEN_SOURCE: &str = "frozen";
 
-/// `--co-schedule-trade-e3-frozen-fit FILE`: offline warmup constants (the
+/// `--trade-e3-frozen-fit FILE`: offline warmup constants (the
 /// `e3_constants` of the offline step model) that replace the online GPU,
 /// launch and lag fits of every P; the online state still gives the arrival
 /// rates. For a P that is never idle: the online GPU fit takes only single
@@ -910,7 +910,7 @@ impl E3View {
         // The engine marks a snapshot stale when its age at the reply is
         // above the engine's own limit (SGLANG_PREFILL_ROUTING_SNAPSHOT_MAX_AGE_S)
         // or unknown. With a known age the router's limit on the view age
-        // decides (--co-schedule-trade-eft-max-view-age-ms; the bound tables
+        // decides (--trade-e3-max-view-age-ms; the bound tables
         // were fitted on every decision, whatever the snapshot age): the flag
         // is only noted.
         let stale = is_true(raw.get("stale"));
@@ -1820,7 +1820,7 @@ pub struct E3Online {
     label_sources: bool,
     /// Forecast parameters take [`crate::e3::Params::next_pass_lag`].
     next_pass_lag: bool,
-    /// `--co-schedule-trade-e3-frozen-fit`: replaces the GPU, launch and
+    /// `--trade-e3-frozen-fit`: replaces the GPU, launch and
     /// lag parts of every fit.
     frozen: Option<Arc<FrozenFit>>,
     state: Mutex<OnlineDebug>,
@@ -1855,7 +1855,7 @@ impl E3Online {
         }
     }
 
-    /// `--co-schedule-trade-e3-frozen-fit`: every (P, step) fit takes the
+    /// `--trade-e3-frozen-fit`: every (P, step) fit takes the
     /// GPU model, the launch model and the warmup constants of `frozen`;
     /// the online samples still give its arrival rates.
     pub fn with_frozen_fit(mut self, frozen: Option<Arc<FrozenFit>>) -> Self {
@@ -1865,7 +1865,7 @@ impl E3Online {
 
     /// Forecasts price the next pass of the expected arrivals into the
     /// result of a request whose last pass leaves no known work on a busy P
-    /// (`--co-schedule-trade-e3-next-pass-lag`).
+    /// (`--trade-e3-next-pass-lag`).
     pub fn with_next_pass_lag(mut self, on: bool) -> Self {
         self.next_pass_lag = on;
         self
@@ -2011,8 +2011,8 @@ impl E3Online {
         let view = snapshot.as_ref().and_then(|s| s.e3.as_ref());
         let page = view.map_or(crate::e3::PAGE_TOKENS, |v| v.page);
         let n = tokens.input;
-        let q_own = crate::eft_cheap::floor_hit(tokens.local_hit, n, page);
-        let prefix = crate::eft_cheap::floor_hit(tokens.expected_hit, n, page).max(q_own);
+        let q_own = crate::prefill_snapshot::floor_hit(tokens.local_hit, n, page);
+        let prefix = crate::prefill_snapshot::floor_hit(tokens.expected_hit, n, page).max(q_own);
         let gap = self.session_gap(session, worker, now_s);
         let (host, host_rule) = match tokens.gpu_hit {
             // Indexer split: the cached tokens that are not on the GPU,
@@ -2575,7 +2575,7 @@ pub fn session_key(
 pub enum ShadowSink {
     /// The cost trace (its sequence numbers and timestamps).
     Trace(Arc<crate::cost_balance::CostBook>),
-    /// `--co-schedule-trade-e3-shadow PATH` (a new file).
+    /// `--trade-e3-shadow PATH` (a new file).
     File(Mutex<Option<BufWriter<File>>>),
 }
 
@@ -3602,7 +3602,7 @@ mod tests {
         let p = fit.params(None, 1e6);
         assert_eq!(p.gpu_idle, p.gpu_busy);
         assert!(!p.next_pass_lag, "the reference result lag");
-        // `--co-schedule-trade-e3-next-pass-lag`: the prepared forecast
+        // `--trade-e3-next-pass-lag`: the prepared forecast
         // parameters carry the switch (the fit of step 600 s serves 610 s).
         let usable = Arc::new(fit.clone());
         for on in [false, true] {
@@ -3643,7 +3643,7 @@ mod tests {
         assert!(new_c);
     }
 
-    /// `--co-schedule-trade-e3-frozen-fit`: the recorded Kimi constants load
+    /// `--trade-e3-frozen-fit`: the recorded Kimi constants load
     /// from the e3_constants object and from a step model that wraps it;
     /// bad files are refused with the reason.
     #[test]
@@ -3760,7 +3760,7 @@ mod tests {
         assert!(
             TradeE3Config::load(&tables, DEFAULT_BOUND_MODE, None, 0.0, None)
                 .unwrap_err()
-                .contains("--co-schedule-trade-e3-bound-level")
+                .contains("--trade-e3-bound-level")
         );
         let t = TradeE3Config::load(&tables, DEFAULT_BOUND_MODE, Some("0.8"), 0.0, None).unwrap();
         assert_eq!(t.bound_schema, "bound-tables");

@@ -49,7 +49,7 @@ use crate::global_queue::{
     GlobalQueueMode, GlobalQueueRoom, GwqRelease, AUTO_DISPATCH_DELAY_MS, CHUNK_TOKENS,
 };
 use crate::kv_hint::KvHintInjector;
-use crate::scheduler::co_schedule::{TradeParams, TradeWait};
+use crate::scheduler::trade::{TradeParams, TradeWait};
 use crate::scheduler::{PlaceInput, SymmetricPdError};
 use crate::workers::Worker;
 
@@ -185,7 +185,7 @@ struct Held {
     arrived_unix_ms: u64,
     tokens: u64,
     rid: Option<String>,
-    /// The session identity and its key ([`crate::scheduler::co_schedule::trade_session_hash`]).
+    /// The session identity and its key ([`crate::scheduler::trade::trade_session_hash`]).
     session: Option<String>,
     session_key: Option<u64>,
     /// Its TRADE candidates over the pool of its arrival; a P that joined
@@ -483,7 +483,7 @@ impl CostFunction {
                 "chunk_source": chunk_source,
             });
             // The decision of the cost function's wait (the E3 forecast with
-            // its gate under `--co-schedule-trade-wait e3`).
+            // its gate under `--trade-wait e3`).
             let (selected, reservation, decision) =
                 self.reserve_candidates(input, tokens, candidates, Some(note))?;
             self.log_decision(ix, answer.as_ref(), input, &selected, &decision);
@@ -507,7 +507,7 @@ impl CostFunction {
                 session_key: input
                     .trade_session
                     .as_deref()
-                    .map(crate::scheduler::co_schedule::trade_session_hash),
+                    .map(crate::scheduler::trade::trade_session_hash),
                 candidates,
                 p_arrival: None,
                 arrival_pass: pass_id,
@@ -561,7 +561,7 @@ impl CostFunction {
         };
         let (trigger, triggers) = trigger_names(bits);
         // The walk and its releases use the ledger terms, also with
-        // `--co-schedule-trade-wait e3` (room `predicted` replaces the backlog
+        // `--trade-wait e3` (room `predicted` replaces the backlog
         // of a P that has a forecast by R x its predicted drain).
         let walk_params = TradeParams {
             wait: TradeWait::Ledger,

@@ -49,11 +49,6 @@ pub struct AppContext {
     /// is configured. Built here (not in config) so the config stays plain
     /// data. Request handlers consult it after worker selection.
     pub kv_hint: Option<Arc<crate::kv_hint::KvHintInjector>>,
-    /// Co-scheduler (router-side admission queue + per-worker uncached-token
-    /// ledger + `/v1/loads` poller); `Some` exactly when
-    /// `--policy co_schedule` is configured. The chat/completions routes
-    /// bypass `Policy::select` and call `CoScheduler::admit` instead.
-    pub co_schedule: Option<Arc<crate::co_schedule::CoScheduler>>,
     /// symmetric P/D placement runtime (indexer feed, `/v1/loads` poller + ledger,
     /// hold queue, marks); `Some` exactly when `--policy symmetric_pd`. The
     /// chat/completions routes place through `SymmetricPdRuntime::admit` and
@@ -83,7 +78,7 @@ pub struct AppContext {
     /// the prefill asks this for the winner when it is about to prefill.
     pub late_bind: Option<Arc<crate::late_bind::LateBind>>,
     /// Session KV retention on the PD path (`--kv-session-retention`, with
-    /// `--policy co_schedule`); `Some` exactly then. The completions route
+    /// `--policy gateway_cache_aware`); `Some` exactly then. The completions route
     /// registers each PD request with an `x-kv-session-context` header
     /// (P, P) and tags only the P-leg body; the registry's task sends the
     /// engine controls. `None`: the route takes no retention branch.
@@ -172,25 +167,6 @@ impl AppContext {
             .kv_hint
             .as_ref()
             .map(|cfg| Arc::new(crate::kv_hint::KvHintInjector::new(cfg)));
-        // Co-scheduler: needs both its own tuning and the kv-hint config
-        // (indexer + worker map). `Cli::into_config` guarantees the pair
-        // when `--policy co_schedule` is selected; tolerate hand-built
-        // configs that miss one half by leaving the feature off.
-        let co_schedule = match (&config.model.co_schedule, &config.model.kv_hint) {
-            (Some(cs), Some(kv)) => Some(crate::co_schedule::CoScheduler::spawn(
-                cs.clone(),
-                kv,
-                Arc::clone(&registry),
-                ModelId(config.model.id.clone()),
-            )),
-            (Some(_), None) => {
-                tracing::warn!(
-                    "co_schedule config present without kv_hint config; co-scheduling disabled"
-                );
-                None
-            }
-            _ => None,
-        };
         // symmetric P/D: the indexer is optional (placement degrades to
         // load/role only); the runtime reuses the kv-hint indexer config.
         let symmetric_pd = config.model.symmetric_pd.as_ref().map(|f| {
@@ -362,7 +338,7 @@ impl AppContext {
                 None => crate::late_fit::start_collector(&registry, store),
             }
         }
-        // Session KV retention (co_schedule or gateway_cache_aware PD path):
+        // Session KV retention (gateway_cache_aware PD path):
         // the registry, its control task and the periodic stats line.
         let kv_sessions = config.model.pd_kv_session_retention().map(|key_file| {
             let sessions = KvSessions::spawn(key_file);
@@ -381,7 +357,6 @@ impl AppContext {
             dynamo_prefix,
             block_size_oracle: BlockSizeOracle::new(),
             kv_hint,
-            co_schedule,
             symmetric_pd,
             pd_replay,
             prepared_config,
@@ -541,7 +516,6 @@ impl AppContext {
                     cache_aware: None,
                     sticky: None,
                     kv_hint: None,
-                    co_schedule: None,
                     pd_decode_policy: PdDecodePolicy::AffinityMinLoad,
                     pd_decision_replay: None,
                     pd_decode_tokens: None,
@@ -566,7 +540,6 @@ impl AppContext {
             dynamo_prefix: None,
             block_size_oracle: BlockSizeOracle::new(),
             kv_hint: None,
-            co_schedule: None,
             symmetric_pd: None,
             pd_replay: None,
             prepared_config: None,

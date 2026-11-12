@@ -12,13 +12,13 @@ mod common;
 
 mod cache_aware_input_ids;
 mod chat_routing;
+mod chat_tools_tokenize;
 mod completions_image_layout;
 mod decode_po2_smg;
 mod decode_token_balance;
 mod external_indexer_routing;
 mod failover;
 mod gateway_ca_port;
-mod global_queue;
 mod graceful_shutdown;
 mod header_forwarding;
 mod kv_hint_injection;

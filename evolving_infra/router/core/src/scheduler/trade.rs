@@ -142,29 +142,13 @@ pub const TRADE_MIN_PULL_TOKENS: u64 = 512;
 pub const DEFAULT_TRADE_COPY_LAMBDA: f64 = 4.6;
 
 /// Where TRADE takes a P's wait and the request's own service time from
-/// (`--co-schedule-trade-wait`).
+/// (`--trade-wait`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TradeWait {
     /// backlog / R and u / R from the router's uncached ledger (the first
     /// TRADE version; selection and trace are unchanged).
     #[default]
     Ledger,
-    /// B_w = the EFT-0+ drain forecast ([`crate::eft_cheap::drain`]) of the
-    /// P's engine `prefill_routing` snapshot plus the router rows that the
-    /// snapshot does not show yet; S_w = the step-model service of the
-    /// request ([`crate::eft_cheap::service_seconds`]). For a P whose
-    /// snapshot is missing, unusable or older than the age limit, B_w is the
-    /// step-model drain of the router's active rows for that P alone (the
-    /// ledger on the same scale); the trace counts these fallbacks.
-    Eft,
-    /// The online latency predictor ([`crate::olp`]; `--symmetric-pd-p-select
-    /// cost-function` only): B_w and S_w in seconds from the structural work
-    /// of the P's live ledger rows and of the request, scaled online
-    /// (completion labels by default). A decision-level confidence gate
-    /// gives every P the ledger terms (the cost function's decision, bit for
-    /// bit) while OLP is cold, a P's progress view is stale or OLP orders
-    /// recent label pairs worse than the ledger; the trace names the reason.
-    Olp,
     /// The E3 P completion forecast ([`crate::e3`], [`crate::trade_e3`]):
     /// B_w = `wait_s` (decision to the GPU start of the request's first
     /// pass on P) and S_w = `pred_s - wait_s` (`pred_s` = decision to P's
@@ -181,14 +165,12 @@ impl TradeWait {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ledger => "ledger",
-            Self::Eft => "eft",
-            Self::Olp => "olp",
             Self::E3 => "e3",
         }
     }
 }
 
-/// What the copy price lambda charges (`--co-schedule-trade-dup-charge`).
+/// What the copy price lambda charges (`--trade-dup-charge`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TradeDupCharge {
     /// lambda x pulled tokens (the first TRADE version).
@@ -210,7 +192,7 @@ impl TradeDupCharge {
 }
 
 /// How TRADE prices the copy that a pull leaves on its target P
-/// (`--co-schedule-trade-pull-price`).
+/// (`--trade-pull-price`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TradePullPrice {
     /// lambda x pulled tokens, the same lambda for every candidate
@@ -236,35 +218,35 @@ impl TradePullPrice {
     }
 }
 
-/// Default age limit of an engine snapshot for `--co-schedule-trade-wait eft`
+/// Default age limit of an engine snapshot for `--trade-wait eft`
 /// (the view-age upper bound: poll sent to decision plus the engine's age).
 pub const DEFAULT_TRADE_EFT_MAX_VIEW_AGE_S: f64 = 1.5;
 
 /// Default window W of the arrival rate a_w of the HOL term, in seconds
-/// (`--co-schedule-trade-hol-rate-window-secs`).
+/// (`--trade-hol-rate-window-secs`).
 pub const DEFAULT_TRADE_HOL_RATE_WINDOW_S: f64 = 60.0;
 
-/// Default floor of the auto copy price (`--co-schedule-trade-copy-lambda-min`),
+/// Default floor of the auto copy price (`--trade-copy-lambda-min`),
 /// in uncached-token equivalents per pulled token. Safety only: 0.5 x the S6
 /// price 9.2.
 pub const DEFAULT_TRADE_AUTO_LAMBDA_MIN: f64 = 4.6;
-/// Default cap of the auto copy price (`--co-schedule-trade-copy-lambda-max`).
+/// Default cap of the auto copy price (`--trade-copy-lambda-max`).
 pub const DEFAULT_TRADE_AUTO_LAMBDA_MAX: f64 = 1000.0;
-/// Default mu_max of the auto copy price (`--co-schedule-trade-copy-lambda-mu`):
+/// Default mu_max of the auto copy price (`--trade-copy-lambda-mu`):
 /// recomputed tokens per pulled token, at its upper bound 1.
 pub const DEFAULT_TRADE_AUTO_MU: f64 = 1.0;
 /// Default time constant tau of the auto inputs, in seconds
-/// (`--co-schedule-trade-auto-tau-secs`). It is also the start-up period.
+/// (`--trade-auto-tau-secs`). It is also the start-up period.
 pub const DEFAULT_TRADE_AUTO_TAU_S: f64 = 120.0;
 /// Default idle window of a session in N_active, in seconds
-/// (`--co-schedule-trade-auto-session-idle-secs`).
+/// (`--trade-auto-session-idle-secs`).
 pub const DEFAULT_TRADE_AUTO_SESSION_IDLE_S: f64 = 300.0;
 /// [`TradeAutoState`] tracks at most this many sessions. A new session above
 /// the limit is not counted (and counted in `sessions_dropped`).
 pub const TRADE_AUTO_MAX_SESSIONS: usize = 100_000;
 
 /// The queue multiplier q of the auto copy price
-/// (`--co-schedule-trade-copy-lambda-q`): the E2E seconds that one extra
+/// (`--trade-copy-lambda-q`): the E2E seconds that one extra
 /// second of P work costs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TradeAutoQ {
@@ -287,7 +269,7 @@ impl TradeAutoQ {
 }
 
 /// Where TRADE takes its copy price lambda from
-/// (`--co-schedule-trade-copy-lambda <x|auto>`).
+/// (`--trade-copy-lambda <x|auto>`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum TradeLambdaMode {
     /// lambda = [`TradeParams::copy_lambda`] (the first version).
@@ -314,7 +296,7 @@ impl TradeLambdaMode {
 }
 
 /// Where TRADE takes its rate R from
-/// (`--co-schedule-trade-rate-tokens-per-s <x|auto>`).
+/// (`--trade-rate-tokens-per-s <x|auto>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TradeRateMode {
     /// R = [`TradeParams::rate_tokens_per_s`].
@@ -334,7 +316,7 @@ impl TradeRateMode {
     }
 }
 /// Default multiple m of the combined error bound in the `wait = e3`
-/// prediction gate (`--co-schedule-trade-gate-m`). With m = 1 the gate is
+/// prediction gate (`--trade-gate-m`). With m = 1 the gate is
 /// the reroute rule of the E3 bound fit: the bounds come from the
 /// shipped bound table at its level, so m = 1 uses them as fitted.
 pub const DEFAULT_TRADE_GATE_M: f64 = 1.0;
@@ -653,7 +635,7 @@ pub fn trade_pull_tokens(local_hit: u64, remote_hit: u64, input_tokens: u64, flo
     }
 }
 
-/// The EFT terms of one P (`wait = eft`), in seconds.
+/// The forecast terms of one P (`wait = e3`), in seconds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TradeWaitTerms {
     /// B_w: predicted time until the P has done the work ahead of the request.
@@ -870,8 +852,8 @@ pub struct TradeInput<'a> {
     pub uncached: u64,
     /// Tokens pulled from another P (0 = no pull).
     pub pulled: u64,
-    /// `wait = eft`: this P's EFT terms. None: the ledger terms (wait =
-    /// ledger, or an EFT fallback for this P).
+    /// `wait = e3`: this P's forecast terms. None: the ledger terms (wait =
+    /// ledger, or a P without a usable forecast).
     pub wait: Option<TradeWaitTerms>,
     /// a_w: requests per second that arrive at this P ([`TradeArrivals`];
     /// with `wait = e3` the E3 arrival-rate fit when it exists); used only
@@ -907,8 +889,8 @@ pub fn trade_duplicate_tokens(inputs: &[TradeInput<'_>], i: usize) -> u64 {
 #[derive(Debug, Clone)]
 pub struct TradeSelection {
     pub chosen: usize,
-    /// The cache-aware owner: maximum own hit, then (`wait = eft` or `olp`)
-    /// the lower cost, then the lowest backlog, then the URL.
+    /// The cache-aware owner: maximum own hit, then the lowest backlog, then
+    /// the URL.
     pub owner: usize,
     pub has_owner: bool,
     /// Cost of every input, in input order.
@@ -962,10 +944,8 @@ fn trade_costs(params: &TradeParams, inputs: &[TradeInput<'_>]) -> Vec<TradeCost
 }
 
 /// Choose argmin TRADE cost. Equal costs go to the cache-aware owner, then to
-/// the higher own hit, then (`wait = eft` or `olp`) to the shorter wait B_w,
-/// then to the lower backlog, then to the smaller URL. With `wait = eft` or
-/// `olp`, Ps with the same highest own hit are ordered by cost (the smaller
-/// predicted finish is the owner), not by the ledger backlog. With `margin_noise_k > 0` the
+/// the higher own hit, then to the lower backlog, then to the smaller URL.
+/// With `margin_noise_k > 0` the
 /// owner is kept unless its cost exceeds the best one by more than the noise
 /// margin. With `hol_weight > 0` every cost includes the HOL term, so these
 /// rules and the gain of the noise margin use it; the margin itself is
@@ -978,22 +958,12 @@ pub fn select_trade(params: &TradeParams, inputs: &[TradeInput<'_>]) -> TradeSel
     }
     assert!(!inputs.is_empty());
     let costs = trade_costs(params, inputs);
-    // The ledger wait keeps the first version's ties (backlog); the
-    // predicted waits (eft, olp) order equally cached Ps by cost.
-    let eft = matches!(params.wait, TradeWait::Eft | TradeWait::Olp);
     let owner = inputs
         .iter()
         .enumerate()
-        .min_by(|(ia, a), (ib, b)| {
+        .min_by(|(_, a), (_, b)| {
             b.local_hit
                 .cmp(&a.local_hit)
-                .then_with(|| {
-                    if eft {
-                        costs[*ia].total.total_cmp(&costs[*ib].total)
-                    } else {
-                        std::cmp::Ordering::Equal
-                    }
-                })
                 .then_with(|| a.backlog.cmp(&b.backlog))
                 .then_with(|| a.worker.cmp(b.worker))
         })
@@ -1008,13 +978,6 @@ pub fn select_trade(params: &TradeParams, inputs: &[TradeInput<'_>]) -> TradeSel
                 .total_cmp(&costs[*ib].total)
                 .then_with(|| (*ib == owner).cmp(&(*ia == owner)))
                 .then_with(|| b.local_hit.cmp(&a.local_hit))
-                .then_with(|| {
-                    if eft {
-                        costs[*ia].wait_s.total_cmp(&costs[*ib].wait_s)
-                    } else {
-                        std::cmp::Ordering::Equal
-                    }
-                })
                 .then_with(|| a.backlog.cmp(&b.backlog))
                 .then_with(|| a.worker.cmp(b.worker))
         })
@@ -1137,7 +1100,7 @@ pub fn trade_tie_break(
     decided(next.unwrap_or(set[0]), "rotation")
 }
 
-/// phi_P of `--co-schedule-trade-pull-price phi` for one P worker: the
+/// phi_P of `--trade-pull-price phi` for one P worker: the
 /// live share of the host tokens that the P's KV session retention evicted,
 /// from the cumulative counters of the engine's `/v1/loads` host_room
 /// section (`evicted_class0_tokens`: nodes that no session counts;
@@ -1552,8 +1515,8 @@ struct TradeAutoSession {
     last_seen: Instant,
 }
 
-/// The router's measurements behind `--co-schedule-trade-copy-lambda auto`
-/// and `--co-schedule-trade-rate-tokens-per-s auto`. Every input comes from
+/// The router's measurements behind `--trade-copy-lambda auto`
+/// and `--trade-rate-tokens-per-s auto`. Every input comes from
 /// the router's own ledger (no engine push state):
 ///
 /// - per P: `in_flight` = requests dispatched to the P whose prefill has not
@@ -1952,97 +1915,11 @@ mod trade_tests {
         assert_eq!(s.protect_reason, None);
     }
 
-    /// The other wait sources select exactly as before wait e3 existed: a
-    /// copy of select_trade without the e3 branch ([`pre_e3`]) on random
-    /// inputs with every option (ledger and eft waits, dup charge, noise
-    /// margin, HOL), and with gate settings that must have no effect.
-    #[test]
-    fn other_wait_sources_select_as_before_e3() {
-        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
-        let mut next = |m: u64| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed % m
-        };
-        let workers = ["http://a", "http://b", "http://c", "http://d"];
-        for _ in 0..3_000 {
-            let n = 1 + next(4) as usize;
-            let eft = next(2) == 1;
-            let inputs: Vec<TradeInput<'_>> = (0..n)
-                .map(|i| {
-                    let eft_row = eft && next(4) != 0;
-                    let wait_s = next(5) as f64 * 0.75;
-                    let service_s = 0.05 + next(4) as f64 * 0.25;
-                    TradeInput {
-                        worker: workers[i],
-                        backlog: u128::from(next(4) * 10_000),
-                        local_hit: next(3) * 8_192,
-                        uncached: 1 + next(3) * 4_000,
-                        pulled: [0, 0, 512, 18_000][next(4) as usize],
-                        wait: eft_row.then_some(TradeWaitTerms { wait_s, service_s }),
-                        arrival_rate_per_s: next(5) as f64 * 0.7,
-                        copy_lambda: None,
-                        bound_s: [None, Some(0.3)][next(2) as usize],
-                    }
-                })
-                .collect();
-            let p = TradeParams {
-                copy_lambda: [0.0, 9.2][next(2) as usize],
-                wait: if eft {
-                    TradeWait::Eft
-                } else {
-                    TradeWait::Ledger
-                },
-                dup_charge: [TradeDupCharge::Pulled, TradeDupCharge::All][next(2) as usize],
-                margin_noise_k: [0.0, 0.5, 1.0][next(3) as usize],
-                hol_weight: [0.0, 0.5, 1.0][next(3) as usize],
-                hol_rate_window_s: [1.0, 60.0][next(2) as usize],
-                gate_m: [0.0, 1.0, 3.0][next(3) as usize],
-                gate_gmin_s: [0.0, 0.5][next(2) as usize],
-                ..TradeParams::default()
-            };
-            let new = select_trade(&p, &inputs);
-            let old = pre_e3::select_trade(&p, &inputs);
-            assert_eq!(
-                (
-                    new.chosen,
-                    new.owner,
-                    new.best,
-                    new.has_owner,
-                    new.margin_protected
-                ),
-                (
-                    old.chosen,
-                    old.owner,
-                    old.best,
-                    old.has_owner,
-                    old.margin_protected
-                ),
-                "{p:?} {inputs:?}"
-            );
-            assert_eq!(
-                new.margin_s.map(f64::to_bits),
-                old.margin_s.map(f64::to_bits)
-            );
-            assert_eq!(
-                new.owner_gain_s.map(f64::to_bits),
-                old.owner_gain_s.map(f64::to_bits)
-            );
-            assert_eq!(new.protect_reason, None);
-            for (a, b) in new.costs.iter().zip(&old.costs) {
-                assert_eq!(a.total.to_bits(), b.total.to_bits());
-                assert_eq!(a.wait_s.to_bits(), b.wait_s.to_bits());
-                assert_eq!(a.hol_tokens.to_bits(), b.hol_tokens.to_bits());
-            }
-        }
-    }
-
     /// `select_trade` as it was before `wait = e3` existed, for
     /// the bit-exactness test of the other wait sources.
     mod pre_e3 {
         use super::super::{
-            trade_cost_full, trade_duplicate_tokens, TradeCost, TradeInput, TradeParams, TradeWait,
+            trade_cost_full, trade_duplicate_tokens, TradeCost, TradeInput, TradeParams,
         };
 
         pub struct Selection {
@@ -2073,7 +1950,7 @@ mod trade_tests {
                     )
                 })
                 .collect();
-            let eft = params.wait == TradeWait::Eft;
+            let eft = false;
             let owner = inputs
                 .iter()
                 .enumerate()
@@ -2540,7 +2417,7 @@ mod trade_tests {
     /// The TRADE cost and selection of the first version,
     /// copied here unchanged so that the defaults are pinned against it.
     mod first_version {
-        use crate::scheduler::co_schedule::{TradeInput, TradeParams};
+        use crate::scheduler::trade::{TradeInput, TradeParams};
 
         pub struct Cost {
             pub backlog: f64,
@@ -2610,205 +2487,6 @@ mod trade_tests {
                 .0;
             (chosen, owner, inputs[owner].local_hit > 0, costs)
         }
-    }
-
-    /// With the new options at their defaults, every cost term and every
-    /// selection equals the first version bit for bit: a grid of costs and
-    /// 2,000 pseudo-random candidate sets (coarse values, so ties occur).
-    #[test]
-    fn defaults_are_the_first_version() {
-        let p = TradeParams::default();
-        assert_eq!(p.wait, TradeWait::Ledger);
-        assert_eq!(p.dup_charge, TradeDupCharge::Pulled);
-        assert_eq!(p.margin_noise_k, 0.0);
-        assert_eq!(p.eft_max_view_age_s, 1.5);
-        assert_eq!(p.hol_weight, 0.0);
-        assert_eq!(p.hol_rate_window_s, 60.0);
-        assert!(p.is_original());
-        assert!(!TradeParams {
-            wait: TradeWait::Eft,
-            ..p
-        }
-        .is_original());
-        assert!(!TradeParams {
-            dup_charge: TradeDupCharge::All,
-            ..p
-        }
-        .is_original());
-        assert!(!TradeParams {
-            margin_noise_k: 1.0,
-            ..p
-        }
-        .is_original());
-        assert!(!TradeParams {
-            hol_weight: 1.0,
-            ..p
-        }
-        .is_original());
-        assert!(TradeParams {
-            hol_rate_window_s: 5.0,
-            ..p
-        }
-        .is_original());
-        for lambda in [0.0, 1.0, 9.2] {
-            let p = params(lambda);
-            for backlog in [0u128, 1, 5_400, 7_425, 27_000, 40_000, 1_000_003] {
-                for uncached in [0u64, 1, 1_000, 2_000, 12_000] {
-                    for pulled in [0u64, 512, 18_000, 100_000] {
-                        let new = trade_cost(&p, backlog, uncached, pulled);
-                        let old = first_version::trade_cost(&p, backlog, uncached, pulled);
-                        let pairs = [
-                            ("backlog", new.backlog, old.backlog),
-                            ("uncached", new.uncached, old.uncached),
-                            ("pull_s", new.pull_s, old.pull_s),
-                            ("exposed_s", new.exposed_pull_s, old.exposed_pull_s),
-                            ("exposed", new.exposed_pull_tokens, old.exposed_pull_tokens),
-                            ("copy", new.copy_tokens, old.copy_tokens),
-                            ("total", new.total, old.total),
-                        ];
-                        for (name, a, b) in pairs {
-                            assert_eq!(
-                                a.to_bits(),
-                                b.to_bits(),
-                                "{name}: {lambda} {backlog} {uncached} {pulled}"
-                            );
-                        }
-                        assert!(close(new.wait_s, backlog as f64 / 13_500.0));
-                        assert!(close(new.service_s, uncached as f64 / 13_500.0));
-                    }
-                }
-            }
-        }
-        // xorshift64: deterministic candidate sets without a rand dependency.
-        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
-        let mut next = |m: u64| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed % m
-        };
-        let workers = ["http://a", "http://b", "http://c", "http://d"];
-        for round in 0..2_000 {
-            let n = 1 + next(4) as usize;
-            let inputs: Vec<TradeInput<'_>> = (0..n)
-                .map(|i| TradeInput {
-                    worker: workers[i],
-                    backlog: u128::from(next(4) * 10_000),
-                    local_hit: next(3) * 8_192,
-                    uncached: 1 + next(3) * 4_000,
-                    pulled: [0, 0, 512, 18_000][next(4) as usize],
-                    wait: None,
-                    arrival_rate_per_s: 0.0,
-                    copy_lambda: None,
-                    bound_s: None,
-                })
-                .collect();
-            let p = params([0.0, 9.2][next(2) as usize]);
-            let new = select_trade(&p, &inputs);
-            let (chosen, owner, has_owner, costs) = first_version::select_trade(&p, &inputs);
-            assert_eq!(
-                (new.chosen, new.owner, new.has_owner),
-                (chosen, owner, has_owner),
-                "round {round}"
-            );
-            assert_eq!(new.best, chosen);
-            assert!(!new.margin_protected && new.margin_s.is_none());
-            for (a, b) in new.costs.iter().zip(&costs) {
-                assert_eq!(a.total.to_bits(), b.total.to_bits(), "round {round}");
-                assert_eq!(
-                    a.copy_tokens.to_bits(),
-                    b.copy_tokens.to_bits(),
-                    "round {round}"
-                );
-            }
-        }
-    }
-
-    /// wait = eft: Ps with the same highest own hit are ordered by cost (the
-    /// smaller C wins), not by the ledger backlog, so the noise margin
-    /// does not keep a request on an equally cached P with a longer wait.
-    /// Equal costs of two other Ps go to the shorter wait.
-    #[test]
-    fn eft_ties_use_the_predicted_terms() {
-        // a and b both hold 16,384 tokens. Ledger backlog: a 10,000 < b 12,000.
-        // B_w: a 3.0 s, b 0.9 s; the same S_w; no pull.
-        let inputs = [
-            eft(input("http://a", 10_000, 16_384, 4_000, 0), 3.0, 0.2),
-            eft(input("http://b", 12_000, 16_384, 4_000, 0), 0.9, 0.2),
-        ];
-        let k1 = TradeParams {
-            margin_noise_k: 1.0,
-            ..params(0.0)
-        };
-        let s = select_trade(
-            &TradeParams {
-                wait: TradeWait::Eft,
-                ..k1
-            },
-            &inputs,
-        );
-        assert_eq!(s.owner, 1, "the cheaper of the two equally cached Ps");
-        assert_eq!(s.best, 1);
-        assert_eq!(s.chosen, 1);
-        assert!(!s.margin_protected);
-        assert!(s.margin_s.is_none(), "the best P is the owner: no margin");
-        // The ledger wait keeps the first version's owner (lower backlog).
-        let ledger: Vec<_> = inputs
-            .iter()
-            .map(|i| TradeInput { wait: None, ..*i })
-            .collect();
-        let s = select_trade(&k1, &ledger);
-        assert_eq!(s.owner, 0);
-        assert_eq!(s.chosen, 0);
-        // b and c cost the same (13,500 x 1.25 s); a is the owner and costs more.
-        let tie = [
-            eft(input("http://a", 0, 30_000, 1_000, 0), 4.0, 0.125),
-            eft(input("http://b", 0, 0, 31_000, 0), 1.0, 0.25),
-            eft(input("http://c", 50_000, 0, 31_000, 0), 0.5, 0.75),
-        ];
-        let s = select_trade(
-            &TradeParams {
-                wait: TradeWait::Eft,
-                ..params(0.0)
-            },
-            &tie,
-        );
-        assert_eq!(s.costs[1].total, s.costs[2].total);
-        assert_eq!(s.owner, 0);
-        assert_eq!(s.chosen, 2, "the shorter wait B_w");
-        // Ledger ties go to the lower backlog, as in the first version.
-        let s = select_trade(&params(0.0), &tie);
-        assert_eq!(s.chosen, 1);
-    }
-
-    /// wait = olp takes the tie rules of wait = eft (owner by cost, equal
-    /// costs to the shorter wait) and is not the first version.
-    #[test]
-    fn olp_ties_follow_the_eft_rules() {
-        assert_eq!(TradeWait::Olp.as_str(), "olp");
-        let olp = TradeParams {
-            wait: TradeWait::Olp,
-            ..params(0.0)
-        };
-        assert!(!olp.is_original());
-        let inputs = [
-            eft(input("http://a", 10_000, 16_384, 4_000, 0), 3.0, 0.2),
-            eft(input("http://b", 12_000, 16_384, 4_000, 0), 0.9, 0.2),
-        ];
-        let s = select_trade(&olp, &inputs);
-        assert_eq!((s.owner, s.chosen), (1, 1));
-        let tie = [
-            eft(input("http://a", 0, 30_000, 1_000, 0), 4.0, 0.125),
-            eft(input("http://b", 0, 0, 31_000, 0), 1.0, 0.25),
-            eft(input("http://c", 50_000, 0, 31_000, 0), 0.5, 0.75),
-        ];
-        let eft_params = TradeParams {
-            wait: TradeWait::Eft,
-            ..params(0.0)
-        };
-        let s = select_trade(&olp, &tie);
-        assert_eq!(s.chosen, 2, "the shorter wait B_w");
-        assert_eq!(s.chosen, select_trade(&eft_params, &tie).chosen);
     }
 
     /// wait = eft: R x B_w and R x S_w replace the ledger backlog and u; the
@@ -2972,81 +2650,10 @@ mod trade_tests {
         assert!(s.margin_s.is_none());
     }
 
-    /// HOL = mu * R * a * S * (B + S / 2) tokens, added to the total; the
-    /// wait B is that of the wait source, without the pull time.
-    #[test]
-    fn hol_term_matches_a_hand_computed_example() {
-        // Ledger: backlog 27,000 (B = 2 s), u = 13,500 (S = 1 s), a = 2/s,
-        // mu = 0.5: HOL = 0.5 x 13,500 x 2 x 1 x (2 + 0.5) = 33,750;
-        // total = 27,000 + 13,500 + 33,750 = 74,250.
-        let p = TradeParams {
-            hol_weight: 0.5,
-            ..params(0.0)
-        };
-        assert!(close(trade_hol_tokens(&p, 2.0, 2.0, 1.0), 33_750.0));
-        let c = trade_cost_full(&p, 27_000, 13_500, 0, 0, None, 2.0);
-        assert!(close(c.hol_tokens, 33_750.0));
-        assert!(close(c.total, 74_250.0));
-        assert_eq!(c.arrival_rate_per_s, 2.0);
-        // EFT terms: B_w = 0.4 s, S_w = 0.2 s, a = 3/s, mu = 1:
-        // HOL = 13,500 x 3 x 0.2 x (0.4 + 0.1) = 4,050;
-        // total = 13,500 x (0.4 + 0.2) + 4,050 = 12,150.
-        let p1 = TradeParams {
-            hol_weight: 1.0,
-            wait: TradeWait::Eft,
-            ..params(0.0)
-        };
-        let w = TradeWaitTerms {
-            wait_s: 0.4,
-            service_s: 0.2,
-        };
-        let c = trade_cost_full(&p1, 0, 1_000, 0, 0, Some(w), 3.0);
-        assert!(close(c.hol_tokens, 4_050.0));
-        assert!(close(c.total, 12_150.0));
-        // A pull: B_w = 0.2 s, the 0.55 s pull is 0.35 s exposed, S_w = 0.3 s,
-        // a = 1/s: HOL = 13,500 x 1 x 0.3 x (0.2 + 0.15) = 1,417.5 (the pull
-        // time is not added to B).
-        let w = TradeWaitTerms {
-            wait_s: 0.2,
-            service_s: 0.3,
-        };
-        let c = trade_cost_full(&p1, 0, 1_000, 100_000, 0, Some(w), 1.0);
-        assert!(close(c.exposed_pull_s, 0.35));
-        assert!(close(c.hol_tokens, 1_417.5));
-        assert!(close(c.total, 13_500.0 * (0.2 + 0.3 + 0.35) + 1_417.5));
-        // Off: mu = 0 or a = 0 adds nothing; a_w is still recorded.
-        let c = trade_cost_full(&params(0.0), 27_000, 13_500, 0, 0, None, 2.0);
-        assert_eq!(c.hol_tokens, 0.0);
-        assert_eq!(c.arrival_rate_per_s, 2.0);
-        assert!(close(c.total, 40_500.0));
-        let c = trade_cost_full(&p, 27_000, 13_500, 0, 0, None, 0.0);
-        assert_eq!(c.hol_tokens, 0.0);
-        assert!(close(c.total, 40_500.0));
-        // select_trade uses the a_w of each input: a 74,250 > b 53,500.
-        let inputs = [
-            TradeInput {
-                arrival_rate_per_s: 2.0,
-                ..input("http://a", 27_000, 0, 13_500, 0)
-            },
-            input("http://b", 40_000, 0, 13_500, 0),
-        ];
-        let s = select_trade(&p, &inputs);
-        assert!(close(s.costs[0].total, 74_250.0));
-        assert_eq!(s.costs[1].hol_tokens, 0.0);
-        assert_eq!(s.chosen, 1);
-        assert_eq!(
-            select_trade(&params(0.0), &inputs).chosen,
-            0,
-            "40,500 < 53,500"
-        );
-    }
-
     /// The TRADE cost and selection before the HOL term,
     /// copied here unchanged so that `hol_weight = 0` is pinned against it.
     mod pre_hol {
-        use crate::scheduler::co_schedule::{
-            TradeDupCharge, TradeInput, TradeParams, TradeWait, TradeWaitTerms,
-        };
+        use crate::scheduler::trade::{TradeDupCharge, TradeInput, TradeParams, TradeWaitTerms};
 
         pub struct Cost {
             pub backlog: f64,
@@ -3164,7 +2771,7 @@ mod trade_tests {
                     )
                 })
                 .collect();
-            let eft = params.wait == TradeWait::Eft;
+            let eft = false;
             let owner = inputs
                 .iter()
                 .enumerate()
@@ -3229,113 +2836,6 @@ mod trade_tests {
             }
             selection
         }
-    }
-
-    /// hol_weight = 0: every cost term and every selection equal the TRADE
-    /// before the HOL term (`pre_hol`) bit for bit, with wait ledger and eft
-    /// (and eft fallbacks), both dup charges and the noise margin on and off,
-    /// although every P has an arrival rate. 4,000 pseudo-random candidate
-    /// sets with coarse values, so ties occur.
-    #[test]
-    fn hol_weight_zero_is_the_selection_without_hol() {
-        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
-        let mut next = |m: u64| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed % m
-        };
-        let workers = ["http://a", "http://b", "http://c", "http://d"];
-        let (mut eft_rounds, mut margin_rounds) = (0usize, 0usize);
-        for round in 0..4_000 {
-            let n = 1 + next(4) as usize;
-            let eft = next(2) == 1;
-            let inputs: Vec<TradeInput<'_>> = (0..n)
-                .map(|i| {
-                    // With wait eft, some P use the ledger terms (fallback).
-                    let eft_row = eft && next(4) != 0;
-                    let wait_s = next(5) as f64 * 0.75;
-                    let service_s = 0.05 + next(4) as f64 * 0.25;
-                    TradeInput {
-                        worker: workers[i],
-                        backlog: u128::from(next(4) * 10_000),
-                        local_hit: next(3) * 8_192,
-                        uncached: 1 + next(3) * 4_000,
-                        pulled: [0, 0, 512, 18_000][next(4) as usize],
-                        wait: eft_row.then_some(TradeWaitTerms { wait_s, service_s }),
-                        arrival_rate_per_s: next(5) as f64 * 0.7,
-                        copy_lambda: None,
-                        bound_s: None,
-                    }
-                })
-                .collect();
-            let p = TradeParams {
-                copy_lambda: [0.0, 9.2][next(2) as usize],
-                wait: if eft {
-                    TradeWait::Eft
-                } else {
-                    TradeWait::Ledger
-                },
-                dup_charge: [TradeDupCharge::Pulled, TradeDupCharge::All][next(2) as usize],
-                margin_noise_k: [0.0, 0.5, 1.0][next(3) as usize],
-                hol_rate_window_s: [1.0, 60.0][next(2) as usize],
-                ..TradeParams::default()
-            };
-            assert_eq!(p.hol_weight, 0.0);
-            let new = select_trade(&p, &inputs);
-            let old = pre_hol::select_trade(&p, &inputs);
-            assert_eq!(
-                (
-                    new.chosen,
-                    new.owner,
-                    new.has_owner,
-                    new.best,
-                    new.margin_protected
-                ),
-                (
-                    old.chosen,
-                    old.owner,
-                    old.has_owner,
-                    old.best,
-                    old.margin_protected
-                ),
-                "round {round}"
-            );
-            assert_eq!(
-                new.margin_s.map(f64::to_bits),
-                old.margin_s.map(f64::to_bits)
-            );
-            assert_eq!(
-                new.owner_gain_s.map(f64::to_bits),
-                old.owner_gain_s.map(f64::to_bits)
-            );
-            eft_rounds += usize::from(eft);
-            margin_rounds += usize::from(new.margin_s.is_some());
-            assert_eq!(new.costs.len(), old.costs.len());
-            for (i, (a, b)) in new.costs.iter().zip(&old.costs).enumerate() {
-                let pairs = [
-                    ("backlog", a.backlog, b.backlog),
-                    ("uncached", a.uncached, b.uncached),
-                    ("pull_s", a.pull_s, b.pull_s),
-                    ("exposed_s", a.exposed_pull_s, b.exposed_pull_s),
-                    ("exposed", a.exposed_pull_tokens, b.exposed_pull_tokens),
-                    ("copy", a.copy_tokens, b.copy_tokens),
-                    ("total", a.total, b.total),
-                    ("wait_s", a.wait_s, b.wait_s),
-                    ("service_s", a.service_s, b.service_s),
-                ];
-                for (name, x, y) in pairs {
-                    assert_eq!(x.to_bits(), y.to_bits(), "{name}: round {round}, P {i}");
-                }
-                assert_eq!(a.dup_tokens, b.dup_tokens, "round {round}, P {i}");
-                assert_eq!(a.hol_tokens, 0.0, "round {round}, P {i}");
-                assert_eq!(a.arrival_rate_per_s, inputs[i].arrival_rate_per_s);
-            }
-        }
-        assert!(
-            eft_rounds > 0 && margin_rounds > 0,
-            "{eft_rounds} {margin_rounds}"
-        );
     }
 
     /// A big cold prefill: u = 64,000, no cached owner, no pull, two P,
@@ -3552,117 +3052,6 @@ mod trade_tests {
             busy: Some(0.75),
             inflight: Some(9.0),
             r_hat: Some(15_000.0),
-        }
-    }
-
-    /// Fixed copy price and fixed rate: `resolved` returns the parameters
-    /// unchanged (bit for bit) for any measurements, so selection and costs
-    /// equal the first version; the defaults are fixed and is_original.
-    #[test]
-    fn trade_auto_fixed_mode_resolves_to_the_same_params_bit_for_bit() {
-        let d = TradeParams::default();
-        assert_eq!(d.copy_lambda_mode, TradeLambdaMode::Fixed);
-        assert_eq!(d.rate_mode, TradeRateMode::Fixed);
-        assert_eq!(d.auto_tau_s, 120.0);
-        assert_eq!(d.auto_session_idle_s, 300.0);
-        assert!(!d.is_auto() && d.is_original());
-        assert!(TradeParams {
-            auto_tau_s: 5.0,
-            auto_session_idle_s: 1.0,
-            ..d
-        }
-        .is_original());
-        let lam = auto_lambda(TradeAutoQ::Sat, 1.0);
-        assert!(lam.is_auto() && !lam.is_original());
-        let rate = TradeParams {
-            rate_mode: TradeRateMode::Auto,
-            ..d
-        };
-        assert!(rate.is_auto() && !rate.is_original());
-        let measurements = [
-            TradeAutoInputs::default(),
-            loaded(),
-            TradeAutoInputs {
-                elapsed_s: 1.0,
-                ..loaded()
-            },
-            TradeAutoInputs {
-                busy: None,
-                inflight: None,
-                r_hat: None,
-                ..loaded()
-            },
-            TradeAutoInputs {
-                r_hat: Some(f64::NAN),
-                ..loaded()
-            },
-        ];
-        let mut seed = 0x51f1_5eed_0bad_cafe_u64;
-        let mut next = |m: u64| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed % m
-        };
-        let workers = ["http://a", "http://b", "http://c", "http://d"];
-        for round in 0..2_000 {
-            let p = TradeParams {
-                copy_lambda: [0.0, 9.2, 18.4][next(3) as usize],
-                rate_tokens_per_s: [13_500.0, 20_000.0][next(2) as usize],
-                wait: [TradeWait::Ledger, TradeWait::Eft][next(2) as usize],
-                dup_charge: [TradeDupCharge::Pulled, TradeDupCharge::All][next(2) as usize],
-                margin_noise_k: [0.0, 1.0][next(2) as usize],
-                hol_weight: [0.0, 1.0][next(2) as usize],
-                auto_tau_s: [1.0, 120.0][next(2) as usize],
-                ..d
-            };
-            let (r, res) = p.resolved(&measurements[next(5) as usize]);
-            assert_eq!(r, p, "round {round}");
-            assert_eq!(r.copy_lambda.to_bits(), p.copy_lambda.to_bits());
-            assert_eq!(r.rate_tokens_per_s.to_bits(), p.rate_tokens_per_s.to_bits());
-            assert_eq!((res.lambda_mode, res.rate_mode), ("fixed", "fixed"));
-            assert_eq!(res.copy_lambda_used.to_bits(), p.copy_lambda.to_bits());
-            assert_eq!(
-                (res.fallback_reason, res.rate_fallback_reason),
-                (None, None)
-            );
-            assert!(res.lambda_raw.is_none());
-            let n = 1 + next(4) as usize;
-            let inputs: Vec<TradeInput<'_>> = (0..n)
-                .map(|i| TradeInput {
-                    worker: workers[i],
-                    backlog: u128::from(next(4) * 10_000),
-                    local_hit: next(3) * 8_192,
-                    uncached: 1 + next(3) * 4_000,
-                    pulled: [0, 0, 512, 18_000][next(4) as usize],
-                    wait: (next(2) == 1).then_some(TradeWaitTerms {
-                        wait_s: next(5) as f64 * 0.75,
-                        service_s: 0.05 + next(4) as f64 * 0.25,
-                    }),
-                    arrival_rate_per_s: next(5) as f64 * 0.7,
-                    copy_lambda: None,
-                    bound_s: None,
-                })
-                .collect();
-            let (a, b) = (select_trade(&r, &inputs), select_trade(&p, &inputs));
-            assert_eq!((a.chosen, a.owner, a.best), (b.chosen, b.owner, b.best));
-            for (x, y) in a.costs.iter().zip(&b.costs) {
-                assert_eq!(x.total.to_bits(), y.total.to_bits(), "round {round}");
-                assert_eq!(
-                    x.copy_tokens.to_bits(),
-                    y.copy_tokens.to_bits(),
-                    "round {round}"
-                );
-            }
-            if p.is_original() {
-                let (chosen, _, _, costs) = first_version::select_trade(&r, &inputs);
-                if inputs.iter().all(|i| i.wait.is_none()) {
-                    assert_eq!(a.chosen, chosen, "round {round}");
-                    for (x, y) in a.costs.iter().zip(&costs) {
-                        assert_eq!(x.total.to_bits(), y.total.to_bits(), "round {round}");
-                    }
-                }
-            }
         }
     }
 
@@ -4046,5 +3435,476 @@ mod trade_tests {
         let early = fresh.inputs(at(t + 60.0), &pool, 300.0);
         let (p, r) = auto_lambda(TradeAutoQ::Sat, 1.0).resolved(&early);
         assert_eq!((p.copy_lambda, r.fallback_reason), (18.4, Some("startup")));
+    }
+
+    /// With the new options at their defaults, every cost term and every
+    /// selection equals the first version bit for bit: a grid of costs and
+    /// 2,000 pseudo-random candidate sets (coarse values, so ties occur).
+    #[test]
+    fn defaults_are_the_first_version() {
+        let p = TradeParams::default();
+        assert_eq!(p.wait, TradeWait::Ledger);
+        assert_eq!(p.dup_charge, TradeDupCharge::Pulled);
+        assert_eq!(p.margin_noise_k, 0.0);
+        assert_eq!(p.eft_max_view_age_s, 1.5);
+        assert_eq!(p.hol_weight, 0.0);
+        assert_eq!(p.hol_rate_window_s, 60.0);
+        assert!(p.is_original());
+        assert!(!TradeParams {
+            dup_charge: TradeDupCharge::All,
+            ..p
+        }
+        .is_original());
+        assert!(!TradeParams {
+            margin_noise_k: 1.0,
+            ..p
+        }
+        .is_original());
+        assert!(!TradeParams {
+            hol_weight: 1.0,
+            ..p
+        }
+        .is_original());
+        assert!(TradeParams {
+            hol_rate_window_s: 5.0,
+            ..p
+        }
+        .is_original());
+        for lambda in [0.0, 1.0, 9.2] {
+            let p = params(lambda);
+            for backlog in [0u128, 1, 5_400, 7_425, 27_000, 40_000, 1_000_003] {
+                for uncached in [0u64, 1, 1_000, 2_000, 12_000] {
+                    for pulled in [0u64, 512, 18_000, 100_000] {
+                        let new = trade_cost(&p, backlog, uncached, pulled);
+                        let old = first_version::trade_cost(&p, backlog, uncached, pulled);
+                        let pairs = [
+                            ("backlog", new.backlog, old.backlog),
+                            ("uncached", new.uncached, old.uncached),
+                            ("pull_s", new.pull_s, old.pull_s),
+                            ("exposed_s", new.exposed_pull_s, old.exposed_pull_s),
+                            ("exposed", new.exposed_pull_tokens, old.exposed_pull_tokens),
+                            ("copy", new.copy_tokens, old.copy_tokens),
+                            ("total", new.total, old.total),
+                        ];
+                        for (name, a, b) in pairs {
+                            assert_eq!(
+                                a.to_bits(),
+                                b.to_bits(),
+                                "{name}: {lambda} {backlog} {uncached} {pulled}"
+                            );
+                        }
+                        assert!(close(new.wait_s, backlog as f64 / 13_500.0));
+                        assert!(close(new.service_s, uncached as f64 / 13_500.0));
+                    }
+                }
+            }
+        }
+        // xorshift64: deterministic candidate sets without a rand dependency.
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |m: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        let workers = ["http://a", "http://b", "http://c", "http://d"];
+        for round in 0..2_000 {
+            let n = 1 + next(4) as usize;
+            let inputs: Vec<TradeInput<'_>> = (0..n)
+                .map(|i| TradeInput {
+                    worker: workers[i],
+                    backlog: u128::from(next(4) * 10_000),
+                    local_hit: next(3) * 8_192,
+                    uncached: 1 + next(3) * 4_000,
+                    pulled: [0, 0, 512, 18_000][next(4) as usize],
+                    wait: None,
+                    arrival_rate_per_s: 0.0,
+                    copy_lambda: None,
+                    bound_s: None,
+                })
+                .collect();
+            let p = params([0.0, 9.2][next(2) as usize]);
+            let new = select_trade(&p, &inputs);
+            let (chosen, owner, has_owner, costs) = first_version::select_trade(&p, &inputs);
+            assert_eq!(
+                (new.chosen, new.owner, new.has_owner),
+                (chosen, owner, has_owner),
+                "round {round}"
+            );
+            assert_eq!(new.best, chosen);
+            assert!(!new.margin_protected && new.margin_s.is_none());
+            for (a, b) in new.costs.iter().zip(&costs) {
+                assert_eq!(a.total.to_bits(), b.total.to_bits(), "round {round}");
+                assert_eq!(
+                    a.copy_tokens.to_bits(),
+                    b.copy_tokens.to_bits(),
+                    "round {round}"
+                );
+            }
+        }
+    }
+
+    /// HOL = mu * R * a * S * (B + S / 2) tokens, added to the total; the
+    /// wait B is that of the wait source, without the pull time.
+    #[test]
+    fn hol_term_matches_a_hand_computed_example() {
+        // Ledger: backlog 27,000 (B = 2 s), u = 13,500 (S = 1 s), a = 2/s,
+        // mu = 0.5: HOL = 0.5 x 13,500 x 2 x 1 x (2 + 0.5) = 33,750;
+        // total = 27,000 + 13,500 + 33,750 = 74,250.
+        let p = TradeParams {
+            hol_weight: 0.5,
+            ..params(0.0)
+        };
+        assert!(close(trade_hol_tokens(&p, 2.0, 2.0, 1.0), 33_750.0));
+        let c = trade_cost_full(&p, 27_000, 13_500, 0, 0, None, 2.0);
+        assert!(close(c.hol_tokens, 33_750.0));
+        assert!(close(c.total, 74_250.0));
+        assert_eq!(c.arrival_rate_per_s, 2.0);
+        // EFT terms: B_w = 0.4 s, S_w = 0.2 s, a = 3/s, mu = 1:
+        // HOL = 13,500 x 3 x 0.2 x (0.4 + 0.1) = 4,050;
+        // total = 13,500 x (0.4 + 0.2) + 4,050 = 12,150.
+        let p1 = TradeParams {
+            hol_weight: 1.0,
+            ..params(0.0)
+        };
+        let w = TradeWaitTerms {
+            wait_s: 0.4,
+            service_s: 0.2,
+        };
+        let c = trade_cost_full(&p1, 0, 1_000, 0, 0, Some(w), 3.0);
+        assert!(close(c.hol_tokens, 4_050.0));
+        assert!(close(c.total, 12_150.0));
+        // A pull: B_w = 0.2 s, the 0.55 s pull is 0.35 s exposed, S_w = 0.3 s,
+        // a = 1/s: HOL = 13,500 x 1 x 0.3 x (0.2 + 0.15) = 1,417.5 (the pull
+        // time is not added to B).
+        let w = TradeWaitTerms {
+            wait_s: 0.2,
+            service_s: 0.3,
+        };
+        let c = trade_cost_full(&p1, 0, 1_000, 100_000, 0, Some(w), 1.0);
+        assert!(close(c.exposed_pull_s, 0.35));
+        assert!(close(c.hol_tokens, 1_417.5));
+        assert!(close(c.total, 13_500.0 * (0.2 + 0.3 + 0.35) + 1_417.5));
+        // Off: mu = 0 or a = 0 adds nothing; a_w is still recorded.
+        let c = trade_cost_full(&params(0.0), 27_000, 13_500, 0, 0, None, 2.0);
+        assert_eq!(c.hol_tokens, 0.0);
+        assert_eq!(c.arrival_rate_per_s, 2.0);
+        assert!(close(c.total, 40_500.0));
+        let c = trade_cost_full(&p, 27_000, 13_500, 0, 0, None, 0.0);
+        assert_eq!(c.hol_tokens, 0.0);
+        assert!(close(c.total, 40_500.0));
+        // select_trade uses the a_w of each input: a 74,250 > b 53,500.
+        let inputs = [
+            TradeInput {
+                arrival_rate_per_s: 2.0,
+                ..input("http://a", 27_000, 0, 13_500, 0)
+            },
+            input("http://b", 40_000, 0, 13_500, 0),
+        ];
+        let s = select_trade(&p, &inputs);
+        assert!(close(s.costs[0].total, 74_250.0));
+        assert_eq!(s.costs[1].hol_tokens, 0.0);
+        assert_eq!(s.chosen, 1);
+        assert_eq!(
+            select_trade(&params(0.0), &inputs).chosen,
+            0,
+            "40,500 < 53,500"
+        );
+    }
+
+    /// hol_weight = 0: every cost term and every selection equal the TRADE
+    /// before the HOL term (`pre_hol`) bit for bit, with wait ledger and eft
+    /// (and eft fallbacks), both dup charges and the noise margin on and off,
+    /// although every P has an arrival rate. 4,000 pseudo-random candidate
+    /// sets with coarse values, so ties occur.
+    #[test]
+    fn hol_weight_zero_is_the_selection_without_hol() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |m: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        let workers = ["http://a", "http://b", "http://c", "http://d"];
+        let (mut eft_rounds, mut margin_rounds) = (0usize, 0usize);
+        for round in 0..4_000 {
+            let n = 1 + next(4) as usize;
+            let eft = next(2) == 1;
+            let inputs: Vec<TradeInput<'_>> = (0..n)
+                .map(|i| {
+                    // With wait eft, some P use the ledger terms (fallback).
+                    let eft_row = eft && next(4) != 0;
+                    let wait_s = next(5) as f64 * 0.75;
+                    let service_s = 0.05 + next(4) as f64 * 0.25;
+                    TradeInput {
+                        worker: workers[i],
+                        backlog: u128::from(next(4) * 10_000),
+                        local_hit: next(3) * 8_192,
+                        uncached: 1 + next(3) * 4_000,
+                        pulled: [0, 0, 512, 18_000][next(4) as usize],
+                        wait: eft_row.then_some(TradeWaitTerms { wait_s, service_s }),
+                        arrival_rate_per_s: next(5) as f64 * 0.7,
+                        copy_lambda: None,
+                        bound_s: None,
+                    }
+                })
+                .collect();
+            let p = TradeParams {
+                copy_lambda: [0.0, 9.2][next(2) as usize],
+                wait: TradeWait::Ledger,
+                dup_charge: [TradeDupCharge::Pulled, TradeDupCharge::All][next(2) as usize],
+                margin_noise_k: [0.0, 0.5, 1.0][next(3) as usize],
+                hol_rate_window_s: [1.0, 60.0][next(2) as usize],
+                ..TradeParams::default()
+            };
+            assert_eq!(p.hol_weight, 0.0);
+            let new = select_trade(&p, &inputs);
+            let old = pre_hol::select_trade(&p, &inputs);
+            assert_eq!(
+                (
+                    new.chosen,
+                    new.owner,
+                    new.has_owner,
+                    new.best,
+                    new.margin_protected
+                ),
+                (
+                    old.chosen,
+                    old.owner,
+                    old.has_owner,
+                    old.best,
+                    old.margin_protected
+                ),
+                "round {round}"
+            );
+            assert_eq!(
+                new.margin_s.map(f64::to_bits),
+                old.margin_s.map(f64::to_bits)
+            );
+            assert_eq!(
+                new.owner_gain_s.map(f64::to_bits),
+                old.owner_gain_s.map(f64::to_bits)
+            );
+            eft_rounds += usize::from(eft);
+            margin_rounds += usize::from(new.margin_s.is_some());
+            assert_eq!(new.costs.len(), old.costs.len());
+            for (i, (a, b)) in new.costs.iter().zip(&old.costs).enumerate() {
+                let pairs = [
+                    ("backlog", a.backlog, b.backlog),
+                    ("uncached", a.uncached, b.uncached),
+                    ("pull_s", a.pull_s, b.pull_s),
+                    ("exposed_s", a.exposed_pull_s, b.exposed_pull_s),
+                    ("exposed", a.exposed_pull_tokens, b.exposed_pull_tokens),
+                    ("copy", a.copy_tokens, b.copy_tokens),
+                    ("total", a.total, b.total),
+                    ("wait_s", a.wait_s, b.wait_s),
+                    ("service_s", a.service_s, b.service_s),
+                ];
+                for (name, x, y) in pairs {
+                    assert_eq!(x.to_bits(), y.to_bits(), "{name}: round {round}, P {i}");
+                }
+                assert_eq!(a.dup_tokens, b.dup_tokens, "round {round}, P {i}");
+                assert_eq!(a.hol_tokens, 0.0, "round {round}, P {i}");
+                assert_eq!(a.arrival_rate_per_s, inputs[i].arrival_rate_per_s);
+            }
+        }
+        assert!(
+            eft_rounds > 0 && margin_rounds > 0,
+            "{eft_rounds} {margin_rounds}"
+        );
+    }
+
+    /// The other wait sources select exactly as before wait e3 existed: a
+    /// copy of select_trade without the e3 branch ([`pre_e3`]) on random
+    /// inputs with every option (ledger and eft waits, dup charge, noise
+    /// margin, HOL), and with gate settings that must have no effect.
+    #[test]
+    fn other_wait_sources_select_as_before_e3() {
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |m: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        let workers = ["http://a", "http://b", "http://c", "http://d"];
+        for _ in 0..3_000 {
+            let n = 1 + next(4) as usize;
+            let eft = next(2) == 1;
+            let inputs: Vec<TradeInput<'_>> = (0..n)
+                .map(|i| {
+                    let eft_row = eft && next(4) != 0;
+                    let wait_s = next(5) as f64 * 0.75;
+                    let service_s = 0.05 + next(4) as f64 * 0.25;
+                    TradeInput {
+                        worker: workers[i],
+                        backlog: u128::from(next(4) * 10_000),
+                        local_hit: next(3) * 8_192,
+                        uncached: 1 + next(3) * 4_000,
+                        pulled: [0, 0, 512, 18_000][next(4) as usize],
+                        wait: eft_row.then_some(TradeWaitTerms { wait_s, service_s }),
+                        arrival_rate_per_s: next(5) as f64 * 0.7,
+                        copy_lambda: None,
+                        bound_s: [None, Some(0.3)][next(2) as usize],
+                    }
+                })
+                .collect();
+            let p = TradeParams {
+                copy_lambda: [0.0, 9.2][next(2) as usize],
+                wait: TradeWait::Ledger,
+                dup_charge: [TradeDupCharge::Pulled, TradeDupCharge::All][next(2) as usize],
+                margin_noise_k: [0.0, 0.5, 1.0][next(3) as usize],
+                hol_weight: [0.0, 0.5, 1.0][next(3) as usize],
+                hol_rate_window_s: [1.0, 60.0][next(2) as usize],
+                gate_m: [0.0, 1.0, 3.0][next(3) as usize],
+                gate_gmin_s: [0.0, 0.5][next(2) as usize],
+                ..TradeParams::default()
+            };
+            let new = select_trade(&p, &inputs);
+            let old = pre_e3::select_trade(&p, &inputs);
+            assert_eq!(
+                (
+                    new.chosen,
+                    new.owner,
+                    new.best,
+                    new.has_owner,
+                    new.margin_protected
+                ),
+                (
+                    old.chosen,
+                    old.owner,
+                    old.best,
+                    old.has_owner,
+                    old.margin_protected
+                ),
+                "{p:?} {inputs:?}"
+            );
+            assert_eq!(
+                new.margin_s.map(f64::to_bits),
+                old.margin_s.map(f64::to_bits)
+            );
+            assert_eq!(
+                new.owner_gain_s.map(f64::to_bits),
+                old.owner_gain_s.map(f64::to_bits)
+            );
+            assert_eq!(new.protect_reason, None);
+            for (a, b) in new.costs.iter().zip(&old.costs) {
+                assert_eq!(a.total.to_bits(), b.total.to_bits());
+                assert_eq!(a.wait_s.to_bits(), b.wait_s.to_bits());
+                assert_eq!(a.hol_tokens.to_bits(), b.hol_tokens.to_bits());
+            }
+        }
+    }
+
+    /// Fixed copy price and fixed rate: `resolved` returns the parameters
+    /// unchanged (bit for bit) for any measurements, so selection and costs
+    /// equal the first version; the defaults are fixed and is_original.
+    #[test]
+    fn trade_auto_fixed_mode_resolves_to_the_same_params_bit_for_bit() {
+        let d = TradeParams::default();
+        assert_eq!(d.copy_lambda_mode, TradeLambdaMode::Fixed);
+        assert_eq!(d.rate_mode, TradeRateMode::Fixed);
+        assert_eq!(d.auto_tau_s, 120.0);
+        assert_eq!(d.auto_session_idle_s, 300.0);
+        assert!(!d.is_auto() && d.is_original());
+        assert!(TradeParams {
+            auto_tau_s: 5.0,
+            auto_session_idle_s: 1.0,
+            ..d
+        }
+        .is_original());
+        let lam = auto_lambda(TradeAutoQ::Sat, 1.0);
+        assert!(lam.is_auto() && !lam.is_original());
+        let rate = TradeParams {
+            rate_mode: TradeRateMode::Auto,
+            ..d
+        };
+        assert!(rate.is_auto() && !rate.is_original());
+        let measurements = [
+            TradeAutoInputs::default(),
+            loaded(),
+            TradeAutoInputs {
+                elapsed_s: 1.0,
+                ..loaded()
+            },
+            TradeAutoInputs {
+                busy: None,
+                inflight: None,
+                r_hat: None,
+                ..loaded()
+            },
+            TradeAutoInputs {
+                r_hat: Some(f64::NAN),
+                ..loaded()
+            },
+        ];
+        let mut seed = 0x51f1_5eed_0bad_cafe_u64;
+        let mut next = |m: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        let workers = ["http://a", "http://b", "http://c", "http://d"];
+        for round in 0..2_000 {
+            let p = TradeParams {
+                copy_lambda: [0.0, 9.2, 18.4][next(3) as usize],
+                rate_tokens_per_s: [13_500.0, 20_000.0][next(2) as usize],
+                wait: TradeWait::Ledger,
+                dup_charge: [TradeDupCharge::Pulled, TradeDupCharge::All][next(2) as usize],
+                margin_noise_k: [0.0, 1.0][next(2) as usize],
+                hol_weight: [0.0, 1.0][next(2) as usize],
+                auto_tau_s: [1.0, 120.0][next(2) as usize],
+                ..d
+            };
+            let (r, res) = p.resolved(&measurements[next(5) as usize]);
+            assert_eq!(r, p, "round {round}");
+            assert_eq!(r.copy_lambda.to_bits(), p.copy_lambda.to_bits());
+            assert_eq!(r.rate_tokens_per_s.to_bits(), p.rate_tokens_per_s.to_bits());
+            assert_eq!((res.lambda_mode, res.rate_mode), ("fixed", "fixed"));
+            assert_eq!(res.copy_lambda_used.to_bits(), p.copy_lambda.to_bits());
+            assert_eq!(
+                (res.fallback_reason, res.rate_fallback_reason),
+                (None, None)
+            );
+            assert!(res.lambda_raw.is_none());
+            let n = 1 + next(4) as usize;
+            let inputs: Vec<TradeInput<'_>> = (0..n)
+                .map(|i| TradeInput {
+                    worker: workers[i],
+                    backlog: u128::from(next(4) * 10_000),
+                    local_hit: next(3) * 8_192,
+                    uncached: 1 + next(3) * 4_000,
+                    pulled: [0, 0, 512, 18_000][next(4) as usize],
+                    wait: (next(2) == 1).then_some(TradeWaitTerms {
+                        wait_s: next(5) as f64 * 0.75,
+                        service_s: 0.05 + next(4) as f64 * 0.25,
+                    }),
+                    arrival_rate_per_s: next(5) as f64 * 0.7,
+                    copy_lambda: None,
+                    bound_s: None,
+                })
+                .collect();
+            let (a, b) = (select_trade(&r, &inputs), select_trade(&p, &inputs));
+            assert_eq!((a.chosen, a.owner, a.best), (b.chosen, b.owner, b.best));
+            for (x, y) in a.costs.iter().zip(&b.costs) {
+                assert_eq!(x.total.to_bits(), y.total.to_bits(), "round {round}");
+                assert_eq!(
+                    x.copy_tokens.to_bits(),
+                    y.copy_tokens.to_bits(),
+                    "round {round}"
+                );
+            }
+            if p.is_original() {
+                let (chosen, _, _, costs) = first_version::select_trade(&r, &inputs);
+                if inputs.iter().all(|i| i.wait.is_none()) {
+                    assert_eq!(a.chosen, chosen, "round {round}");
+                    for (x, y) in a.costs.iter().zip(&costs) {
+                        assert_eq!(x.total.to_bits(), y.total.to_bits(), "round {round}");
+                    }
+                }
+            }
+        }
     }
 }

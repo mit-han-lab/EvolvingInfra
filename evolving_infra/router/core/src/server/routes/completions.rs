@@ -55,6 +55,9 @@ enum Ingress {
     Completions,
     /// Native bodies may omit `model`; the router's single model is implied.
     Generate,
+    /// A chat request under late D choose (`routes/chat.rs` sends it here):
+    /// its token ids come from the router's chat encoder.
+    Chat,
 }
 
 impl Ingress {
@@ -62,6 +65,7 @@ impl Ingress {
         match self {
             Ingress::Completions => "/v1/completions",
             Ingress::Generate => "/generate",
+            Ingress::Chat => "/v1/chat/completions",
         }
     }
 
@@ -70,16 +74,18 @@ impl Ingress {
         let field = match self {
             Ingress::Completions => "prompt",
             Ingress::Generate => "input_ids",
+            Ingress::Chat => return None,
         };
         flat_token_ids(value.get(field)?)
     }
 
     /// Whether late D choose may dispatch this request. Its legs go to the
-    /// engines' `/v1/completions`, which answer a released candidate with
-    /// 409; a native `/generate` request takes the plain two-leg dispatch,
-    /// and the engines serve a request without `late_d` as late D alloc.
+    /// engines' `/v1/completions` or `/v1/chat/completions`, which answer a
+    /// released candidate with 409; a native `/generate` request takes the
+    /// plain two-leg dispatch, and the engines serve a request without
+    /// `late_d` as late D alloc.
     fn late_d_choose(self) -> bool {
-        matches!(self, Ingress::Completions)
+        matches!(self, Ingress::Completions | Ingress::Chat)
     }
 }
 
@@ -117,6 +123,16 @@ pub async fn generate(
     dispatch(ctx, headers, body, Ingress::Generate).await
 }
 
+/// A chat request under `--pd-late-decode choose`, dispatched like
+/// completions with the legs on the engines' chat route.
+pub(crate) async fn chat(
+    ctx: Arc<AppContext>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response<Body>, ApiError> {
+    dispatch(ctx, headers, body, Ingress::Chat).await
+}
+
 async fn dispatch(
     ctx: Arc<AppContext>,
     headers: HeaderMap,
@@ -129,7 +145,7 @@ async fn dispatch(
     let model_str = match (probe.model, ingress) {
         (Some(model), _) => model,
         (None, Ingress::Generate) => ctx.config.model.id.clone(),
-        (None, Ingress::Completions) => {
+        (None, Ingress::Completions | Ingress::Chat) => {
             return Err(ApiError::BadRequest("missing `model` field".into()))
         }
     };
@@ -160,7 +176,6 @@ async fn dispatch(
         || policy.needs_request_tokens()
         || ctx.decode_tokens.is_some()
         || ctx.kv_hint.is_some()
-        || ctx.co_schedule.is_some()
         || ctx.symmetric_pd.is_some()
         || ctx.late_bind.is_some()
         || ctx.kv_sessions.is_some()
@@ -197,6 +212,26 @@ async fn dispatch(
     // as `input_ids` — the forwarded `prompt` already carries them.
     let mut prompt_ids: Option<Vec<u32>> =
         request_value.as_ref().and_then(|v| ingress.token_ids(v));
+    if let (Ingress::Chat, Some(value)) = (ingress, request_value.as_mut()) {
+        // Late D choose binds one request: `n` choices are one engine batch.
+        if value.get("n").and_then(serde_json::Value::as_u64) > Some(1) {
+            return Err(ApiError::LateDBatchUnsupported);
+        }
+        let tokens = super::chat::chat_request_tokens(&ctx, &model_id, value, &workers).await;
+        // Engine-equivalent ids ride on every leg as `input_ids`, so the
+        // prefill and each decode candidate skip tokenizing the same prompt.
+        if let (Some(t), Some(obj)) = (tokens.as_ref(), value.as_object_mut()) {
+            if t.engine_equivalent
+                && super::chat::input_ids_safe_to_forward(&serde_json::Value::Object(obj.clone()))
+            {
+                obj.insert("input_ids".to_string(), serde_json::json!(t.ids));
+                body = Bytes::from(
+                    serde_json::to_vec(&*obj).map_err(|e| ApiError::Internal(e.into()))?,
+                );
+            }
+        }
+        prompt_ids = tokens.map(|t| t.ids);
+    }
     // `--image-layout-config`: a token-id prompt with uploaded screenshots
     // routes on the engine's radix view (placeholders expanded to the
     // images' layout pad values), and the forwarded body carries the
@@ -275,7 +310,6 @@ async fn dispatch(
     // cap + co-decided pull) when configured, `Policy::select` otherwise.
     // The co-scheduler may HOLD the request here until capacity frees or
     // its starvation guard fires.
-    let mut co_dispatch: Option<crate::co_schedule::Dispatch> = None;
     let mut flex_decision: Option<crate::scheduler::Decision> = None;
     let mut pd_replay_decode: Option<Arc<Worker>> = None;
     // A policy's per-request note (`--policy gateway_cache_aware`), logged
@@ -321,40 +355,6 @@ async fn dispatch(
             .await?;
         let w = Arc::clone(&d.p_worker);
         flex_decision = Some(d);
-        w
-    } else if let Some(cs) = ctx.co_schedule.as_ref() {
-        let est_tokens = prompt_ids
-            .as_ref()
-            .map(|ids| ids.len().max(1))
-            .unwrap_or_else(|| estimate_prefill_tokens(&body));
-        // TRADE copy price auto: the session identity counts in N_active.
-        let session = if cs.trade_auto() {
-            crate::agent_identity::trade_session_key(&headers)
-        } else {
-            None
-        };
-        // TRADE wait e3: the session key of the target host rule.
-        let e3_session = if cs.wants_session() {
-            crate::trade_e3::session_key(&headers, kv_session_identity.as_ref())
-        } else {
-            None
-        };
-        let d = cs
-            .admit_session(
-                cs,
-                prompt_ids.as_deref(),
-                est_tokens,
-                route_cache_salt,
-                extract_rid(request_value.as_ref()),
-                session,
-                e3_session,
-            )
-            .await
-            .map_err(|_| ApiError::NoHealthyWorkers {
-                model: model_str.clone(),
-            })?;
-        let w = Arc::clone(&d.worker);
-        co_dispatch = Some(d);
         w
     } else {
         let pinned = ctx.pd_replay.as_ref().and_then(|replay| {
@@ -491,16 +491,8 @@ async fn dispatch(
         })
     };
 
-    let admission_queue_wait_ms = co_dispatch
-        .as_ref()
-        .map(|d| d.queue_wait_ms)
-        .or_else(|| flex_decision.as_ref().map(|d| d.queue_wait_ms))
-        .unwrap_or(0);
-    let admission_branch = co_dispatch
-        .as_ref()
-        .map(|d| d.branch.as_str())
-        .or_else(|| flex_decision.as_ref().map(|d| d.branch()))
-        .unwrap_or("policy");
+    let admission_queue_wait_ms = flex_decision.as_ref().map_or(0, |d| d.queue_wait_ms);
+    let admission_branch = flex_decision.as_ref().map_or("policy", |d| d.branch());
 
     // kv-p2p pull hint. Co-scheduled requests already carry their co-decided
     // hint (one indexer answer drove BOTH the routing and the pull — they can
@@ -520,14 +512,6 @@ async fn dispatch(
             Some(AdmissionLedger::Flex(d.ledger.clone())),
             d.cost_reservation.take(),
         )
-    } else if let Some(d) = co_dispatch.take() {
-        let crate::co_schedule::Dispatch {
-            hint,
-            ledger,
-            cost_reservation,
-            ..
-        } = d;
-        (hint, Some(AdmissionLedger::Co(ledger)), cost_reservation)
     } else {
         let hint = match (ctx.kv_hint.as_ref(), prompt_ids.as_ref()) {
             (Some(injector), Some(ids)) => {
@@ -797,6 +781,7 @@ async fn dispatch(
                 choose,
                 prefill: Arc::clone(&worker),
                 prefill_holds: Box::new((guard, active_guard)),
+                path: ingress.path(),
                 headers: headers.clone(),
                 prefill_body,
                 legs,
@@ -1074,21 +1059,15 @@ pub(crate) fn extract_session(v: Option<&serde_json::Value>) -> (Option<String>,
 
 /// PD forwarding preserves this RID on both sides. Ordinary clients need not
 /// supply an engine RID; strict replay keeps its original correlation ID.
-/// The uncached cost ledgers (`--co-schedule-uncached-balance`,
-/// `--symmetric-pd-p-select cost-function`) key engine progress by it, and
-/// under `--policy symmetric_pd` the Backend ledger needs it to retire the
-/// reservation of a P-leg that ended without terminal evidence.
+/// The uncached cost ledger (`--symmetric-pd-p-select cost-function`) keys
+/// engine progress by it, and under `--policy symmetric_pd` the Backend ledger
+/// needs it to retire the reservation of a P-leg that ended without terminal
+/// evidence.
 pub(crate) fn ensure_progress_rid(
     ctx: &AppContext,
     value: Option<&mut serde_json::Value>,
 ) -> Result<(), ApiError> {
-    let uncached_ledger = ctx
-        .config
-        .model
-        .co_schedule
-        .as_ref()
-        .is_some_and(|c| c.uncached_balance)
-        || ctx.symmetric_pd.is_some();
+    let uncached_ledger = ctx.symmetric_pd.is_some();
     if !uncached_ledger {
         return Ok(());
     }

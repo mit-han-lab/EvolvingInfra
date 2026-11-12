@@ -102,11 +102,11 @@ pub async fn chat_completions(
     headers: HeaderMap,
     mut body: Bytes,
 ) -> Result<Response<Body>, ApiError> {
-    // `--pd-late-decode choose` serves /v1/completions only: here a
-    // released or failed decode candidate would reach the client as a 2xx
-    // stream.
+    // `--pd-late-decode choose`: the completions dispatch serves the request
+    // (one decode leg per candidate; a released or failed candidate never
+    // reaches the client).
     if ctx.late_bind.is_some() {
-        return Err(ApiError::LateDRouteUnsupported);
+        return crate::server::routes::completions::chat(ctx, headers, body).await;
     }
     let start = std::time::Instant::now();
     let probe = parse_probe(&body)?;
@@ -162,7 +162,6 @@ pub async fn chat_completions(
         || ctx.tokenizers.has_chat_encoder(&model_str)
         || policy.needs_request_tokens()
         || ctx.kv_hint.is_some()
-        || ctx.co_schedule.is_some()
         || ctx.symmetric_pd.is_some();
     let mut request_value: Option<serde_json::Value> = if want_tokens {
         Some(serde_json::from_slice(&body).map_err(|_| {
@@ -185,9 +184,10 @@ pub async fn chat_completions(
     // forwarded as `input_ids` so it skips re-tokenizing the same prompt. The
     // ingress owns the tokenize via the shared registry, so the choice of
     // policy never changes whether we tokenize.
-    let request_tokens = request_value
-        .as_ref()
-        .and_then(|v| request_tokens_for(&ctx.tokenizers, &model_id, v));
+    let request_tokens = match request_value.as_ref() {
+        Some(v) => chat_request_tokens(&ctx, &model_id, v, &workers).await,
+        None => None,
+    };
     let external_prefix = if let Some(index) = &ctx.dynamo_prefix {
         Some(
             crate::dynamo_prefix::query(
@@ -252,7 +252,6 @@ pub async fn chat_completions(
     // cap + co-decided pull) when configured, `Policy::select` otherwise.
     // The co-scheduler may HOLD the request here until capacity frees or
     // its starvation guard fires.
-    let mut co_dispatch: Option<crate::co_schedule::Dispatch> = None;
     let mut flex_decision: Option<crate::scheduler::Decision> = None;
     // Traditional-PD decision replay: the pinned decode peer (routes/pd_replay.rs).
     let mut pd_replay_decode: Option<Arc<Worker>> = None;
@@ -301,34 +300,6 @@ pub async fn chat_completions(
             .await?;
         let w = Arc::clone(&d.p_worker);
         flex_decision = Some(d);
-        w
-    } else if let Some(cs) = ctx.co_schedule.as_ref() {
-        let ids = request_tokens.as_ref().map(|t| t.ids.as_slice());
-        let est_tokens = ids
-            .map(|i| i.len().max(1))
-            .unwrap_or_else(|| estimate_prefill_tokens(&body));
-        // TRADE copy price auto: the session identity counts in N_active.
-        let session = if cs.trade_auto() {
-            crate::agent_identity::trade_session_key(&headers)
-        } else {
-            None
-        };
-        let d = cs
-            .admit_session(
-                cs,
-                ids,
-                est_tokens,
-                route_cache_salt,
-                crate::server::routes::completions::extract_rid(request_value.as_ref()),
-                session,
-                None,
-            )
-            .await
-            .map_err(|_| ApiError::NoHealthyWorkers {
-                model: model_str.clone(),
-            })?;
-        let w = Arc::clone(&d.worker);
-        co_dispatch = Some(d);
         w
     } else {
         let pinned = ctx.pd_replay.as_ref().and_then(|replay| {
@@ -535,16 +506,8 @@ pub async fn chat_completions(
     };
     let bootstrap_room = bootstrap.as_ref().map(|b| b.room);
 
-    let admission_queue_wait_ms = co_dispatch
-        .as_ref()
-        .map(|d| d.queue_wait_ms)
-        .or_else(|| flex_decision.as_ref().map(|d| d.queue_wait_ms))
-        .unwrap_or(0);
-    let admission_branch = co_dispatch
-        .as_ref()
-        .map(|d| d.branch.as_str())
-        .or_else(|| flex_decision.as_ref().map(|d| d.branch()))
-        .unwrap_or("policy");
+    let admission_queue_wait_ms = flex_decision.as_ref().map_or(0, |d| d.queue_wait_ms);
+    let admission_branch = flex_decision.as_ref().map_or("policy", |d| d.branch());
 
     // kv-p2p pull hint: ask the indexer which peers own this request's
     // token prefix, then (below the gates) hint the EXECUTING worker to
@@ -564,16 +527,6 @@ pub async fn chat_completions(
             Some(AdmissionLedger::Flex(d.ledger.clone())),
             d.cost_reservation.take(),
         )
-    } else if let Some(d) = co_dispatch.take() {
-        // Co-scheduled: routing and pull came from ONE indexer answer — the
-        // hint was decided at dispatch; do not re-query.
-        let crate::co_schedule::Dispatch {
-            hint,
-            ledger,
-            cost_reservation,
-            ..
-        } = d;
-        (hint, Some(AdmissionLedger::Co(ledger)), cost_reservation)
     } else {
         let hint = match (ctx.kv_hint.as_ref(), request_tokens.as_ref()) {
             (Some(injector), Some(tokens)) => {
@@ -1206,6 +1159,36 @@ pub(crate) fn build_outgoing_body(
     Ok(Bytes::from(bytes))
 }
 
+/// The token ids of chat request `value` for placement. The router's chat
+/// encoder renders the messages alone; with `--chat-tools-tokenize`, the ids
+/// of a request with tools come from an engine instead (placement only,
+/// never forwarded). `workers` are the engines outside symmetric_pd.
+pub(crate) async fn chat_request_tokens(
+    ctx: &AppContext,
+    model_id: &ModelId,
+    value: &serde_json::Value,
+    workers: &[Arc<Worker>],
+) -> Option<RequestTokens> {
+    let tokens = request_tokens_for(&ctx.tokenizers, model_id, value);
+    if !ctx.config.proxy.chat_tools_tokenize
+        || !request_has_tools(value)
+        || request_is_multimodal(value)
+    {
+        return tokens;
+    }
+    let engines = match ctx.symmetric_pd.as_ref() {
+        Some(flex) => flex.role_members_all(),
+        None => workers.to_vec(),
+    };
+    match crate::engine_tokenize::chat_ids(&engines, value).await {
+        Some(ids) => Some(RequestTokens {
+            ids,
+            engine_equivalent: false,
+        }),
+        None => tokens,
+    }
+}
+
 /// Whether the router's `input_ids` may be forwarded for this request.
 ///
 /// We forward only when the engine, fed `input_ids`, would have produced the
@@ -1244,7 +1227,7 @@ pub(crate) fn build_outgoing_body(
 /// matches the engine on tokenizers that auto-add them (the common case); a
 /// tokenizer that does not would diverge by a leading special, again undetectable
 /// from the request.
-fn input_ids_safe_to_forward(value: &serde_json::Value) -> bool {
+pub(crate) fn input_ids_safe_to_forward(value: &serde_json::Value) -> bool {
     if request_has_tools(value) || request_is_multimodal(value) {
         return false;
     }

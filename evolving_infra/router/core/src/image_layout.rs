@@ -628,7 +628,7 @@ pub fn python_float_repr(f: f64) -> anyhow::Result<String> {
     if !f.is_finite() {
         anyhow::bail!("non-finite float in image config");
     }
-    Ok(crate::eft_cheap::python_float_repr(f))
+    Ok(crate::prefill_snapshot::python_float_repr(f))
 }
 
 // ---------------------------------------------------------------- metrics

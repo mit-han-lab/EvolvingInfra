@@ -34,36 +34,24 @@
 //!
 //! The TRADE placement (`--co-schedule-trade`) uses the same uncached ledger
 //! but selects argmin of backlog + own uncached + unhidden pull time + copy
-//! price (see [`crate::scheduler::co_schedule::trade_cost`]). Its backlog is
-//! the full ledger by default; `--co-schedule-trade-exclude-unlaunched` leaves
+//! price (see [`crate::scheduler::trade::trade_cost`]). Its backlog is
+//! the full ledger by default; `--trade-exclude-unlaunched` leaves
 //! out work the engine has not yet acknowledged in a progress snapshot. The
 //! engine lists a RID only after its first prefill chunk launches, so
 //! "unacknowledged" covers transit, the bootstrap queue and the waiting queue.
 //!
-//! With `--co-schedule-trade-wait eft` the TRADE wait and service terms come
-//! from the EFT-0+ closed form ([`crate::eft_cheap`]): B_w = the drain of the
-//! P's engine `prefill_routing` snapshot plus the active entries of that P
-//! that the snapshot does not show (not in its rows, not in the in-flight
-//! pass that R0 prices; unknown entries are left to the snapshot), S_w = the
-//! step-model service of the request. The snapshot is parsed off this lock
-//! ([`RoutingSnapshot`]); the drain is computed under it, so the outstanding
-//! rows and the decision are one transaction. For a P without a usable
-//! snapshot, B_w is the step-model drain of all its active entries (the
-//! ledger on the same scale); the trade decision counts these fallbacks by
-//! reason.
-//!
-//! With `--co-schedule-trade-hol-weight` above 0 the TRADE cost also has the
-//! head-of-line (HOL) term ([`crate::scheduler::co_schedule::trade_hol_tokens`]).
+//! With `--trade-hol-weight` above 0 the TRADE cost also has the
+//! head-of-line (HOL) term ([`crate::scheduler::trade::trade_hol_tokens`]).
 //! Its arrival rate a_w comes from this book: each TRADE decision prunes the
-//! placement record ([`crate::scheduler::co_schedule::TradeArrivals`]) to the
+//! placement record ([`crate::scheduler::trade::TradeArrivals`]) to the
 //! rate window, reads a_w of every candidate, and records its own placement
 //! when it commits the reservation. All of this is under the same lock, so
 //! concurrent decisions see each other. A later rollback or failure does not
 //! remove a record.
 //!
-//! With `--co-schedule-trade-copy-lambda auto` or
-//! `--co-schedule-trade-rate-tokens-per-s auto` this book also keeps the
-//! measurements of [`crate::scheduler::co_schedule::TradeAutoState`], created
+//! With `--trade-copy-lambda auto` or
+//! `--trade-rate-tokens-per-s auto` this book also keeps the
+//! measurements of [`crate::scheduler::trade::TradeAutoState`], created
 //! at the first auto decision. Only the entries that an auto decision
 //! reserved feed it. The P of such an entry has one more in-flight request
 //! from its dispatch until its prefill ends: the first progress snapshot
@@ -75,36 +63,12 @@
 //! The computed tokens are the larger of the reserved uncached estimate and
 //! the largest remaining work that a snapshot showed. Each decision resolves
 //! lambda and R from these measurements
-//! ([`crate::scheduler::co_schedule::TradeParams::resolved`]) and then
+//! ([`crate::scheduler::trade::TradeParams::resolved`]) and then
 //! prices the candidates with them; the trace event `trade_auto_p_empty`
 //! records each busy period that ends, and the one-second snapshot has
 //! `trade_auto`.
 //!
-//! With `--co-schedule-trade-wait olp` (symmetric_pd cost function only) the
-//! TRADE wait and service terms come from the online latency predictor
-//! ([`crate::olp`]): the structural work of each P's live ledger rows (a
-//! per-worker index of live reservation IDs, kept only with OLP) and of the
-//! request, scaled online. A decision-level gate gives every P the ledger
-//! terms while OLP is cold, stale or orders recent labels worse than the
-//! ledger: the decision is then the cost function's, bit for bit. The book
-//! feeds OLP from each applied progress reply (the engine's busy counters
-//! and the chunk work of the listed entries; a first listing may only
-//! correct the cache hit and is not chunk work) and labels each OLP
-//! decision when its P-leg is answered with `prefill_response_success`.
-//! With `--co-schedule-trade-olp-shadow` OLP is fed and traced and the
-//! decision is the ledger's. With OLP the one-second snapshot has `olp` (the
-//! gate's warm-up inputs and its results so far). Without OLP state none of
-//! this runs and the trace has no OLP key.
-//!
-//! Faster OLP (each off by default; flag off = the bytes above):
-//! `--co-schedule-trade-olp-incremental` keeps, per P, the exact integer
-//! sums of the work terms of its live rows, updated at the commit, at each
-//! applied progress reply (first chunk launched, remaining work) and at the
-//! end of a row, so a decision prices a P in O(1) instead of walking its
-//! rows ([`crate::olp::OlpParams::queue_of`]; equal rows, launched tokens
-//! and choices, q_model equal up to floating-point rounding).
-//! `--co-schedule-trade-olp-trace-compact` writes fewer OLP keys per
-//! decision. `--co-schedule-cost-trace-async` moves the trace write and
+//! `--trade-cost-trace-async` moves the trace write and
 //! flush to a background thread ([`CostBook::enable_async_trace`]).
 
 //!
@@ -115,9 +79,9 @@
 //! decision (`host_room_by_p`). No decision reads it. Without the flag
 //! neither key is written.
 //!
-//! With `--co-schedule-trade-pull-price phi` ([`CostBook::enable_host_room_phi`])
+//! With `--trade-pull-price phi` ([`CostBook::enable_host_room_phi`])
 //! the book also keeps phi of each P from the evicted counters of its
-//! host_room sections ([`crate::scheduler::co_schedule::TradePhiState`]), and
+//! host_room sections ([`crate::scheduler::trade::TradePhiState`]), and
 //! each TRADE decision prices the pull of candidate P at
 //! max(min, lambda_q x phi_P) (lambda_q = the copy price auto before the
 //! clamp; min = the auto clamp minimum; a P without host_room data uses
@@ -125,14 +89,14 @@
 //! every landing. The decision rows, the decision and the snapshot then carry
 //! the phi keys; with `lambda` (the default) nothing changes.
 //!
-//! With `--co-schedule-trade-wait e3` each candidate's wait and service come
+//! With `--trade-wait e3` each candidate's wait and service come
 //! from the E3 forecast ([`crate::trade_e3`]). The fits, the target tokens
 //! and the parsed snapshot are prepared before this lock
 //! ([`crate::trade_e3::TradeE3Context`]); the forecast runs under it,
 //! because its queue holds the router's own rows of that P that the
 //! snapshot does not show (active entries, and entries that finished after
 //! the snapshot time, decided after it). The selection is the prediction
-//! gate ([`crate::scheduler::co_schedule::select_trade_e3`]).
+//! gate ([`crate::scheduler::trade::select_trade_e3`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -164,7 +128,7 @@ struct ProgressCursor {
 /// the router sent the poll that returned it (the start of the view age).
 #[derive(Debug)]
 pub struct RoutingSnapshot {
-    pub view: crate::eft_cheap::SnapshotView,
+    pub view: crate::prefill_snapshot::SnapshotView,
     pub poll_sent: Instant,
     /// When the router received the reply (`wait = e3`: the snapshot time
     /// is this minus the engine's `age_s`).
@@ -178,81 +142,6 @@ pub struct RoutingSnapshot {
 /// (s): a request decided after a snapshot and finished before the decision
 /// still ran on P after the snapshot time. Longer than any usable view age.
 const RECENT_FINISHED_S: f64 = 60.0;
-
-/// Inputs of `--co-schedule-trade-wait eft`: the frozen step model, the
-/// EFT knobs (jit lead window and pull span of the drain parts) and the
-/// latest snapshot of each P, taken before the cost-book lock.
-#[derive(Debug, Clone)]
-pub struct TradeEftContext {
-    pub model: Arc<crate::eft_cheap::EftModel>,
-    pub knobs: crate::eft_cheap::EftKnobs,
-    pub views: HashMap<String, Arc<RoutingSnapshot>>,
-}
-
-/// The wait terms of one candidate for `wait = eft`. `terms` is None only
-/// without a step model (every P then uses the ledger terms). `fallback`
-/// names why the P has no usable snapshot; its terms then price the
-/// router's own rows for that P with the step model.
-struct WaitProbe {
-    terms: Option<crate::scheduler::co_schedule::TradeWaitTerms>,
-    fallback: Option<&'static str>,
-    view_age_s: Option<f64>,
-    view_key: Value,
-    drain: Option<crate::eft_cheap::Drain>,
-    outstanding_rows: usize,
-    outstanding_tokens: i64,
-    /// Active entries left out because the in-flight pass lists them (R0
-    /// prices their work).
-    pass_rows: usize,
-    shape: Option<crate::eft_cheap::Shape>,
-    /// Source `eft` only: how the snapshot's own rows were priced.
-    row_notes: Option<RowNotes>,
-}
-
-/// How the engine rows of a used snapshot were priced, for the trace.
-struct RowNotes {
-    /// The snapshot's degraded flags (sorted).
-    degraded: Vec<String>,
-    /// Rows priced at their full input length (no usable prefix data).
-    cold_rows: u64,
-    cold_tokens: i64,
-    /// Rows that the engine start-permission rule left out.
-    intent_skipped: u64,
-}
-
-/// One TRADE decision's OLP evaluation (mode `olp` or `shadow`).
-struct OlpEval {
-    /// Mode `olp` with an open gate: the OLP terms price every candidate.
-    active: bool,
-    /// The terms of every candidate, in candidate order.
-    preds: Vec<crate::olp::OlpPrediction>,
-    /// `trade_decision.olp`.
-    value: Value,
-    /// The `olp_step` event of the first decision of a step.
-    step_event: Option<Value>,
-    /// The decision time (s since the book started).
-    t_s: f64,
-    /// Incremental queue with `verify` only: every candidate's terms from
-    /// the walk of its rows (compared with `preds` by the caller).
-    verify_terms: Option<Vec<crate::scheduler::co_schedule::TradeWaitTerms>>,
-}
-
-impl WaitProbe {
-    fn no_model() -> Self {
-        Self {
-            terms: None,
-            fallback: Some("no_model"),
-            view_age_s: None,
-            view_key: Value::Null,
-            drain: None,
-            outstanding_rows: 0,
-            outstanding_tokens: 0,
-            pass_rows: 0,
-            shape: None,
-            row_notes: None,
-        }
-    }
-}
 
 /// The E3 forecast of one candidate for `wait = e3`, under the lock.
 /// `fallback` is None exactly when the candidate is usable: `out` has
@@ -316,13 +205,13 @@ fn push_pick<'a>(
 
 impl E3Probe {
     /// The wait terms of a usable forecast: B = wait_s, S = pred_s - wait_s.
-    fn terms(&self) -> Option<crate::scheduler::co_schedule::TradeWaitTerms> {
+    fn terms(&self) -> Option<crate::scheduler::trade::TradeWaitTerms> {
         if self.fallback.is_some() {
             return None;
         }
         let out = self.out.as_ref()?;
         let (pred, wait) = (out.pred_s?, out.wait_s?);
-        Some(crate::scheduler::co_schedule::TradeWaitTerms {
+        Some(crate::scheduler::trade::TradeWaitTerms {
             wait_s: wait,
             service_s: pred - wait,
         })
@@ -347,49 +236,10 @@ impl E3Probe {
     }
 }
 
-/// One active cost-book entry as an outstanding row of the EFT drain. An
-/// entry that the engine has acknowledged (its first chunk launched) is
-/// priced as started: its host restore and pull are done, and the rest
-/// computes after the prefix computed so far. Otherwise: q = expected hit,
-/// h = local hit - GPU hit (unknown GPU: all host), s = the hinted pull.
-fn outstanding_input(entry: &Entry) -> crate::eft_cheap::OutstandingInput {
-    let rid = entry.rid.clone().map_or(Value::Null, Value::String);
-    let uncached_tokens = i64::try_from(entry.uncached_tokens).ok();
-    if entry.acknowledged {
-        let done = entry.input_tokens.saturating_sub(entry.uncached_tokens) as i64;
-        return crate::eft_cheap::OutstandingInput {
-            rid,
-            uncached_tokens,
-            expected_hit: done,
-            local_hit: done,
-            gpu_hit: done,
-            hinted: false,
-        };
-    }
-    crate::eft_cheap::OutstandingInput {
-        rid,
-        uncached_tokens,
-        expected_hit: entry.expected_hit as i64,
-        local_hit: entry.local_hit as i64,
-        gpu_hit: entry.gpu_hit.unwrap_or(0) as i64,
-        hinted: entry.hint.is_some(),
-    }
-}
-
-/// One live entry as an OLP queue row: its remaining (engine-updated)
-/// uncached tokens, its input and whether its first chunk has launched.
-fn olp_row(entry: &Entry) -> crate::olp::OlpRow {
-    crate::olp::OlpRow {
-        remaining: entry.uncached_tokens,
-        input: entry.input_tokens,
-        started: entry.acknowledged,
-    }
-}
-
 /// The `wait = e3` keys of one candidate row of the trade decision: the
 /// forecast and its bound, the input summary, the target tokens and host
 /// rule, and the fit sources of the (P, step).
-fn e3_row_value(q: &E3Probe, cost: &crate::scheduler::co_schedule::TradeCost) -> Value {
+fn e3_row_value(q: &E3Probe, cost: &crate::scheduler::trade::TradeCost) -> Value {
     let out = q.out.as_ref();
     let prep = q.prep.as_ref();
     let fit = prep.and_then(|p| p.fit.as_ref());
@@ -480,8 +330,8 @@ fn e3_row_value(q: &E3Probe, cost: &crate::scheduler::co_schedule::TradeCost) ->
 /// numbers, the bound table, the decision time on the E3 clock, the chosen
 /// P's forecast (the shadow log reads it) and the fit step of each P.
 fn e3_decision_value<'a>(
-    params: &crate::scheduler::co_schedule::TradeParams,
-    selected: &crate::scheduler::co_schedule::TradeSelection,
+    params: &crate::scheduler::trade::TradeParams,
+    selected: &crate::scheduler::trade::TradeSelection,
     chosen: Option<&E3Probe>,
     forecasts: usize,
     e3: Option<&crate::trade_e3::TradeE3Context>,
@@ -530,7 +380,7 @@ enum Placement {
     CostSpread,
     LocalityMargin(u64),
     UncachedThreshold(u64, u64),
-    Trade(crate::scheduler::co_schedule::TradeParams),
+    Trade(crate::scheduler::trade::TradeParams),
 }
 
 impl Placement {
@@ -639,7 +489,7 @@ struct Entry {
 struct AutoTrack {
     /// An auto decision reserved this entry: its events feed the auto state.
     tracked: bool,
-    /// The request's session key ([`crate::scheduler::co_schedule::trade_session_hash`]).
+    /// The request's session key ([`crate::scheduler::trade::trade_session_hash`]).
     session: Option<u64>,
     /// Counted in its P's in-flight requests (dispatched, prefill not ended).
     in_flight: bool,
@@ -695,18 +545,15 @@ struct State {
     active_by_rid: BTreeMap<String, u64>,
     used_rids: BTreeSet<String>,
     progress: BTreeMap<String, ProgressCursor>,
-    /// TRADE `wait = eft`: decisions per fallback reason where a P used the
+    /// TRADE `wait = e3`: decisions per fallback reason where a P used the
     /// ledger terms (cumulative; P x decision counts).
     trade_wait_fallbacks: BTreeMap<String, u64>,
     /// TRADE HOL term (`hol_weight > 0` only): the placement times per P
     /// that give the arrival rate a_w.
-    trade_arrivals: crate::scheduler::co_schedule::TradeArrivals,
+    trade_arrivals: crate::scheduler::trade::TradeArrivals,
     /// TRADE auto (copy price or rate `auto` only): the router's
     /// measurements, created at the first auto decision.
-    trade_auto: Option<crate::scheduler::co_schedule::TradeAutoState>,
-    /// OLP (`--co-schedule-trade-wait olp` or the shadow readout): the online
-    /// latency predictor and its live index; None (default) without it.
-    olp: Option<crate::olp::OlpState>,
+    trade_auto: Option<crate::scheduler::trade::TradeAutoState>,
     /// The IDs of the unknown entries (the snapshot's `unknown_requests` is
     /// its size).
     unknown: BTreeSet<u64>,
@@ -742,7 +589,7 @@ struct State {
 
 /// Where the cost trace rows go: written and flushed under the cost-book
 /// lock (default), or handed in order to a background writer thread
-/// (`--co-schedule-cost-trace-async`, [`CostBook::enable_async_trace`]).
+/// (`--trade-cost-trace-async`, [`CostBook::enable_async_trace`]).
 enum TraceSink {
     Sync(BufWriter<File>),
     Async(AsyncTrace),
@@ -763,7 +610,7 @@ const ASYNC_TRACE_QUEUE: usize = 16_384;
 /// The background writer flushes at least once per this many rows.
 const ASYNC_TRACE_BATCH: usize = 4_096;
 
-/// The background trace writer (`--co-schedule-cost-trace-async`). The
+/// The background trace writer (`--trade-cost-trace-async`). The
 /// cost book sets each event's fields under its lock and sends it over a
 /// bounded channel (FIFO, so the file keeps the sequence order); the thread
 /// serializes the rows, writes every row waiting in the channel and flushes
@@ -884,17 +731,17 @@ struct HostRoomBook {
     /// section (an engine without session retention or without a host
     /// pool).
     missing: BTreeMap<String, u64>,
-    /// `--co-schedule-trade-pull-price phi` only: phi of each P.
+    /// `--trade-pull-price phi` only: phi of each P.
     phi: Option<PhiBook>,
 }
 
-/// phi of each P (`--co-schedule-trade-pull-price phi`), from the evicted
+/// phi of each P (`--trade-pull-price phi`), from the evicted
 /// counters of its host_room sections.
 #[derive(Debug)]
 struct PhiBook {
     /// tau (s) of the EWMA: the copy price auto tau.
     tau_s: f64,
-    states: BTreeMap<String, crate::scheduler::co_schedule::TradePhiState>,
+    states: BTreeMap<String, crate::scheduler::trade::TradePhiState>,
     /// Sections without the two evicted counters (not observed).
     invalid: u64,
     /// The priced candidate rows of the decisions (cumulative), those whose
@@ -953,7 +800,7 @@ impl HostRoomBook {
 fn phi_price(
     base: f64,
     floor: f64,
-    view: Option<crate::scheduler::co_schedule::TradePhiView>,
+    view: Option<crate::scheduler::trade::TradePhiView>,
 ) -> (f64, bool) {
     let raw = view.map_or(base, |v| base * v.phi);
     if raw < floor {
@@ -983,7 +830,7 @@ struct GwqLeadBook {
     /// First sightings of marked releases (samples taken).
     samples: u64,
     /// The URL of the last release whose TRADE total tied with another P
-    /// (the rotation of [`crate::scheduler::co_schedule::trade_tie_break`]).
+    /// (the rotation of [`crate::scheduler::trade::trade_tie_break`]).
     tie_last: Option<String>,
     /// T_react estimates dropped because their P joined the step pool again
     /// ([`CostBook::gwq_lead_restart`]).
@@ -1246,13 +1093,13 @@ impl Evaluation {
 /// parameters, how they were resolved, the measurements, and per P (URL, its
 /// in-flight requests, its estimates).
 type TradeAutoParts = (
-    crate::scheduler::co_schedule::TradeParams,
-    crate::scheduler::co_schedule::TradeAutoResolution,
-    crate::scheduler::co_schedule::TradeAutoInputs,
+    crate::scheduler::trade::TradeParams,
+    crate::scheduler::trade::TradeAutoResolution,
+    crate::scheduler::trade::TradeAutoInputs,
     Vec<(
         String,
         Option<u64>,
-        Option<crate::scheduler::co_schedule::TradeAutoWorkerView>,
+        Option<crate::scheduler::trade::TradeAutoWorkerView>,
     )>,
 );
 
@@ -1263,7 +1110,7 @@ type PhiPrices = (
     &'static str,
     f64,
     f64,
-    Vec<Option<crate::scheduler::co_schedule::TradePhiView>>,
+    Vec<Option<crate::scheduler::trade::TradePhiView>>,
 );
 
 /// The request-independent part of one TRADE decision
@@ -1273,7 +1120,7 @@ struct TradeDecisionCtx {
     /// The HOL term is on (its record is pruned to the window).
     hol: bool,
     /// The parameters of this decision (copy price and rate resolved).
-    params: crate::scheduler::co_schedule::TradeParams,
+    params: crate::scheduler::trade::TradeParams,
     /// Copy price or rate `auto` only.
     auto: Option<TradeAutoParts>,
 }
@@ -1300,7 +1147,7 @@ struct GwqReserve {
     /// The `gwq` object of the reserve event.
     record: Value,
     /// `--symmetric-pd-gwq-auto`: exact TRADE ties are broken as the walk breaks
-    /// them ([`crate::scheduler::co_schedule::trade_tie_break`]).
+    /// them ([`crate::scheduler::trade::trade_tie_break`]).
     tie_break: bool,
 }
 
@@ -1506,7 +1353,6 @@ impl CostBook {
                 trade_wait_fallbacks: BTreeMap::new(),
                 trade_arrivals: Default::default(),
                 trade_auto: None,
-                olp: None,
                 unknown: BTreeSet::new(),
                 prefill_reader_gone: 0,
                 expired_by_rid: BTreeMap::new(),
@@ -1606,27 +1452,13 @@ impl CostBook {
         input_tokens: u64,
         rid: Option<String>,
         candidates: Vec<Candidate>,
-        params: crate::scheduler::co_schedule::TradeParams,
+        params: crate::scheduler::trade::TradeParams,
     ) -> Result<(Candidate, Reservation, Value), String> {
-        self.reserve_trade_eft(input_tokens, rid, candidates, params, None)
+        self.reserve_trade_session(input_tokens, rid, candidates, params, None)
     }
 
-    /// [`Self::reserve_trade`] with the inputs of `--co-schedule-trade-wait
-    /// eft`. `eft` is None for the ledger wait; with `wait = eft` and no
-    /// context every P falls back to the ledger (reason `no_model`).
-    pub fn reserve_trade_eft(
-        self: &Arc<Self>,
-        input_tokens: u64,
-        rid: Option<String>,
-        candidates: Vec<Candidate>,
-        params: crate::scheduler::co_schedule::TradeParams,
-        eft: Option<&TradeEftContext>,
-    ) -> Result<(Candidate, Reservation, Value), String> {
-        self.reserve_trade_session(input_tokens, rid, candidates, params, eft, None)
-    }
-
-    /// [`Self::reserve_trade_eft`] with the request's session identity
-    /// ([`crate::scheduler::co_schedule::trade_session_key`]). The session
+    /// [`Self::reserve_trade`] with the request's session identity
+    /// ([`crate::scheduler::trade::trade_session_key`]). The session
     /// counts in N_active of the copy price `auto`; with both TRADE modes
     /// fixed it is not used.
     pub fn reserve_trade_session(
@@ -1634,11 +1466,10 @@ impl CostBook {
         input_tokens: u64,
         rid: Option<String>,
         candidates: Vec<Candidate>,
-        params: crate::scheduler::co_schedule::TradeParams,
-        eft: Option<&TradeEftContext>,
+        params: crate::scheduler::trade::TradeParams,
         session: Option<&str>,
     ) -> Result<(Candidate, Reservation, Value), String> {
-        self.reserve_trade_session_noted(input_tokens, rid, candidates, params, eft, session, None)
+        self.reserve_trade_session_noted(input_tokens, rid, candidates, params, session, None)
     }
 
     /// [`Self::reserve_trade_session`] with `gwq_note`, written as the `gwq`
@@ -1650,8 +1481,7 @@ impl CostBook {
         input_tokens: u64,
         rid: Option<String>,
         candidates: Vec<Candidate>,
-        params: crate::scheduler::co_schedule::TradeParams,
-        eft: Option<&TradeEftContext>,
+        params: crate::scheduler::trade::TradeParams,
         session: Option<&str>,
         gwq_note: Option<Value>,
     ) -> Result<(Candidate, Reservation, Value), String> {
@@ -1660,8 +1490,7 @@ impl CostBook {
             rid,
             candidates,
             Placement::Trade(params),
-            eft,
-            session.map(crate::scheduler::co_schedule::trade_session_hash),
+            session.map(crate::scheduler::trade::trade_session_hash),
             ReserveExtras {
                 gwq_note,
                 session_label: session,
@@ -1736,7 +1565,7 @@ impl CostBook {
         }
     }
 
-    /// `--co-schedule-trade-pull-price phi`: also keep phi of each P from
+    /// `--trade-pull-price phi`: also keep phi of each P from
     /// the evicted counters of its host_room sections, with the EWMA time
     /// constant `tau_s` (the copy price auto tau). Enables the host_room
     /// book; the TRADE decisions of a `phi` placement read it.
@@ -1825,7 +1654,7 @@ impl CostBook {
     /// N_active of the copy price `auto` at once. Returns whether the auto
     /// state counted it (false without auto decisions).
     pub fn trade_auto_end_session(&self, session: &str) -> bool {
-        let key = crate::scheduler::co_schedule::trade_session_hash(session);
+        let key = crate::scheduler::trade::trade_session_hash(session);
         self.state
             .lock()
             .trade_auto
@@ -1833,23 +1662,7 @@ impl CostBook {
             .is_some_and(|auto| auto.session_end(key))
     }
 
-    /// `--co-schedule-trade-wait olp` or `--co-schedule-trade-olp-shadow`:
-    /// the online latency predictor of this book ([`crate::olp`]), fed by the
-    /// applied progress replies and the P-leg answers and used (shadow:
-    /// traced only) by the TRADE decisions. Without this call the book has no
-    /// OLP state; a `wait = olp` decision then creates one with the defaults.
-    pub fn enable_olp(&self, config: crate::olp::OlpConfig) {
-        Self::olp_init(&mut self.state.lock(), config);
-    }
-
-    /// OLP `verify` (tests and the offline replay): the incremental queue's
-    /// comparison with the row walk so far; None without OLP state.
-    #[doc(hidden)]
-    pub fn olp_verify_stats(&self) -> Option<crate::olp::VerifyStats> {
-        self.state.lock().olp.as_ref().map(|o| o.verify_stats())
-    }
-
-    /// `--co-schedule-cost-trace-async`: from now on the trace rows go to a
+    /// `--trade-cost-trace-async`: from now on the trace rows go to a
     /// background writer thread (see [`AsyncTrace`]): the events keep their
     /// order and bytes, but the write and flush leave the cost-book lock.
     /// Called before serving (the cost function does it at construction).
@@ -1898,21 +1711,7 @@ impl CostBook {
             .map_err(|_| io::Error::other("cost trace writer failed before the sync"))
     }
 
-    /// New OLP state with the live index of the active entries.
-    fn olp_init(state: &mut State, config: crate::olp::OlpConfig) {
-        let mut olp = crate::olp::OlpState::new(config);
-        for entry in state.entries.values().filter(|e| e.status.active()) {
-            olp.live_insert(&entry.worker_url, entry.id, olp_row(entry));
-        }
-        state.olp = Some(olp);
-    }
-
-    /// Seconds from the book's start to `at` (the OLP clock; 0 before it).
-    fn seconds(&self, at: Instant) -> f64 {
-        at.saturating_duration_since(self.started).as_secs_f64()
-    }
-
-    /// [`Self::reserve_trade`] with the inputs of `--co-schedule-trade-wait
+    /// [`Self::reserve_trade`] with the inputs of `--trade-wait
     /// e3` ([`crate::trade_e3::TradeE3Context`], built before this lock).
     /// With `wait = e3` and no context every P falls back to the ledger
     /// terms (reason `no_context`) and the owner is kept.
@@ -1921,21 +1720,21 @@ impl CostBook {
         input_tokens: u64,
         rid: Option<String>,
         candidates: Vec<Candidate>,
-        params: crate::scheduler::co_schedule::TradeParams,
+        params: crate::scheduler::trade::TradeParams,
         e3: Option<&crate::trade_e3::TradeE3Context>,
     ) -> Result<(Candidate, Reservation, Value), String> {
         self.reserve_trade_e3_session(input_tokens, rid, candidates, params, e3, None)
     }
 
     /// [`Self::reserve_trade_e3`] with the request's session identity
-    /// ([`crate::scheduler::co_schedule::trade_session_key`]) for N_active
+    /// ([`crate::scheduler::trade::trade_session_key`]) for N_active
     /// of the copy price `auto` (as [`Self::reserve_trade_session`]).
     pub fn reserve_trade_e3_session(
         self: &Arc<Self>,
         input_tokens: u64,
         rid: Option<String>,
         candidates: Vec<Candidate>,
-        params: crate::scheduler::co_schedule::TradeParams,
+        params: crate::scheduler::trade::TradeParams,
         e3: Option<&crate::trade_e3::TradeE3Context>,
         session: Option<&str>,
     ) -> Result<(Candidate, Reservation, Value), String> {
@@ -1953,14 +1752,14 @@ impl CostBook {
     /// [`Self::reserve_trade_e3_session`] with `gwq_note`, written as the
     /// `gwq` object of the reserve event (as
     /// [`Self::reserve_trade_session_noted`]; the symmetric_pd cost function with
-    /// `--co-schedule-trade-wait e3`).
+    /// `--trade-wait e3`).
     #[allow(clippy::too_many_arguments)]
     pub fn reserve_trade_e3_session_noted(
         self: &Arc<Self>,
         input_tokens: u64,
         rid: Option<String>,
         candidates: Vec<Candidate>,
-        params: crate::scheduler::co_schedule::TradeParams,
+        params: crate::scheduler::trade::TradeParams,
         e3: Option<&crate::trade_e3::TradeE3Context>,
         session: Option<&str>,
         gwq_note: Option<Value>,
@@ -1970,8 +1769,7 @@ impl CostBook {
             rid,
             candidates,
             Placement::Trade(params),
-            None,
-            session.map(crate::scheduler::co_schedule::trade_session_hash),
+            session.map(crate::scheduler::trade::trade_session_hash),
             ReserveExtras {
                 gwq_note,
                 session_label: session,
@@ -2011,7 +1809,7 @@ impl CostBook {
         e3: Option<&crate::trade_e3::TradeE3Context>,
         candidate: &Candidate,
         decided_at: Instant,
-        params: &crate::scheduler::co_schedule::TradeParams,
+        params: &crate::scheduler::trade::TradeParams,
         ids: &[u64],
     ) -> E3Probe {
         let mut probe = E3Probe::default();
@@ -2111,7 +1909,8 @@ impl CostBook {
                 let rid = e.rid.as_ref().filter(|rid| !view.shown.contains(*rid))?;
                 let input = e.input_tokens as i64;
                 let (prefix, host) = e.e3_estimate.unwrap_or_else(|| {
-                    let hit = crate::eft_cheap::floor_hit(e.expected_hit as i64, input, view.page);
+                    let hit =
+                        crate::prefill_snapshot::floor_hit(e.expected_hit as i64, input, view.page);
                     (hit, 0)
                 });
                 Some(crate::trade_e3::RouterRow {
@@ -2162,216 +1961,6 @@ impl CostBook {
         probe
     }
 
-    /// B_w and S_w of one candidate for `wait = eft`, under the lock.
-    ///
-    /// With a usable snapshot (source `eft`): B_w = the drain of the
-    /// snapshot plus the outstanding rows. These are the active entries on
-    /// the P (FCFS by reservation id) that the snapshot does not show, at
-    /// their current remaining uncached tokens. The snapshot shows a RID in
-    /// its partial, waiting, bootstrap or in-flight request rows, or in the
-    /// in-flight pass that R0 prices: a request whose last chunk is in that
-    /// pass is in no row, but R0 already prices its work. An unknown entry
-    /// (transport error) is left out: only the engine view tells whether it
-    /// still has work, and the view prices it when it does.
-    ///
-    /// Without a usable snapshot (source `ledger_fallback`, with the reason):
-    /// B_w = the step-model drain of all active entries on the P and no
-    /// engine rows, that is, the ledger on the scale of the EFT terms. S_w is
-    /// the step-model service in both cases (the page and chunk of the
-    /// snapshot, else 64 and 8192). Without a model `terms` is None, and every
-    /// P uses the ledger terms of the first version.
-    fn probe_trade_wait(
-        state: &State,
-        eft: Option<&TradeEftContext>,
-        candidate: &Candidate,
-        input_tokens: u64,
-        now: Instant,
-        params: &crate::scheduler::co_schedule::TradeParams,
-    ) -> WaitProbe {
-        use crate::eft_cheap::{Shape, SnapshotView, View};
-        let Some(ctx) = eft else {
-            return WaitProbe::no_model();
-        };
-        let routing = ctx.views.get(&candidate.worker_url);
-        let view = routing.map(|r| {
-            View::at(
-                &r.view,
-                now.saturating_duration_since(r.poll_sent).as_secs_f64(),
-            )
-        });
-        let fallback = match &view {
-            None => Some("no_view"),
-            Some(view) => view.unusable_reason.or_else(|| {
-                view.age_s
-                    .is_none_or(|age| age > params.eft_max_view_age_s)
-                    .then_some("view_too_old")
-            }),
-        };
-        let view_age_s = view.and_then(|v| v.age_s);
-        let view_key = routing.map_or(Value::Null, |r| json!([r.view.epoch, r.view.sequence]));
-        let (page, chunk) = routing.map_or(
-            (
-                crate::eft_cheap::DEFAULT_PAGE,
-                crate::eft_cheap::DEFAULT_CHUNK,
-            ),
-            |r| (r.view.page, r.view.chunk),
-        );
-        let mut ids: Vec<u64> = state.active_by_rid.values().copied().collect();
-        ids.sort_unstable();
-        let entries = ids
-            .iter()
-            .map(|id| &state.entries[id])
-            .filter(|e| e.worker_url == candidate.worker_url);
-        let empty;
-        let (view, rows, pass_rows, row_notes) = match (view, fallback) {
-            (Some(view), None) => {
-                let snap = view.snap;
-                let mut pass_rows = 0usize;
-                let inputs: Vec<_> = entries
-                    .filter(|e| e.status != Status::Unknown)
-                    .filter(|e| {
-                        let in_pass = e.rid.as_ref().is_some_and(|rid| {
-                            snap.pass_rids.contains(rid) && !snap.rids.contains(rid)
-                        });
-                        pass_rows += usize::from(in_pass);
-                        !in_pass
-                    })
-                    .map(outstanding_input)
-                    .collect();
-                let rows = crate::eft_cheap::outstanding_rows(&inputs, &snap.rids);
-                let notes = RowNotes {
-                    degraded: snap.degraded.iter().cloned().collect(),
-                    cold_rows: snap.cold_rows,
-                    cold_tokens: snap.cold_tokens,
-                    intent_skipped: snap.rows_intent_skipped,
-                };
-                (view, rows, pass_rows, Some(notes))
-            }
-            _ => {
-                let inputs: Vec<_> = entries.map(outstanding_input).collect();
-                empty = SnapshotView::empty(page, chunk);
-                let rows = crate::eft_cheap::outstanding_rows(&inputs, &empty.rids);
-                (View::at(&empty, 0.0), rows, 0, None)
-            }
-        };
-        let drain = crate::eft_cheap::drain(&view, &rows, &ctx.model, &ctx.knobs);
-        let n = input_tokens as i64;
-        let pull_hit =
-            (candidate.expected_hit > candidate.local_hit).then_some(candidate.expected_hit as i64);
-        let (shape, _) = Shape::of(
-            n,
-            candidate.local_hit as i64,
-            candidate.gpu_hit.unwrap_or(0) as i64,
-            pull_hit,
-            page,
-        );
-        let service_s = crate::eft_cheap::service_seconds(&ctx.model, shape, page, chunk);
-        WaitProbe {
-            terms: Some(crate::scheduler::co_schedule::TradeWaitTerms {
-                wait_s: drain.d,
-                service_s,
-            }),
-            fallback,
-            view_age_s,
-            view_key,
-            outstanding_rows: rows.len(),
-            outstanding_tokens: rows.iter().map(|r| r.u).sum(),
-            pass_rows,
-            drain: Some(drain),
-            shape: Some(shape),
-            row_notes,
-        }
-    }
-
-    /// OLP at one TRADE decision (see [`crate::olp`]): the terms of every
-    /// candidate in candidate order, the decision-level gate (applied in mode
-    /// `olp`, traced in both modes) and, at the first decision of a step, its
-    /// `olp_step` event. A candidate's rows are the live entries of its P
-    /// (the per-worker index: reserved, dispatched or unknown) at their
-    /// current remaining work; an acknowledged entry (first chunk launched)
-    /// is priced as started. O(rows on the candidates + P workers); the
-    /// ledger's entries are never scanned. With
-    /// `--co-schedule-trade-olp-incremental` a candidate's queue comes from
-    /// its integer sums, kept at every row change: O(1) per candidate, no
-    /// row is walked (with `verify`, both are computed and compared; the
-    /// walk's terms go back in `verify_terms` for the argmin check of the
-    /// caller). None without OLP state.
-    fn olp_decide(
-        state: &mut State,
-        mode: crate::olp::OlpMode,
-        evaluations: &[Evaluation],
-        input_tokens: u64,
-        t_s: f64,
-    ) -> Option<OlpEval> {
-        let State { olp, entries, .. } = state;
-        let olp = olp.as_mut()?;
-        let entries = &*entries;
-        let urls: Vec<&str> = evaluations
-            .iter()
-            .map(|e| e.candidate.worker_url.as_str())
-            .collect();
-        let ctx = olp.begin(&urls, t_s);
-        let params = *olp.params();
-        let incremental = olp.config().incremental;
-        let verify = incremental && olp.config().verify;
-        let walk = |olp: &crate::olp::OlpState, url: &str| {
-            let rows = olp
-                .live(url)
-                .filter_map(|id| entries.get(&id))
-                .filter(|entry| entry.status.active())
-                .map(olp_row);
-            params.queue(rows)
-        };
-        let mut walked: Vec<crate::olp::OlpQueue> = Vec::new();
-        let preds: Vec<crate::olp::OlpPrediction> = evaluations
-            .iter()
-            .map(|e| {
-                let url = e.candidate.worker_url.as_str();
-                let queue = match olp.queue_sums(url) {
-                    Some(sums) => {
-                        let queue = params.queue_of(&sums);
-                        if verify {
-                            let reference = walk(olp, url);
-                            olp.verify_stats_mut().candidate(&reference, &queue);
-                            walked.push(reference);
-                        }
-                        queue
-                    }
-                    None => walk(olp, url),
-                };
-                let uncached = input_tokens - e.candidate.expected_hit;
-                olp.predict(&ctx, url, queue, input_tokens, uncached)
-            })
-            .collect();
-        // `verify`: the terms of the walked queues (the caller compares the
-        // two OLP argmins).
-        let verify_terms = verify.then(|| {
-            evaluations
-                .iter()
-                .zip(walked)
-                .map(|(e, queue)| {
-                    let url = e.candidate.worker_url.as_str();
-                    let uncached = input_tokens - e.candidate.expected_hit;
-                    olp.predict(&ctx, url, queue, input_tokens, uncached)
-                        .terms()
-                })
-                .collect()
-        });
-        let fallback = olp.gate(&ctx, &preds);
-        olp.count_gate(fallback);
-        let active = mode == crate::olp::OlpMode::Olp && fallback.is_none();
-        let value = olp.decision_value(mode, active, fallback, &ctx);
-        let step_event = ctx.new_step.then(|| olp.step_event(&ctx));
-        Some(OlpEval {
-            active,
-            preds,
-            value,
-            step_event,
-            t_s,
-            verify_terms,
-        })
-    }
-
     fn reserve_placement(
         self: &Arc<Self>,
         input_tokens: u64,
@@ -2384,7 +1973,6 @@ impl CostBook {
             rid,
             candidates,
             placement,
-            None,
             None,
             ReserveExtras::default(),
             None,
@@ -2401,7 +1989,6 @@ impl CostBook {
         rid: Option<String>,
         candidates: Vec<Candidate>,
         placement: Placement,
-        eft: Option<&TradeEftContext>,
         session: Option<u64>,
         extras: ReserveExtras<'_>,
         e3: Option<&crate::trade_e3::TradeE3Context>,
@@ -2415,7 +2002,6 @@ impl CostBook {
             candidates,
             urls,
             placement,
-            eft,
             session,
             e3,
             None,
@@ -2477,7 +2063,6 @@ impl CostBook {
         candidates: Vec<Candidate>,
         urls: BTreeSet<String>,
         placement: Placement,
-        eft: Option<&TradeEftContext>,
         session: Option<u64>,
         e3: Option<&crate::trade_e3::TradeE3Context>,
         gwq: Option<GwqReserve>,
@@ -2567,8 +2152,6 @@ impl CostBook {
         // Copy price or rate auto: the time of this decision; the entry then
         // feeds the auto state and its session starts at the commit.
         let mut trade_auto_at: Option<Instant> = None;
-        // OLP: the chosen P's prediction, recorded at the commit for its label.
-        let mut olp_label: Option<crate::olp::PendingLabel> = None;
         // Global waiting queue release: the `gwq` object of the event.
         let mut gwq_record: Option<Value> = None;
         // --symmetric-pd-gwq-auto: the P of a tie-broken release, the next
@@ -2582,9 +2165,7 @@ impl CostBook {
         // fallback counts, committed with the decision.
         let mut e3_push_counts: Option<(BTreeMap<String, u64>, BTreeMap<String, u64>)> = None;
         let locality_decision = if let Placement::Trade(configured) = placement {
-            use crate::scheduler::co_schedule::{
-                TradeLambdaMode, TradeParams, TradePullPrice, TradeWait,
-            };
+            use crate::scheduler::trade::{TradeLambdaMode, TradePullPrice, TradeWait};
             // The request-independent part of the decision (HOL prune, copy
             // price and rate auto; [`Self::trade_ctx`]). A GWQ release brings
             // the context of its step, which ran under this same lock.
@@ -2632,59 +2213,7 @@ impl CostBook {
                     .collect();
                 Self::phi_prices(state, configured, auto.as_ref(), &params, &urls, decided_at)
             };
-            let probes: Vec<Option<WaitProbe>> = evaluations
-                .iter()
-                .map(|e| {
-                    (params.wait == TradeWait::Eft).then(|| {
-                        Self::probe_trade_wait(
-                            &*state,
-                            eft,
-                            &e.candidate,
-                            input_tokens,
-                            decided_at,
-                            &params,
-                        )
-                    })
-                })
-                .collect();
-            // OLP (`wait = olp`, or the shadow readout with `wait = ledger`):
-            // the terms of every candidate and the decision-level gate.
-            // Without OLP state and with `wait != olp` this is None and
-            // nothing below changes.
-            let olp_mode = if params.wait == TradeWait::Olp {
-                if state.olp.is_none() {
-                    // A book built in code without `enable_olp`: the defaults.
-                    Self::olp_init(state, crate::olp::OlpConfig::default());
-                }
-                Some(crate::olp::OlpMode::Olp)
-            } else if params.wait == TradeWait::Ledger
-                && state.olp.as_ref().is_some_and(|o| o.config().shadow)
-            {
-                Some(crate::olp::OlpMode::Shadow)
-            } else {
-                None
-            };
-            let decided_s = self.seconds(decided_at);
-            let mut olp = olp_mode.and_then(|mode| {
-                Self::olp_decide(state, mode, &evaluations, input_tokens, decided_s)
-            });
-            if let Some(event) = olp.as_mut().and_then(|o| o.step_event.take()) {
-                // An emit error stops the admission at the reserve row below.
-                let _ = self.emit(state, event);
-            }
-            let olp_active = olp.as_ref().is_some_and(|o| o.active);
-            // `--co-schedule-trade-olp-trace-compact`: fewer OLP trace keys.
-            let olp_compact = state.olp.as_ref().is_some_and(|o| o.config().compact_trace);
-            // `wait = olp` with a closed gate: the ledger terms and ties, so the
-            // decision is the cost function's, bit for bit.
-            let select_params = if params.wait == TradeWait::Olp && !olp_active {
-                TradeParams {
-                    wait: TradeWait::Ledger,
-                    ..params
-                }
-            } else {
-                params
-            };
+            let select_params = params;
             let e3_on = params.wait == TradeWait::E3;
             let mut e3_ids: Vec<u64> = Vec::new();
             if e3_on {
@@ -2713,10 +2242,9 @@ impl CostBook {
                 .collect();
             let inputs: Vec<_> = evaluations
                 .iter()
-                .zip(&probes)
                 .zip(&e3_probes)
                 .enumerate()
-                .map(|(i, ((e, probe), e3_probe))| {
+                .map(|(i, (e, e3_probe))| {
                     let unacknowledged =
                         state.workers[&e.candidate.worker_url].pending_unacknowledged_tokens;
                     // A GWQ release adds the held work ahead of it (0 otherwise).
@@ -2731,7 +2259,7 @@ impl CostBook {
                     } else {
                         e.pending_uncached_before
                     };
-                    crate::scheduler::co_schedule::TradeInput {
+                    crate::scheduler::trade::TradeInput {
                         worker: &e.candidate.worker_url,
                         backlog: note
                             .and_then(|note| note.backlog_override)
@@ -2740,13 +2268,8 @@ impl CostBook {
                         local_hit: e.candidate.local_hit,
                         uncached: input_tokens - e.candidate.expected_hit,
                         pulled: e.candidate.expected_hit - e.candidate.local_hit,
-                        // OLP active: its terms; else those of the E3 forecast
-                        // (wait = e3) or of the EFT probe (None for the ledger).
-                        wait: match (&olp, e3_probe) {
-                            (Some(o), _) if o.active => Some(o.preds[i].terms()),
-                            (_, Some(q)) => q.terms(),
-                            _ => probe.as_ref().and_then(|p| p.terms),
-                        },
+                        // The terms of the E3 forecast (None for the ledger).
+                        wait: e3_probe.as_ref().and_then(|q| q.terms()),
                         // wait = e3: the E3 arrival-rate fit of the P when
                         // it exists, else the placement rate.
                         arrival_rate_per_s: if hol {
@@ -2770,7 +2293,7 @@ impl CostBook {
                     }
                 })
                 .collect();
-            let mut selected = crate::scheduler::co_schedule::select_trade(&select_params, &inputs);
+            let mut selected = crate::scheduler::trade::select_trade(&select_params, &inputs);
             if let (true, Some((notes, record))) = (tie_break, gwq.as_mut()) {
                 // --symmetric-pd-gwq-auto: the walk's tie-break, with the same
                 // room, outstanding requests and rotation of this step.
@@ -2780,10 +2303,10 @@ impl CostBook {
                     .collect();
                 let outstanding: Vec<u64> = evaluations.iter().map(|e| e.active_requests).collect();
                 let last = state.gwq_lead.as_ref().and_then(|b| b.tie_last.clone());
-                let outcome = crate::scheduler::co_schedule::trade_tie_break(
+                let outcome = crate::scheduler::trade::trade_tie_break(
                     &selected,
                     &inputs,
-                    &crate::scheduler::co_schedule::TradeTieBreak {
+                    &crate::scheduler::trade::TradeTieBreak {
                         room: &room,
                         outstanding: &outstanding,
                         last: last.as_deref(),
@@ -2816,10 +2339,8 @@ impl CostBook {
                 .iter()
                 .zip(&selected.costs)
                 .zip(&evaluations)
-                .zip(&probes)
                 .zip(&e3_probes)
-                .enumerate()
-                .map(|(i, ((((input, cost), e), probe), e3_probe))| {
+                .map(|(((input, cost), e), e3_probe)| {
                     let mut row = json!({
                         "worker_url": input.worker,
                         "backlog_tokens": input.backlog.to_string(),
@@ -2850,47 +2371,12 @@ impl CostBook {
                             });
                         }
                     } else if !params.is_original() {
-                        // ledger: wait = ledger. eft: the P's usable snapshot.
-                        // ledger_fallback: no usable snapshot (the router's
-                        // rows priced by the step model), or no model (the
-                        // first-version ledger terms).
-                        let source = match probe {
-                            _ if olp_active => "olp",
-                            None => "ledger",
-                            Some(p) if p.fallback.is_none() => "eft",
-                            Some(_) => "ledger_fallback",
-                        };
-                        let notes = probe.as_ref().and_then(|p| p.row_notes.as_ref());
                         let extra = json!({
-                            "wait_source": source,
-                            "wait_fallback_reason": probe.as_ref().and_then(|p| p.fallback),
+                            "wait_source": "ledger",
                             "wait_s": cost.wait_s,
                             "service_s": cost.service_s,
                             "dup_tokens": cost.dup_tokens,
-                            "view_age_s": probe.as_ref().and_then(|p| p.view_age_s),
-                            "view_key": probe.as_ref().map_or(Value::Null, |p| p.view_key.clone()),
-                            "eft_r0_s": probe.as_ref().and_then(|p| p.drain.as_ref()).map(|d| d.r0),
-                            "eft_drain_lead_s": probe.as_ref().and_then(|p| p.drain.as_ref()).map(|d| d.d_lead),
-                            "eft_pull_backlog_s": probe.as_ref().and_then(|p| p.drain.as_ref()).map(|d| d.pb),
-                            "eft_idle": probe.as_ref().and_then(|p| p.drain.as_ref()).map(|d| d.idle),
-                            "eft_outstanding_rows": probe.as_ref().map(|p| p.outstanding_rows),
-                            "eft_outstanding_tokens": probe.as_ref().map(|p| p.outstanding_tokens),
-                            "eft_inflight_pass_rows": probe.as_ref().map(|p| p.pass_rows),
-                            "eft_degraded": notes.map(|n| &n.degraded),
-                            "eft_cold_rows": notes.map(|n| n.cold_rows),
-                            "eft_cold_tokens": notes.map(|n| n.cold_tokens),
-                            "eft_rows_intent_skipped": notes.map(|n| n.intent_skipped),
-                            "eft_shape": probe.as_ref().and_then(|p| p.shape).map(|s| json!({
-                                "u": s.u, "q": s.q, "h": s.h, "s": s.s,
-                            })),
                         });
-                        if let (Value::Object(row), Value::Object(extra)) = (&mut row, extra) {
-                            row.extend(extra);
-                        }
-                    }
-                    // OLP or its shadow readout: this P's terms.
-                    if let Some(o) = &olp {
-                        let extra = o.preds[i].trace_keys(olp_compact);
                         if let (Value::Object(row), Value::Object(extra)) = (&mut row, extra) {
                             row.extend(extra);
                         }
@@ -2899,7 +2385,8 @@ impl CostBook {
                         row["arrival_rate_per_s"] = json!(cost.arrival_rate_per_s);
                         row["hol_tokens"] = json!(cost.hol_tokens);
                     }
-                    if let Some(note) = gwq.as_ref().and_then(|(notes, _)| notes.get(input.worker)) {
+                    if let Some(note) = gwq.as_ref().and_then(|(notes, _)| notes.get(input.worker))
+                    {
                         row["gwq_virtual_tokens"] = json!(note.virtual_tokens.to_string());
                         row["gwq_depth_tokens"] = json!(note.depth);
                         row["gwq_room"] = json!(note.room);
@@ -2955,11 +2442,7 @@ impl CostBook {
             if !params.is_original() {
                 let mut counts = state.trade_wait_fallbacks.clone();
                 let mut fallbacks = 0u64;
-                let reasons = probes
-                    .iter()
-                    .flatten()
-                    .filter_map(|p| p.fallback)
-                    .chain(e3_probes.iter().flatten().filter_map(|q| q.fallback));
+                let reasons = e3_probes.iter().flatten().filter_map(|q| q.fallback);
                 for reason in reasons {
                     *counts.entry(reason.to_string()).or_default() += 1;
                     fallbacks += 1;
@@ -2969,7 +2452,6 @@ impl CostBook {
                     "dup_charge": params.dup_charge.as_str(),
                     "margin_noise_k": params.margin_noise_k,
                     "eft_max_view_age_s": params.eft_max_view_age_s,
-                    "eft_model_sha256": eft.map(|ctx| ctx.model.sha256.clone()),
                     "best": evaluations[selected.best].candidate.worker_url,
                     "margin_s": selected.margin_s,
                     "owner_gain_s": selected.owner_gain_s,
@@ -3027,89 +2509,6 @@ impl CostBook {
                     decision.extend(extra);
                 }
             }
-            if let Some(o) = olp.as_mut() {
-                // Both argmins for the A/B readout: the cost function's (no
-                // wait terms, ledger ties) and OLP's (its terms and ties,
-                // whatever the gate says). The real selection is one of them.
-                let active = o.active;
-                let alt_inputs: Vec<_> = inputs
-                    .iter()
-                    .zip(&o.preds)
-                    .map(|(input, pred)| crate::scheduler::co_schedule::TradeInput {
-                        wait: if active { None } else { Some(pred.terms()) },
-                        ..*input
-                    })
-                    .collect();
-                let alt_wait = if active {
-                    TradeWait::Ledger
-                } else {
-                    TradeWait::Olp
-                };
-                let alt_params = TradeParams {
-                    wait: alt_wait,
-                    ..params
-                };
-                let alt = crate::scheduler::co_schedule::select_trade(&alt_params, &alt_inputs);
-                let (ledger_i, olp_i) = if active {
-                    (alt.chosen, selected.chosen)
-                } else {
-                    (selected.chosen, alt.chosen)
-                };
-                let mut value = std::mem::take(&mut o.value);
-                value["ledger_chosen"] = json!(inputs[ledger_i].worker);
-                value["olp_chosen"] = json!(inputs[olp_i].worker);
-                decision["olp"] = value;
-                // Incremental queue with `verify` (tests, offline replay):
-                // the OLP argmin over the walked queues' terms must be OLP's.
-                if let (Some(walked), Some(state_olp)) =
-                    (o.verify_terms.as_ref(), state.olp.as_mut())
-                {
-                    let walk_inputs: Vec<_> = inputs
-                        .iter()
-                        .zip(walked)
-                        .map(|(input, terms)| crate::scheduler::co_schedule::TradeInput {
-                            wait: Some(*terms),
-                            ..*input
-                        })
-                        .collect();
-                    let olp_params = TradeParams {
-                        wait: TradeWait::Olp,
-                        ..params
-                    };
-                    let walk =
-                        crate::scheduler::co_schedule::select_trade(&olp_params, &walk_inputs);
-                    let stats = state_olp.verify_stats_mut();
-                    stats.decisions += 1;
-                    stats.olp_choice_mismatch += u64::from(walk.chosen != olp_i);
-                }
-            }
-            // OLP: the chosen P's prediction and the cost function's own
-            // latency proxy ((backlog + u) / R + exposed pull), for its label.
-            olp_label = olp.as_ref().map(|o| {
-                let input = &inputs[selected.chosen];
-                let pred = &o.preds[selected.chosen];
-                let pull_s = params.pull_seconds(input.pulled);
-                let ledger = crate::scheduler::co_schedule::trade_cost_full(
-                    &params,
-                    input.backlog,
-                    input.uncached,
-                    input.pulled,
-                    0,
-                    None,
-                    0.0,
-                );
-                crate::olp::PendingLabel {
-                    t_decision: o.t_s,
-                    url: input.worker.to_string(),
-                    pred_olp_c: pred.completion_s(pull_s),
-                    pred_olp_base: pred.completion_base_s(pull_s),
-                    pred_cf_c: ledger.wait_s + ledger.service_s + ledger.exposed_pull_s,
-                    risk: pred.risk,
-                    q_model_s: pred.q_model_s,
-                    own_model_s: pred.own_model_s,
-                    pulled: input.pulled > 0,
-                }
-            });
             if let Some((base, base_source, tau_s, floor, views)) = &phi {
                 // Pull price phi: the rows carry each candidate's copy price;
                 // copy_lambda and copy_lambda_used are the price of the chosen
@@ -3204,7 +2603,7 @@ impl CostBook {
         } else if let Placement::UncachedThreshold(threshold, margin) = placement {
             let views: Vec<_> = evaluations
                 .iter()
-                .map(|e| crate::scheduler::co_schedule::Evaluation {
+                .map(|e| crate::scheduler::trade::Evaluation {
                     worker: &e.candidate.worker_url,
                     local_hit: e.candidate.local_hit,
                     gpu_hit: e.candidate.gpu_hit.unwrap_or(0),
@@ -3215,13 +2614,13 @@ impl CostBook {
                     pending_uncached_before: e.pending_uncached_before,
                 })
                 .collect();
-            let selected = crate::scheduler::co_schedule::select(
+            let selected = crate::scheduler::trade::select(
                 &views,
                 threshold,
                 self.remaining_cost(margin, 0),
                 self.restore_cost_divisor.is_some(),
             );
-            let crate::scheduler::co_schedule::Selection {
+            let crate::scheduler::trade::Selection {
                 owner,
                 chosen,
                 has_owner,
@@ -3445,13 +2844,6 @@ impl CostBook {
             state.active_by_rid.insert(rid.clone(), id);
             state.used_rids.insert(rid.clone());
         }
-        if let Some(olp) = state.olp.as_mut() {
-            // The live index of the OLP queue; an OLP decision until its label.
-            olp.live_insert(&entry.worker_url, id, olp_row(&entry));
-            if let Some(label) = olp_label {
-                olp.record(id, label);
-            }
-        }
         if let (Some(changed), Some(key), Some(book)) =
             (p_changed, session, state.session_moves.as_mut())
         {
@@ -3660,19 +3052,6 @@ impl CostBook {
         } else if old == Status::Unknown {
             state.unknown.remove(&id);
         }
-        // OLP: an ended entry leaves the live index; a P-leg answered with
-        // success labels its OLP decision, any other end (also unknown) drops
-        // it.
-        if target == Status::Unknown || !target.active() {
-            let State { olp, entries, .. } = &mut *state;
-            if let Some(olp) = olp.as_mut() {
-                if !target.active() {
-                    olp.live_remove(&entries[&id].worker_url, id);
-                }
-                let success = target == Status::Finished && reason == PREFILL_SUCCESS_REASON;
-                olp.resolve(id, self.seconds(Instant::now()), success);
-            }
-        }
         // TRADE auto: the P's in-flight requests and the session. An emit
         // error here is recorded like any trace error (admission stops).
         if let Some((url, period)) = auto_status(state, id, target, reason, Instant::now()) {
@@ -3850,24 +3229,6 @@ impl CostBook {
                 .and_then(|v| v.checked_add(*cost))
                 .ok_or("prefill progress cost overflow or underflow")?;
         }
-        // OLP: the chunk work of this reply, priced by the structural model:
-        // decreases of entries listed before (a first listing may only
-        // correct the cache hit) and first listings at 0 (all computed), at
-        // h = input - old, with the restore while the entry had no update.
-        let olp_chunks = state.olp.as_ref().map(|olp| {
-            let params = olp.params();
-            let mut work_s = 0.0;
-            let mut tok = 0u64;
-            for &(id, old, new, ..) in &updates {
-                let entry = &state.entries[&id];
-                if new < old && (entry.acknowledged || new == 0) {
-                    let before = entry.input_tokens.saturating_sub(old);
-                    work_s += params.work(old - new, before, !entry.seen_engine_progress);
-                    tok += old - new;
-                }
-            }
-            (work_s, tok)
-        });
         self.emit(
             &mut state,
             json!({
@@ -3976,25 +3337,6 @@ impl CostBook {
             let entry = state.entries.get_mut(id).expect("active entry");
             entry.last_progress_seen = Some(sent_at);
         }
-        // OLP incremental queue: every listed entry may have launched its
-        // first chunk or changed its remaining work (both only here); its
-        // row in its P's sums follows (unchanged rows cost nothing).
-        if let State {
-            olp: Some(olp),
-            entries,
-            ..
-        } = &mut *state
-        {
-            if olp.config().incremental {
-                for id in &listed {
-                    olp.live_update(*id, olp_row(&entries[id]));
-                }
-            }
-        }
-        if let (Some((work_s, tok)), Some(olp)) = (olp_chunks, state.olp.as_mut()) {
-            let t_s = self.seconds(sent_at);
-            olp.observe_poll(worker_url, t_s, &progress.epoch, &engine_load, work_s, tok);
-        }
         state.progress.insert(
             worker_url.into(),
             ProgressCursor {
@@ -4089,7 +3431,7 @@ impl CostBook {
             value["host_room_invalid"] = json!(book.invalid);
             value["host_room_missing"] = json!(book.missing);
             if let Some(phi) = &book.phi {
-                // --co-schedule-trade-pull-price phi only: phi of every P with
+                // --trade-pull-price phi only: phi of every P with
                 // a section.
                 let now = Instant::now();
                 let rows: serde_json::Map<String, Value> = book
@@ -4146,10 +3488,6 @@ impl CostBook {
                 "uncredited": auto.uncredited,
             });
         }
-        if let Some(olp) = state.olp.as_ref() {
-            // OLP or its shadow only: the gate's warm-up inputs and results.
-            value["olp"] = olp.snapshot_value(self.seconds(Instant::now()));
-        }
         if let Err(error) = self.emit(&mut state, value.clone()) {
             value["fatal"] = json!(error);
             value["admission_blocked"] = json!(true);
@@ -4161,7 +3499,7 @@ impl CostBook {
 
 /// The global waiting queue (`--co-schedule-global-queue`).
 impl CostBook {
-    /// Pull price phi (`--co-schedule-trade-pull-price phi`) of one decision
+    /// Pull price phi (`--trade-pull-price phi`) of one decision
     /// at `decided_at`: the base lambda_q (the copy price auto before the
     /// clamp; the fallback price while it falls back), its source, tau, the
     /// floor min of lambda_P (the auto clamp minimum), and phi of each P of
@@ -4170,13 +3508,13 @@ impl CostBook {
     /// so the walk and the reservation see the same prices.
     fn phi_prices(
         state: &State,
-        configured: crate::scheduler::co_schedule::TradeParams,
+        configured: crate::scheduler::trade::TradeParams,
         auto: Option<&TradeAutoParts>,
-        params: &crate::scheduler::co_schedule::TradeParams,
+        params: &crate::scheduler::trade::TradeParams,
         urls: &[&str],
         decided_at: Instant,
     ) -> Option<PhiPrices> {
-        if configured.pull_price != crate::scheduler::co_schedule::TradePullPrice::Phi {
+        if configured.pull_price != crate::scheduler::trade::TradePullPrice::Phi {
             return None;
         }
         let (base, base_source) = match auto.map(|a| &a.1) {
@@ -4191,10 +3529,10 @@ impl CostBook {
             None => (params.copy_lambda, "fixed"),
         };
         // The floor of lambda_P: the auto clamp minimum
-        // (--co-schedule-trade-copy-lambda-min).
+        // (--trade-copy-lambda-min).
         let floor = match configured.copy_lambda_mode {
-            crate::scheduler::co_schedule::TradeLambdaMode::Auto { min, .. } => min,
-            crate::scheduler::co_schedule::TradeLambdaMode::Fixed => 0.0,
+            crate::scheduler::trade::TradeLambdaMode::Auto { min, .. } => min,
+            crate::scheduler::trade::TradeLambdaMode::Fixed => 0.0,
         };
         let book = state.host_room.as_ref().and_then(|b| b.phi.as_ref());
         let tau_s = book.map_or(configured.auto_tau_s, |b| b.tau_s);
@@ -4215,7 +3553,7 @@ impl CostBook {
     /// Fixed modes resolve to the configured parameters bit for bit.
     fn trade_ctx(
         state: &mut State,
-        configured: crate::scheduler::co_schedule::TradeParams,
+        configured: crate::scheduler::trade::TradeParams,
         urls: &[&str],
         decided_at: Instant,
     ) -> TradeDecisionCtx {
@@ -4233,10 +3571,7 @@ impl CostBook {
         // their decision and trace are the same as before.
         let auto = if configured.is_auto() {
             let book = state.trade_auto.get_or_insert_with(|| {
-                crate::scheduler::co_schedule::TradeAutoState::new(
-                    decided_at,
-                    configured.auto_tau_s,
-                )
+                crate::scheduler::trade::TradeAutoState::new(decided_at, configured.auto_tau_s)
             });
             book.observe_pool(urls.iter().copied(), decided_at);
             let measured = book.inputs(decided_at, urls, configured.auto_session_idle_s);
@@ -4311,7 +3646,7 @@ impl CostBook {
     /// `Err` only when admission is stopped (trace failure).
     pub fn gwq_step(
         self: &Arc<Self>,
-        configured: crate::scheduler::co_schedule::TradeParams,
+        configured: crate::scheduler::trade::TradeParams,
         held: &[GwqHeld<'_>],
         args: &GwqStepArgs<'_>,
     ) -> Result<GwqStep, String> {
@@ -4492,14 +3827,7 @@ impl CostBook {
             outstanding: &outstanding,
             last: tie_last.as_deref(),
         });
-        let walked = walk_with(
-            args.mode,
-            &ctx.params,
-            args.urls,
-            &rows,
-            &inputs,
-            tie.as_ref(),
-        );
+        let walked = walk_with(&ctx.params, args.urls, &rows, &inputs, tie.as_ref());
         let queue_tokens: u128 = walked
             .plain
             .iter()
@@ -4642,7 +3970,6 @@ impl CostBook {
                     release_candidates,
                     valid,
                     placement,
-                    None,
                     h.session,
                     None,
                     Some(reserve),
@@ -4892,7 +4219,7 @@ fn auto_status(
     target: Status,
     reason: &str,
     now: Instant,
-) -> Option<(String, crate::scheduler::co_schedule::TradeAutoBusyPeriod)> {
+) -> Option<(String, crate::scheduler::trade::TradeAutoBusyPeriod)> {
     let entry = state.entries.get_mut(&id)?;
     if !entry.auto.tracked || entry.auto.done {
         return None;
@@ -4933,7 +4260,7 @@ fn auto_progress(
     id: u64,
     remaining: u64,
     now: Instant,
-) -> Option<(String, crate::scheduler::co_schedule::TradeAutoBusyPeriod)> {
+) -> Option<(String, crate::scheduler::trade::TradeAutoBusyPeriod)> {
     let entry = state.entries.get_mut(&id)?;
     if !entry.auto.tracked || entry.auto.done || !entry.auto.in_flight {
         return None;
@@ -4953,10 +4280,7 @@ fn auto_progress(
 }
 
 /// The trace event of a P whose TRADE auto busy period ended.
-fn p_empty_event(
-    worker_url: &str,
-    period: crate::scheduler::co_schedule::TradeAutoBusyPeriod,
-) -> Value {
+fn p_empty_event(worker_url: &str, period: crate::scheduler::trade::TradeAutoBusyPeriod) -> Value {
     json!({
         "event": "trade_auto_p_empty",
         "worker_url": worker_url,
@@ -4968,7 +4292,6 @@ fn p_empty_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::olp::{strip_olp_keys, OlpConfig, OlpParams, OlpScaleSource};
     use std::sync::Barrier;
 
     fn candidate(url: &str, hit: u64) -> Candidate {
@@ -5003,8 +4326,8 @@ mod tests {
         }
     }
 
-    fn trade(lambda: f64, exclude_unlaunched: bool) -> crate::scheduler::co_schedule::TradeParams {
-        crate::scheduler::co_schedule::TradeParams {
+    fn trade(lambda: f64, exclude_unlaunched: bool) -> crate::scheduler::trade::TradeParams {
+        crate::scheduler::trade::TradeParams {
             copy_lambda: lambda,
             exclude_unlaunched,
             ..Default::default()
@@ -5189,14 +4512,14 @@ mod tests {
     /// recorded and the trace has no new key.
     #[test]
     fn trade_hol_records_placements_and_traces_its_terms() {
-        let hol = |mu: f64| crate::scheduler::co_schedule::TradeParams {
+        let hol = |mu: f64| crate::scheduler::trade::TradeParams {
             hol_weight: mu,
             ..trade(0.0, false)
         };
         let book = CostBook::new_uncached(None).unwrap();
         // b holds 12,000 tokens from a placement outside TRADE (not recorded).
         let _busy = uncached(&book, "busy", "b", 12_000);
-        let pick = |rid: &str, params: crate::scheduler::co_schedule::TradeParams| {
+        let pick = |rid: &str, params: crate::scheduler::trade::TradeParams| {
             book.reserve_trade(
                 10_000,
                 Some(rid.into()),
@@ -5262,8 +4585,8 @@ mod tests {
         drop(r1);
     }
 
-    fn auto_trade(fallback: f64) -> crate::scheduler::co_schedule::TradeParams {
-        use crate::scheduler::co_schedule::{TradeAutoQ, TradeLambdaMode, TradeParams};
+    fn auto_trade(fallback: f64) -> crate::scheduler::trade::TradeParams {
+        use crate::scheduler::trade::{TradeAutoQ, TradeLambdaMode, TradeParams};
         TradeParams {
             copy_lambda: fallback,
             copy_lambda_mode: TradeLambdaMode::Auto {
@@ -5273,317 +4596,6 @@ mod tests {
                 max: 1000.0,
             },
             ..Default::default()
-        }
-    }
-
-    /// TRADE auto: the P of an entry has one more in-flight request from its
-    /// dispatch until its prefill ends, released once on every path: 0
-    /// remaining work in a snapshot, a success or error response, a
-    /// transport error (unknown) with a late finish, a drop after dispatch.
-    /// A rollback before dispatch releases only the session. Only a
-    /// completed prefill credits tokens: the larger of the estimate and the
-    /// largest remaining work seen.
-    #[test]
-    fn trade_auto_ledger_counts_each_request_once_on_every_path() {
-        let book = CostBook::new_uncached(None).unwrap();
-        // 20,000 tokens with 8,000 cached on a: an estimate of 12,000 uncached.
-        let pick = |rid: &str, session: Option<&str>| {
-            book.reserve_trade_session(
-                20_000,
-                Some(rid.into()),
-                vec![candidate("a", 8_000)],
-                auto_trade(18.4),
-                None,
-                session,
-            )
-            .unwrap()
-            .1
-        };
-        let in_flight = || {
-            book.state
-                .lock()
-                .trade_auto
-                .as_ref()
-                .unwrap()
-                .in_flight("a")
-        };
-        let agent = crate::scheduler::co_schedule::trade_session_hash("0/agent");
-        let session = || {
-            book.state
-                .lock()
-                .trade_auto
-                .as_ref()
-                .unwrap()
-                .session_in_flight(agent)
-        };
-        let counts = || {
-            let st = book.state.lock();
-            let auto = st.trade_auto.as_ref().unwrap();
-            (auto.credited, auto.credited_tokens, auto.uncredited)
-        };
-        // Rolled back before dispatch: the P never counts; the session is released.
-        let r = pick("r1", Some("0/agent"));
-        assert_eq!((in_flight(), session()), (Some(0), Some(1)));
-        drop(r);
-        assert_eq!((in_flight(), session()), (Some(0), Some(0)));
-        // Dispatched (twice: idempotent), 15,000 remaining seen (a cache
-        // miss), then 0: released at the 0 and credited 15,000; the later P
-        // response changes nothing.
-        let t = Instant::now();
-        let at = |ms: u64| t + std::time::Duration::from_millis(ms);
-        let mut r = pick("r2", Some("0/agent"));
-        r.mark_dispatched().unwrap();
-        r.mark_dispatched().unwrap();
-        assert_eq!((in_flight(), session()), (Some(1), Some(1)));
-        book.apply_progress("a", progress(1, &[("r2", 15_000)]), json!({}), at(1))
-            .unwrap();
-        assert_eq!(in_flight(), Some(1));
-        book.apply_progress("a", progress(2, &[("r2", 0)]), json!({}), at(2))
-            .unwrap();
-        assert_eq!((in_flight(), session()), (Some(0), Some(0)));
-        assert_eq!(counts(), (1, 15_000, 0));
-        r.finish("prefill_response_success").unwrap();
-        assert_eq!((in_flight(), counts()), (Some(0), (1, 15_000, 0)));
-        // A success response without a 0 snapshot credits the estimate.
-        let mut r = pick("r3", None);
-        r.mark_dispatched().unwrap();
-        r.finish("prefill_response_success").unwrap();
-        assert_eq!((in_flight(), counts()), (Some(0), (2, 27_000, 0)));
-        // An error response releases without credit.
-        let mut r = pick("r4", None);
-        r.mark_dispatched().unwrap();
-        r.finish("prefill_response_error").unwrap();
-        assert_eq!((in_flight(), counts()), (Some(0), (2, 27_000, 1)));
-        // A transport error (unknown) releases; its late finish does not again.
-        let mut r = pick("r5", None);
-        r.mark_dispatched().unwrap();
-        r.mark_unknown("prefill_transport_error: reset").unwrap();
-        assert_eq!((in_flight(), counts()), (Some(0), (2, 27_000, 2)));
-        r.finish("prefill_response_success").unwrap();
-        assert_eq!((in_flight(), counts()), (Some(0), (2, 27_000, 2)));
-        // A drop after dispatch (unknown) releases the P and the session.
-        let mut r = pick("r6", Some("0/agent"));
-        r.mark_dispatched().unwrap();
-        assert_eq!((in_flight(), session()), (Some(1), Some(1)));
-        drop(r);
-        assert_eq!((in_flight(), session()), (Some(0), Some(0)));
-        assert_eq!(counts(), (2, 27_000, 3));
-        // Two overlapping requests: the P is empty only after both.
-        let (mut x, mut y) = (pick("r7", None), pick("r8", None));
-        x.mark_dispatched().unwrap();
-        y.mark_dispatched().unwrap();
-        assert_eq!(in_flight(), Some(2));
-        x.finish("prefill_response_success").unwrap();
-        assert_eq!(in_flight(), Some(1));
-        y.finish("prefill_response_success").unwrap();
-        assert_eq!(in_flight(), Some(0));
-    }
-
-    /// TRADE auto: the first decision is in start-up (the fallback 18.4 and
-    /// every auto key). With a 10-minute history, lambda = clamp(q x R /
-    /// R_hat) from the traced q and R_hat, and the candidates pay it.
-    #[test]
-    fn trade_auto_decision_resolves_lambda_and_traces_its_inputs() {
-        let book = CostBook::new_uncached(None).unwrap();
-        let decide = |rid: &str| {
-            let (_, r, d) = book
-                .reserve_trade_session(
-                    110_000,
-                    Some(rid.into()),
-                    vec![candidate("a", 100_000), pulling("b", 0, 100_000)],
-                    auto_trade(18.4),
-                    None,
-                    Some("0/agent-1"),
-                )
-                .unwrap();
-            drop(r);
-            d
-        };
-        let d = decide("s1");
-        assert_eq!(d["lambda_mode"], "auto");
-        assert_eq!(d["q_mode"], "sat");
-        assert_eq!(d["fallback_reason"], "startup");
-        assert_eq!(d["copy_lambda_used"], 18.4);
-        assert_eq!(d["copy_lambda"], 18.4);
-        assert_eq!(d["copy_lambda_fallback"], 18.4);
-        assert!(d["lambda_raw"].is_null());
-        assert_eq!(d["n_p"], 2);
-        assert_eq!(d["rate_mode"], "fixed");
-        assert_eq!(d["rate_used"], 13_500.0);
-        assert_eq!(d["session_known"], true);
-        assert_eq!(d["wait"], "ledger", "auto adds the later-option keys");
-        for key in [
-            "q",
-            "busy",
-            "inflight_mean",
-            "n_active",
-            "r_hat",
-            "auto_elapsed_s",
-            "auto_tau_s",
-            "session_idle_s",
-            "lambda_mu",
-            "lambda_min",
-            "lambda_max",
-            "rate_fallback",
-            "rate_fallback_reason",
-        ] {
-            assert!(d.get(key).is_some(), "{key}: {d}");
-        }
-        for row in d["candidates"].as_array().unwrap() {
-            for key in [
-                "auto_in_flight",
-                "auto_busy",
-                "auto_inflight_mean",
-                "auto_rate_tokens_per_s",
-            ] {
-                assert!(row.get(key).is_some(), "{key}: {row}");
-            }
-        }
-        let copy_b = d["candidates"][1]["copy_tokens"].as_f64().unwrap();
-        assert!((copy_b - 1_840_000.0).abs() < 1e-6, "{d}");
-        assert_eq!(d["chosen"], "a");
-        // A 10-minute history: a and b busy 3 s of every 4 s at 10,000
-        // tokens per busy second; 60 sessions with an event 5 s ago.
-        let Some(t0) = Instant::now().checked_sub(std::time::Duration::from_secs(600)) else {
-            return; // the monotonic clock is younger than 10 minutes
-        };
-        let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
-        let mut auto = crate::scheduler::co_schedule::TradeAutoState::new(t0, 120.0);
-        auto.observe_pool(["a", "b"], t0);
-        let mut t = 0.0;
-        while t < 590.0 {
-            for p in ["a", "b"] {
-                auto.dispatched(p, at(t));
-                auto.prefill_done(p, Some(30_000), at(t + 3.0));
-            }
-            t += 4.0;
-        }
-        for i in 0..60u64 {
-            auto.session_started(i, at(594.0));
-            auto.session_finished(i, at(595.0));
-        }
-        book.state.lock().trade_auto = Some(auto);
-        let d = decide("s2");
-        assert!(d["fallback_reason"].is_null(), "{d}");
-        assert_eq!(d["n_active"], 60);
-        let q = d["q"].as_f64().unwrap();
-        let busy = d["busy"].as_f64().unwrap();
-        let r_hat = d["r_hat"].as_f64().unwrap();
-        let lambda = d["copy_lambda_used"].as_f64().unwrap();
-        assert!((q - 30.0 * busy).abs() < 1e-9, "{d}");
-        // The same operations as TradeParams::resolved (mu = 1).
-        let raw = q * (13_500.0 / r_hat);
-        assert_eq!(d["lambda_raw"], raw, "{d}");
-        assert_eq!(lambda, raw.clamp(4.6, 1000.0));
-        assert_eq!(d["copy_lambda"], lambda);
-        assert!(lambda > 15.0 && lambda < 45.0, "{d}");
-        let copy_b = d["candidates"][1]["copy_tokens"].as_f64().unwrap();
-        assert!((copy_b - lambda * 100_000.0).abs() < 1e-6, "{d}");
-    }
-
-    /// Fixed TRADE creates no auto state, key or event. Auto adds the
-    /// snapshot summary and one `trade_auto_p_empty` event per busy period,
-    /// and END removes a session from N_active at once.
-    #[test]
-    fn trade_auto_end_snapshot_and_fixed_mode_untouched() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("fixed.jsonl");
-        let book = CostBook::new_uncached(Some(&path)).unwrap();
-        let (_, mut r, d) = book
-            .reserve_trade_session(
-                10_000,
-                Some("f1".into()),
-                vec![candidate("a", 0)],
-                trade(18.4, false),
-                None,
-                Some("0/agent"),
-            )
-            .unwrap();
-        assert!(
-            d.get("lambda_mode").is_none() && d.get("wait").is_none(),
-            "{d}"
-        );
-        r.mark_dispatched().unwrap();
-        book.apply_progress("a", progress(1, &[("f1", 0)]), json!({}), Instant::now())
-            .unwrap();
-        r.finish("prefill_response_success").unwrap();
-        assert!(book.state.lock().trade_auto.is_none());
-        assert!(book.snapshot().get("trade_auto").is_none());
-        assert!(!book.trade_auto_end_session("0/agent"));
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("trade_auto"), "{text}");
-
-        let path = tmp.path().join("auto.jsonl");
-        let book = CostBook::new_uncached(Some(&path)).unwrap();
-        let decide = |rid: &str, session: Option<&str>| {
-            book.reserve_trade_session(
-                10_000,
-                Some(rid.into()),
-                vec![candidate("a", 0), candidate("b", 0)],
-                auto_trade(18.4),
-                None,
-                session,
-            )
-            .unwrap()
-        };
-        let (_, r1, _) = decide("s1", Some("0/agent-1"));
-        let (_, r2, _) = decide("s2", Some("0/agent-2"));
-        drop((r1, r2));
-        let (_, r, d) = decide("probe1", None);
-        assert_eq!(d["n_active"], 2, "{d}");
-        assert_eq!(d["session_known"], false);
-        drop(r);
-        assert!(book.trade_auto_end_session("0/agent-1"));
-        assert!(!book.trade_auto_end_session("0/agent-1"));
-        let (_, r, d) = decide("probe2", None);
-        assert_eq!(d["n_active"], 1, "{d}");
-        drop(r);
-        // A dispatched request ends its P's busy period at the P response.
-        let (selected, mut r, _) = decide("busy", None);
-        r.mark_dispatched().unwrap();
-        r.finish("prefill_response_success").unwrap();
-        let snapshot = book.snapshot();
-        let auto = &snapshot["trade_auto"];
-        assert_eq!(auto["credited"], 1, "{snapshot}");
-        assert_eq!(auto["credited_tokens"], 10_000);
-        assert_eq!(auto["workers"].as_array().unwrap().len(), 2);
-        assert_eq!(auto["workers"][0]["in_flight"], 0);
-        let text = std::fs::read_to_string(&path).unwrap();
-        let empties: Vec<Value> = text
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .filter(|event| event["event"] == "trade_auto_p_empty")
-            .collect();
-        assert_eq!(empties.len(), 1, "{text}");
-        assert_eq!(empties[0]["worker_url"], selected.worker_url.as_str());
-        assert_eq!(empties[0]["busy_period_requests"], 1);
-        assert!(empties[0]["busy_period_s"].as_f64().unwrap() >= 0.0);
-    }
-
-    fn eft_context(views: &[(&str, Value, std::time::Duration)]) -> TradeEftContext {
-        let model = crate::eft_cheap::EftModel::from_json(
-            &json!({"models": {"augmented": {"launch_interval": {"global":
-                {"coefficients": [0.05, 1e-5, 0.0, 0.004, 1e-7, 0.0]}}}},
-                "eft": {"tau_s": 0.02}}),
-            Some("model-sha".into()),
-        )
-        .unwrap();
-        TradeEftContext {
-            model: Arc::new(model),
-            knobs: crate::eft_cheap::EftKnobs::default(),
-            views: views
-                .iter()
-                .map(|(url, raw, age)| {
-                    let sent = Instant::now().checked_sub(*age).unwrap();
-                    let snapshot = RoutingSnapshot {
-                        view: crate::eft_cheap::SnapshotView::parse(raw, 1, None),
-                        poll_sent: sent,
-                        poll_received: sent,
-                        e3: None,
-                    };
-                    (url.to_string(), Arc::new(snapshot))
-                })
-                .collect(),
         }
     }
 
@@ -5604,274 +4616,6 @@ mod tests {
             "policy": {"page_size": 64, "chunk_tokens": 8192, "schedule_policy": "fcfs"},
             "waiting": rows, "bootstrap": [],
             "admission_resources": {"park_gate_closed_last_scan": false}})
-    }
-
-    fn eft_trade(lambda: f64) -> crate::scheduler::co_schedule::TradeParams {
-        crate::scheduler::co_schedule::TradeParams {
-            copy_lambda: lambda,
-            wait: crate::scheduler::co_schedule::TradeWait::Eft,
-            ..Default::default()
-        }
-    }
-
-    /// wait = eft. Owner `a` has an empty ledger but its engine queue holds
-    /// five 65,536-token rows (D = 5.4368 s); `b` is idle and pulls 18,000
-    /// tokens. The ledger keeps `a`; EFT moves to `b`. The next decision
-    /// counts the reserved `r1` (not in b's snapshot) in b's drain.
-    #[test]
-    fn trade_eft_wait_prices_the_engine_queue_and_unseen_router_rows() {
-        let book = CostBook::new_uncached(None).unwrap();
-        let ctx = eft_context(&[
-            ("a", routing_snapshot(5, 65_536), std::time::Duration::ZERO),
-            ("b", routing_snapshot(0, 0), std::time::Duration::ZERO),
-        ]);
-        let candidates = || vec![candidate("a", 18_000), pulling("b", 0, 18_000)];
-        // Ledger wait: the owner looks idle.
-        let (selected, r0, decision) = book
-            .reserve_trade(20_000, Some("l0".into()), candidates(), trade(0.0, false))
-            .unwrap();
-        assert_eq!(selected.worker_url, "a");
-        assert!(
-            decision.get("wait").is_none(),
-            "ledger trace keeps the first-version keys"
-        );
-        assert!(decision["candidates"][0].get("wait_s").is_none());
-        drop(r0);
-        let (selected, r1, decision) = book
-            .reserve_trade_eft(
-                20_000,
-                Some("r1".into()),
-                candidates(),
-                eft_trade(0.0),
-                Some(&ctx),
-            )
-            .unwrap();
-        assert_eq!(selected.worker_url, "b");
-        assert_eq!(decision["wait"], "eft");
-        assert_eq!(decision["eft_model_sha256"], "model-sha");
-        assert_eq!(decision["wait_fallbacks"], 0);
-        let a = &decision["candidates"][0];
-        assert_eq!(a["wait_source"], "eft");
-        let wait = a["wait_s"].as_f64().unwrap();
-        assert!(wait > 5.3 && wait <= 5.4368 + 1e-9, "{wait}");
-        assert_eq!(a["eft_outstanding_rows"], 0);
-        // S_w of a: u 2,016, host restore 17,984, one pass.
-        let svc = 1e-5 * 2_016.0 + 1e-7 * 17_984.0 + 0.004 + 0.05;
-        assert!((a["service_s"].as_f64().unwrap() - svc).abs() < 1e-12);
-        let b = &decision["candidates"][1];
-        assert_eq!(b["wait_s"], 0.0);
-        assert_eq!(b["pulled_tokens"], 18_000);
-        assert_eq!(b["eft_shape"]["s"], 17_984);
-        // r1 is reserved on b and not in b's snapshot: it is outstanding.
-        let (_, r2, decision) = book
-            .reserve_trade_eft(
-                20_000,
-                Some("r2".into()),
-                candidates(),
-                eft_trade(0.0),
-                Some(&ctx),
-            )
-            .unwrap();
-        let b = &decision["candidates"][1];
-        assert_eq!(b["eft_outstanding_rows"], 1);
-        assert_eq!(b["eft_outstanding_tokens"], 2_000);
-        // W(u 2,000, q 18,000, s 18,000 pulled) + one pass.
-        let expected = 1e-5 * 2_000.0 + 2e-7 * 18_000.0 + 0.004 + 0.05;
-        assert!(
-            (b["wait_s"].as_f64().unwrap() - expected).abs() < 1e-9,
-            "{b}"
-        );
-        drop((r1, r2));
-    }
-
-    /// Missing, stale and old snapshots use the ledger terms for that P and
-    /// are counted by reason; without a model context every P falls back.
-    #[test]
-    fn trade_eft_falls_back_to_the_ledger_per_worker_and_counts_it() {
-        let book = CostBook::new_uncached(None).unwrap();
-        let mut stale = routing_snapshot(0, 0);
-        stale["stale"] = json!(true);
-        let ctx = eft_context(&[
-            ("a", stale, std::time::Duration::ZERO),
-            (
-                "b",
-                routing_snapshot(0, 0),
-                std::time::Duration::from_secs(2),
-            ),
-        ]);
-        let pick = |rid: &str, ctx: Option<&TradeEftContext>| {
-            let (_, r, decision) = book
-                .reserve_trade_eft(
-                    1_000,
-                    Some(rid.into()),
-                    vec![candidate("a", 0), candidate("b", 0), candidate("c", 0)],
-                    eft_trade(9.2),
-                    ctx,
-                )
-                .unwrap();
-            drop(r);
-            decision
-        };
-        let d = pick("q1", Some(&ctx));
-        let reasons: Vec<_> = (0..3)
-            .map(|i| d["candidates"][i]["wait_fallback_reason"].clone())
-            .collect();
-        assert_eq!(
-            reasons,
-            vec![json!("stale"), json!("view_too_old"), json!("no_view")]
-        );
-        // The fallback keeps the scale of the EFT terms: S_w is the step
-        // model's (1,000 tokens, one pass), not u / R.
-        let svc = 1e-5 * 1_000.0 + 0.004 + 0.05;
-        for i in 0..3 {
-            let row = &d["candidates"][i];
-            assert_eq!(row["wait_source"], "ledger_fallback");
-            assert_eq!(row["wait_s"], 0.0, "empty ledger");
-            assert!(
-                (row["service_s"].as_f64().unwrap() - svc).abs() < 1e-12,
-                "{row}"
-            );
-            assert!((row["trade_cost"].as_f64().unwrap() - 13_500.0 * svc).abs() < 1e-6);
-        }
-        assert_eq!(d["wait_fallbacks"], 3);
-        assert_eq!(d["wait_fallback_counts"]["no_view"], 1);
-        // Without a model every P uses the first-version ledger terms.
-        let d = pick("q2", None);
-        assert_eq!(d["candidates"][0]["wait_fallback_reason"], "no_model");
-        let service = d["candidates"][0]["service_s"].as_f64().unwrap();
-        assert!((service - 1_000.0 / 13_500.0).abs() < 1e-12);
-        assert_eq!(d["candidates"][0]["trade_cost"], 1_000.0);
-        assert_eq!(d["wait_fallback_counts"]["no_model"], 3);
-        assert_eq!(
-            d["wait_fallback_counts"]["stale"], 1,
-            "counts are cumulative"
-        );
-        assert!(d["eft_model_sha256"].is_null());
-    }
-
-    /// A P without a usable snapshot keeps the scale of the EFT terms: B_w is
-    /// the step-model work of all its active router rows (an unknown one too,
-    /// as in the ledger), S_w the step-model service.
-    #[test]
-    fn trade_eft_fallback_prices_the_ledger_rows_with_the_step_model() {
-        let book = CostBook::new_uncached(None).unwrap();
-        let (_, mut x) = book
-            .reserve_uncached(8_192, Some("x".into()), vec![candidate("a", 0)], 12288)
-            .unwrap();
-        x.mark_dispatched().unwrap();
-        let (_, mut y) = book
-            .reserve_uncached(1_000, Some("y".into()), vec![candidate("a", 0)], 12288)
-            .unwrap();
-        y.mark_dispatched().unwrap();
-        y.mark_unknown("prefill_transport_error").unwrap();
-        // b has a usable, empty snapshot; a has none.
-        let ctx = eft_context(&[("b", routing_snapshot(0, 0), std::time::Duration::ZERO)]);
-        let (selected, r, decision) = book
-            .reserve_trade_eft(
-                2_000,
-                Some("q".into()),
-                vec![candidate("a", 0), candidate("b", 0)],
-                eft_trade(0.0),
-                Some(&ctx),
-            )
-            .unwrap();
-        let a = &decision["candidates"][0];
-        assert_eq!(a["wait_source"], "ledger_fallback");
-        assert_eq!(a["wait_fallback_reason"], "no_view");
-        assert_eq!(a["eft_outstanding_rows"], 2);
-        assert_eq!(a["eft_outstanding_tokens"], 9_192);
-        assert!(a["eft_degraded"].is_null());
-        // W(8,192) + W(1,000) + two passes (8,192 + 1,024 page-rounded tokens).
-        let wait = 1e-5 * 8_192.0 + 0.004 + 1e-5 * 1_000.0 + 0.004 + 0.05 * 2.0;
-        assert!((a["wait_s"].as_f64().unwrap() - wait).abs() < 1e-9, "{a}");
-        let svc = 1e-5 * 2_000.0 + 0.004 + 0.05;
-        assert!(
-            (a["service_s"].as_f64().unwrap() - svc).abs() < 1e-12,
-            "{a}"
-        );
-        assert!((a["trade_cost"].as_f64().unwrap() - 13_500.0 * (wait + svc)).abs() < 1e-6);
-        let b = &decision["candidates"][1];
-        assert_eq!(b["wait_source"], "eft");
-        assert_eq!(b["wait_s"], 0.0);
-        assert_eq!(b["eft_cold_rows"], 0);
-        assert_eq!(selected.worker_url, "b");
-        drop((r, x, y));
-    }
-
-    /// wait = eft. The engine adds a request to its in-flight request queue
-    /// only after the result of its last chunk; while that chunk is in the
-    /// in-flight pass the request is in no snapshot row, and the progress
-    /// reports the chunk as remaining work. R0 prices that pass, so the
-    /// request is not also an outstanding row (unless R0 is unknown). An
-    /// unknown entry is left to the snapshot. A request launched after the
-    /// snapshot is outstanding and priced as started (no host restore); a
-    /// request in transit at the router's estimate.
-    #[test]
-    fn trade_eft_leaves_out_requests_in_the_in_flight_pass() {
-        for (launch_age, rows, pass_rows, tokens) in
-            [(json!(0.0), 2, 1, 9_000), (Value::Null, 3, 0, 11_000)]
-        {
-            let book = CostBook::new_uncached(None).unwrap();
-            let reserve = |rid: &str, n: u64, hit: u64| {
-                let (_, mut r) = book
-                    .reserve_uncached(n, Some(rid.into()), vec![candidate("a", hit)], 12288)
-                    .unwrap();
-                r.mark_dispatched().unwrap();
-                r
-            };
-            // fin: its last chunk (2,000 tokens) is in the in-flight pass.
-            let fin = reserve("fin", 10_000, 0);
-            // race: launched after the snapshot; 6,000 of 14,192 tokens left.
-            let race = reserve("race", 14_192, 4_096);
-            // lost: transport error after its first chunk launched.
-            let mut lost = reserve("lost", 4_000, 0);
-            // transit: dispatched, not in the engine yet.
-            let transit = reserve("transit", 3_000, 0);
-            book.apply_progress(
-                "a",
-                progress(1, &[("fin", 2_000), ("race", 6_000), ("lost", 1_000)]),
-                json!({}),
-                Instant::now(),
-            )
-            .unwrap();
-            lost.mark_unknown("prefill_transport_error").unwrap();
-            let mut raw = routing_snapshot(0, 0);
-            raw["inflight_batches"] = json!([{"forward_iter": 9, "launch_age_s": launch_age,
-                "status": "pending", "request_ids": ["fin"], "omitted_requests": 0,
-                "features": {"new_tokens": 2_000, "attention_pairs": 0, "batch_size": 1,
-                    "host_restore_tokens": 0, "storage_restore_tokens": 0}}]);
-            let ctx = eft_context(&[("a", raw, std::time::Duration::ZERO)]);
-            let (_, r, decision) = book
-                .reserve_trade_eft(
-                    1_000,
-                    Some("new".into()),
-                    vec![candidate("a", 0)],
-                    eft_trade(0.0),
-                    Some(&ctx),
-                )
-                .unwrap();
-            let a = &decision["candidates"][0];
-            assert_eq!(a["wait_source"], "eft");
-            assert_eq!(a["eft_outstanding_rows"], rows, "{a}");
-            assert_eq!(a["eft_inflight_pass_rows"], pass_rows, "{a}");
-            assert_eq!(a["eft_outstanding_tokens"], tokens, "{a}");
-            // W(u) = 1e-5 u + 0.004 here; race has no restore term (started).
-            let w = |u: f64| 1e-5 * u + 0.004;
-            let wait = a["wait_s"].as_f64().unwrap();
-            if launch_age.is_null() {
-                // No R0: fin counts as a row. Two passes of work ahead.
-                let expected = w(2_000.0) + w(6_000.0) + w(3_000.0) + 0.05 * 2.0;
-                assert!((wait - expected).abs() < 1e-9, "{wait} {expected}");
-            } else {
-                // R0 = 0.05 + 1e-5 x 2,000 + 0.004 = 0.074 s, less the view age.
-                let expected = 0.074 + w(6_000.0) + w(3_000.0) + 0.05 * 2.0;
-                assert!(
-                    wait <= expected + 1e-9 && wait > expected - 0.05,
-                    "{wait} {expected}"
-                );
-            }
-            drop((r, fin, race, lost, transit));
-        }
     }
 
     #[test]
@@ -6496,62 +5240,6 @@ mod tests {
         assert_eq!(rows[3]["entry"]["status"], "finished");
     }
 
-    /// A book made with a policy label writes `"policy"` on every trace row
-    /// (reserve, dispatch, engine progress, finish, snapshot). The other
-    /// constructors write no `policy` key.
-    #[test]
-    fn policy_label_on_every_trace_event() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("labelled.jsonl");
-        let book =
-            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", None)
-                .unwrap();
-        let (_, mut r, _) = book
-            .reserve_trade_session(
-                10_000,
-                Some("r1".into()),
-                vec![candidate("a", 0)],
-                trade(18.4, false),
-                None,
-                None,
-            )
-            .unwrap();
-        r.mark_dispatched().unwrap();
-        book.apply_progress("a", progress(1, &[("r1", 0)]), json!({}), Instant::now())
-            .unwrap();
-        r.finish("prefill_response_success").unwrap();
-        book.snapshot();
-        let read = |path: &Path| -> Vec<Value> {
-            std::fs::read_to_string(path)
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect()
-        };
-        let rows = read(&path);
-        let events: Vec<&str> = rows.iter().filter_map(|e| e["event"].as_str()).collect();
-        for event in [
-            "reserve",
-            "dispatched",
-            "prefill_progress",
-            "finished",
-            "snapshot",
-        ] {
-            assert!(events.contains(&event), "{event} missing: {events:?}");
-        }
-        for row in &rows {
-            assert_eq!(row["policy"], "symmetric_pd_cost_function", "{row}");
-            assert_eq!(row["schema"], "cost-balance.v1", "{row}");
-        }
-        let path = tmp.path().join("plain.jsonl");
-        let plain = CostBook::new_uncached(Some(&path)).unwrap();
-        let _r = uncached(&plain, "r2", "a", 1_000);
-        plain.snapshot();
-        let rows = read(&path);
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.get("policy").is_none()), "{rows:?}");
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn trace_io_failure_blocks_current_and_future_reservations() {
@@ -6630,7 +5318,7 @@ mod tests {
                 let snapshot = raw.as_ref().map(|raw| {
                     let sent = Instant::now().checked_sub(*age).unwrap();
                     Arc::new(RoutingSnapshot {
-                        view: crate::eft_cheap::SnapshotView::parse(raw, 1, None),
+                        view: crate::prefill_snapshot::SnapshotView::parse(raw, 1, None),
                         poll_sent: sent,
                         poll_received: sent,
                         e3: Some(Arc::new(crate::trade_e3::E3View::parse(raw))),
@@ -6662,10 +5350,10 @@ mod tests {
         }
     }
 
-    fn e3_trade(lambda: f64) -> crate::scheduler::co_schedule::TradeParams {
-        crate::scheduler::co_schedule::TradeParams {
+    fn e3_trade(lambda: f64) -> crate::scheduler::trade::TradeParams {
+        crate::scheduler::trade::TradeParams {
             copy_lambda: lambda,
-            wait: crate::scheduler::co_schedule::TradeWait::E3,
+            wait: crate::scheduler::trade::TradeWait::E3,
             ..Default::default()
         }
     }
@@ -7193,258 +5881,6 @@ mod tests {
         assert!(on.note_host_room_rejected("b"), "a new rejection is logged");
     }
 
-    /// Pull price phi: candidate P pays lambda_q x phi_P per pulled token.
-    /// lambda_q = the copy price auto before the clamp: the fallback 18.4
-    /// during start-up, then q (mu 1, R = R_hat). The owner `a` has 60k
-    /// pending; `b` evicted 300 class-0 and 100 class-1 host tokens (phi
-    /// 0.25), `c` evicted none (phi 0: a free pull), `d` has no host_room
-    /// data (it pays lambda_q, reason no_host_room). With the floor min 0
-    /// (the lambda = q words) the request moves to `c` with a pull, where the
-    /// lambda price keeps it on `a`. The lambda price writes no phi key, and
-    /// its copy charge is lambda x pulled. The decision's copy_lambda is the
-    /// price of the chosen P.
-    #[test]
-    fn trade_phi_prices_each_candidate_with_q_times_its_phi() {
-        use crate::scheduler::co_schedule::{TradeLambdaMode, TradePullPrice, TradeRateMode};
-        let Some(t0) = Instant::now().checked_sub(std::time::Duration::from_secs(600)) else {
-            return; // the monotonic clock is younger than 10 minutes
-        };
-        let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
-        let lambda_params = crate::scheduler::co_schedule::TradeParams {
-            rate_mode: TradeRateMode::Auto,
-            ..auto_trade(18.4)
-        };
-        let TradeLambdaMode::Auto { q, mu, max, .. } = lambda_params.copy_lambda_mode else {
-            unreachable!("auto_trade is auto");
-        };
-        let phi_params = crate::scheduler::co_schedule::TradeParams {
-            pull_price: TradePullPrice::Phi,
-            copy_lambda_mode: TradeLambdaMode::Auto {
-                q,
-                mu,
-                min: 0.0,
-                max,
-            },
-            ..lambda_params
-        };
-        let room =
-            |c0: u64, c1: u64| json!({"evicted_class0_tokens": c0, "evicted_class1_tokens": c1});
-        let candidates = || {
-            vec![
-                candidate("a", 100_000),
-                pulling("b", 0, 100_000),
-                pulling("c", 0, 100_000),
-                pulling("d", 0, 100_000),
-            ]
-        };
-        let decide = |book: &Arc<CostBook>, rid: &str, params| {
-            let (_, r, d) = book
-                .reserve_trade_session(
-                    110_000,
-                    Some(rid.into()),
-                    candidates(),
-                    params,
-                    None,
-                    Some("0/agent-1"),
-                )
-                .unwrap();
-            drop(r);
-            d
-        };
-        let setup = |phi: bool| {
-            let book = CostBook::new_uncached(None).unwrap();
-            book.enable_host_room();
-            if phi {
-                book.enable_host_room_phi(120.0);
-            }
-            for (url, first, second) in [("b", (0, 0), (300, 100)), ("c", (50, 50), (50, 50))] {
-                book.note_host_room(url, room(first.0, first.1), at(589.0));
-                book.note_host_room(url, room(second.0, second.1), at(590.0));
-            }
-            // A section without the counters: no phi for `a`.
-            book.note_host_room("a", json!({"free_tokens": 0}), at(590.0));
-            let mut busy = uncached(&book, "busy", "a", 60_000);
-            busy.mark_dispatched().unwrap();
-            (book, busy)
-        };
-
-        // The lambda price: one lambda (the fallback 18.4), no phi key.
-        let (book, _busy) = setup(false);
-        let d = decide(&book, "l1", lambda_params);
-        assert_eq!(d["chosen"], "a", "{d}");
-        for key in [
-            "pull_price",
-            "phi_lambda_base",
-            "phi_base_source",
-            "phi_tau_s",
-        ] {
-            assert!(d.get(key).is_none(), "{key}: {d}");
-        }
-        for row in d["candidates"].as_array().unwrap() {
-            assert!(row.get("copy_lambda").is_none() && row.get("phi_hat").is_none());
-        }
-        let copy_d = d["candidates"][3]["copy_tokens"].as_f64().unwrap();
-        assert!((copy_d - 18.4 * 100_000.0).abs() < 1e-6, "{d}");
-        assert!(book.snapshot().get("phi_by_p").is_none());
-
-        // The phi price during start-up: lambda_q = the fallback 18.4.
-        let (book, _busy) = setup(true);
-        let d = decide(&book, "p1", phi_params);
-        assert_eq!(d["pull_price"], "phi");
-        assert_eq!(d["phi_base_source"], "startup");
-        assert_eq!(d["phi_lambda_base"], 18.4);
-        assert_eq!(d["phi_tau_s"], 120.0);
-        let rows = d["candidates"].as_array().unwrap();
-        let col = |key: &str| rows.iter().map(|r| r[key].clone()).collect::<Vec<_>>();
-        assert_eq!(
-            col("phi_source"),
-            [
-                json!("no_host_room"),
-                json!("phi"),
-                json!("no_eviction"),
-                json!("no_host_room")
-            ]
-        );
-        let lambda_b = rows[1]["copy_lambda"].as_f64().unwrap();
-        assert!(
-            (rows[1]["phi_hat"].as_f64().unwrap() - 0.25).abs() < 1e-12,
-            "{d}"
-        );
-        assert!((lambda_b - 18.4 * 0.25).abs() < 1e-9, "{d}");
-        assert_eq!(rows[2]["copy_lambda"], 0.0);
-        assert_eq!(rows[2]["phi_hat"], 0.0);
-        assert_eq!(rows[3]["copy_lambda"], 18.4);
-        assert!(rows[3]["phi_hat"].is_null());
-        let copy_b = rows[1]["copy_tokens"].as_f64().unwrap();
-        assert!((copy_b - lambda_b * 100_000.0).abs() < 1e-6, "{d}");
-        assert_eq!(rows[2]["copy_tokens"], 0.0);
-        assert_eq!(d["chosen"], "c", "the free pull moves the request: {d}");
-        assert_eq!(d["pulled_tokens"], 100_000);
-        // The decision reports the price of the chosen P (and the auto one).
-        assert_eq!(d["copy_lambda"], 0.0, "{d}");
-        assert_eq!(d["copy_lambda_used"], 0.0, "{d}");
-        assert_eq!(d["copy_lambda_auto"], 18.4, "{d}");
-        assert_eq!(d["phi_lambda_min"], 0.0, "{d}");
-        assert_eq!(d["phi_floored"], false, "{d}");
-        assert!(rows.iter().all(|r| r["phi_floored"] == false), "{d}");
-        let snapshot = book.snapshot();
-        let phi_b = &snapshot["phi_by_p"]["b"];
-        assert!((phi_b["phi_hat"].as_f64().unwrap() - 0.25).abs() < 1e-12);
-        assert_eq!(snapshot["phi_by_p"]["c"]["source"], "no_eviction");
-        assert_eq!(snapshot["phi_by_p"]["a"]["source"], "no_host_room");
-        assert_eq!(snapshot["phi_invalid"], 1);
-
-        // After tau of auto history: lambda_q = q (mu 1, R = R_hat).
-        let mut auto = crate::scheduler::co_schedule::TradeAutoState::new(t0, 120.0);
-        auto.observe_pool(["a", "b", "c", "d"], t0);
-        let mut t = 0.0;
-        while t < 590.0 {
-            for p in ["a", "b", "c", "d"] {
-                auto.dispatched(p, at(t));
-                auto.prefill_done(p, Some(30_000), at(t + 3.0));
-            }
-            t += 4.0;
-        }
-        for i in 0..60u64 {
-            auto.session_started(i, at(594.0));
-            auto.session_finished(i, at(595.0));
-        }
-        book.state.lock().trade_auto = Some(auto);
-        let d = decide(&book, "p2", phi_params);
-        assert!(d["fallback_reason"].is_null(), "{d}");
-        assert_eq!(d["phi_base_source"], "q");
-        let q = d["q"].as_f64().unwrap();
-        assert_eq!(d["lambda_raw"], q, "R = R_hat and mu 1: {d}");
-        assert_eq!(d["phi_lambda_base"], q);
-        let rows = d["candidates"].as_array().unwrap();
-        let lambda_b = rows[1]["copy_lambda"].as_f64().unwrap();
-        assert!((lambda_b - q * 0.25).abs() < 1e-9, "{d}");
-        assert_eq!(rows[3]["copy_lambda"], q);
-        assert_eq!(d["chosen"], "c", "{d}");
-        assert_eq!(
-            book.snapshot()["phi_prices"]["rows_zero"],
-            2,
-            "c in both decisions"
-        );
-    }
-
-    /// The floor of the pull price phi: lambda_P = max(min, lambda_q x
-    /// phi_P), min = --co-schedule-trade-copy-lambda-min (4.6). `c` (no
-    /// eviction, phi 0) pays 4.6 (floored) instead of 0, `b` (phi 0.25)
-    /// 18.4 x 0.25 = 4.6 (not floored), `d` (no host_room data) 18.4. The
-    /// floored pull of 100k tokens costs 460k: the request stays on the owner.
-    /// The snapshot counts the priced rows, the floored rows and the
-    /// decisions whose chosen P was floored.
-    #[test]
-    fn trade_phi_floor_is_the_auto_min() {
-        use crate::scheduler::co_schedule::{TradePullPrice, TradeRateMode};
-        let Some(t0) = Instant::now().checked_sub(std::time::Duration::from_secs(600)) else {
-            return; // the monotonic clock is younger than 10 minutes
-        };
-        let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
-        let params = crate::scheduler::co_schedule::TradeParams {
-            rate_mode: TradeRateMode::Auto,
-            pull_price: TradePullPrice::Phi,
-            ..auto_trade(18.4)
-        };
-        let room =
-            |c0: u64, c1: u64| json!({"evicted_class0_tokens": c0, "evicted_class1_tokens": c1});
-        let book = CostBook::new_uncached(None).unwrap();
-        book.enable_host_room();
-        book.enable_host_room_phi(120.0);
-        for (url, first, second) in [("b", (0, 0), (300, 100)), ("c", (50, 50), (50, 50))] {
-            book.note_host_room(url, room(first.0, first.1), at(589.0));
-            book.note_host_room(url, room(second.0, second.1), at(590.0));
-        }
-        let mut busy = uncached(&book, "busy", "a", 60_000);
-        busy.mark_dispatched().unwrap();
-        let (_, r, d) = book
-            .reserve_trade_session(
-                110_000,
-                Some("f1".into()),
-                vec![
-                    candidate("a", 100_000),
-                    pulling("b", 0, 100_000),
-                    pulling("c", 0, 100_000),
-                    pulling("d", 0, 100_000),
-                ],
-                params,
-                None,
-                Some("0/agent-1"),
-            )
-            .unwrap();
-        drop(r);
-        let rows = d["candidates"].as_array().unwrap();
-        let col = |key: &str| rows.iter().map(|r| r[key].clone()).collect::<Vec<_>>();
-        assert_eq!(d["phi_lambda_min"], 4.6, "{d}");
-        assert_eq!(rows[2]["copy_lambda"], 4.6, "{d}");
-        assert_eq!(rows[1]["copy_lambda"], 4.6, "{d}");
-        assert_eq!(rows[3]["copy_lambda"], 18.4, "{d}");
-        assert_eq!(
-            col("phi_floored"),
-            [json!(false), json!(false), json!(true), json!(false)]
-        );
-        let copy_c = rows[2]["copy_tokens"].as_f64().unwrap();
-        assert!((copy_c - 460_000.0).abs() < 1e-6, "{d}");
-        assert_eq!(d["chosen"], "a", "the floor keeps the owner: {d}");
-        assert_eq!(
-            d["copy_lambda"], 18.4,
-            "the owner's price (no host_room data)"
-        );
-        assert_eq!(d["phi_floored"], false);
-        let prices = &book.snapshot()["phi_prices"];
-        assert_eq!(
-            (
-                prices["decisions"].clone(),
-                prices["rows"].clone(),
-                prices["rows_floored"].clone(),
-                prices["rows_zero"].clone(),
-                prices["chosen_floored"].clone()
-            ),
-            (json!(1), json!(4), json!(1), json!(0), json!(0))
-        );
-    }
-
     /// A reply that accepted the include but had no section counts per P;
     /// only the first one of each P asks the caller to log.
     #[test]
@@ -7839,103 +6275,6 @@ mod tests {
         );
     }
 
-    /// `--symmetric-pd-trace-session-moves`: the second decision of a session
-    /// that leaves its last P has p_changed, the previous P and its hit; a
-    /// request without a session has no record, and without the flag no
-    /// event has one.
-    #[test]
-    fn session_move_record_names_the_previous_p() {
-        for on in [true, false] {
-            let tmp = tempfile::tempdir().unwrap();
-            let path = tmp.path().join("moves.jsonl");
-            let book = CostBook::new_uncached(Some(&path)).unwrap();
-            if on {
-                book.enable_session_moves();
-            }
-            let cands = || vec![candidate("a", 4000), candidate("b", 0)];
-            let session = Some("0/agent-1");
-            let (_, r1, d1) = book
-                .reserve_trade_session(
-                    5000,
-                    Some("s1".into()),
-                    cands(),
-                    trade(9.2, false),
-                    None,
-                    session,
-                )
-                .unwrap();
-            assert_eq!(d1["chosen"], "a");
-            let mut busy = uncached(&book, "busy", "a", 60_000);
-            busy.mark_dispatched().unwrap();
-            let (_, r2, d2) = book
-                .reserve_trade_session(
-                    5000,
-                    Some("s2".into()),
-                    cands(),
-                    trade(9.2, false),
-                    None,
-                    session,
-                )
-                .unwrap();
-            assert_eq!(d2["chosen"], "b");
-            let (_, r3, _) = book
-                .reserve_trade_session(
-                    5000,
-                    Some("s3".into()),
-                    cands(),
-                    trade(9.2, false),
-                    None,
-                    None,
-                )
-                .unwrap();
-            let events = trace_lines(&path);
-            let moves: Vec<&Value> = events
-                .iter()
-                .filter(|e| e["event"] == "reserve")
-                .map(|e| &e["session_move"])
-                .collect();
-            assert_eq!(moves.len(), 4, "s1, busy, s2, s3");
-            if !on {
-                assert!(moves.iter().all(|m| m.is_null()), "{moves:?}");
-                assert!(book.snapshot().get("session_moves").is_none());
-                drop((r1, r2, r3, busy));
-                continue;
-            }
-            let move_of = |rid: &str| {
-                events
-                    .iter()
-                    .find(|e| e["event"] == "reserve" && e["entry"]["rid"] == rid)
-                    .map(|e| e["session_move"].clone())
-                    .unwrap()
-            };
-            let (first, second) = (move_of("s1"), move_of("s2"));
-            assert!(move_of("busy").is_null(), "not a TRADE decision");
-            assert_eq!(first["prev_p"], Value::Null);
-            assert_eq!(first["p_changed"], false);
-            assert_eq!(first["session"], "0/agent-1");
-            assert_eq!(
-                (
-                    first["max_local_hit"].clone(),
-                    first["max_local_hit_p"].clone()
-                ),
-                (json!(4000), json!("a"))
-            );
-            assert_eq!(second["prev_p"], "a");
-            assert_eq!(second["p_changed"], true);
-            assert_eq!(second["chosen"], "b");
-            assert_eq!(second["prev_p_local_hit"], 4000);
-            assert_eq!(second["chosen_local_hit"], 0);
-            assert_eq!(second["pulled_tokens"], 0);
-            assert_eq!(second["input_tokens"], 5000);
-            assert!(move_of("s3").is_null(), "no session");
-            assert_eq!(
-                book.snapshot()["session_moves"],
-                json!({"decisions": 2, "p_changes": 1, "sessions": 1})
-            );
-            drop((r1, r2, r3, busy));
-        }
-    }
-
     /// Run the unknown expiry of every worker with `at` as the sweep time.
     fn expire_at(book: &CostBook, at: Instant) {
         let mut st = book.state.lock();
@@ -8022,94 +6361,6 @@ mod tests {
         book.apply_progress(url, progress(sequence, rows), json!({}), at)
             .unwrap();
         assert_eq!(book.state.lock().progress[url].sent_at, at, "applied");
-    }
-
-    /// Regression: a P-leg that the engine never listed gets
-    /// a transport error and stays unknown while its P keeps answering. It
-    /// holds its work until a reply of its P sent 60 s after it became
-    /// unknown, then expires: every counter of its worker returns to its
-    /// value before the reservation (another request stays), the RID leaves
-    /// the active map but stays used, the TRADE auto end (applied at the
-    /// transport error) is not applied again, and the trace has exactly one
-    /// `expired` event with the reason and the evidence, also after later
-    /// replies and snapshots.
-    #[test]
-    fn unknown_never_listed_expires_after_the_expiry_and_releases_its_work_once() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("cost.jsonl");
-        let expire = Some(secs(60));
-        let book =
-            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", expire)
-                .unwrap();
-        let mut other = uncached(&book, "other", "a", 7_000);
-        other.mark_dispatched().unwrap();
-        let before = ledger(&book, "a");
-        assert_eq!(before, (7_000, 7_000, 0, 7_000, 1));
-        // 20,000 tokens with 8,000 cached: 12,000 uncached.
-        let (_, mut lost, _) = book
-            .reserve_trade_session(
-                20_000,
-                Some("lost".into()),
-                vec![candidate("a", 8_000)],
-                auto_trade(18.4),
-                None,
-                Some("0/agent"),
-            )
-            .unwrap();
-        lost.mark_dispatched().unwrap();
-        lost.mark_unknown("prefill_transport_error: upstream timed out")
-            .unwrap();
-        let held = ledger(&book, "a");
-        assert_eq!(held, (19_000, 19_000, 0, 19_000, 2));
-        let auto = || {
-            let st = book.state.lock();
-            let auto = st.trade_auto.as_ref().unwrap();
-            (auto.in_flight("a"), auto.credited, auto.uncredited)
-        };
-        // The transport error ended the prefill (no credit).
-        assert_eq!(auto(), (Some(0), 0, 1));
-        let since = unknown_since(&book, &lost);
-        let just_before = since + secs(60) - std::time::Duration::from_millis(1);
-        reply(&book, "a", just_before, &[]);
-        assert_eq!(ledger(&book, "a"), held, "held before the expiry");
-        assert_eq!(book.snapshot()["unknown_requests"], 1);
-        reply(&book, "a", since + secs(60), &[]);
-        assert_eq!(ledger(&book, "a"), before);
-        {
-            let st = book.state.lock();
-            assert!(st.unknown.is_empty());
-            assert!(!st.active_by_rid.contains_key("lost"));
-            assert!(st.used_rids.contains("lost"));
-            assert_eq!(st.entries[&lost.id].status, Status::Expired);
-        }
-        assert_eq!(lost.debuginfo()["reason"], UNKNOWN_EXPIRED_REASON);
-        assert_eq!(auto(), (Some(0), 0, 1), "auto end applied once");
-        assert!(book
-            .reserve_uncached(1, Some("lost".into()), vec![candidate("a", 0)], 12288)
-            .is_err());
-        // Later replies and snapshots change nothing and write no second event.
-        reply(&book, "a", since + secs(600), &[]);
-        let snapshot = book.snapshot();
-        assert_eq!(snapshot["unknown_requests"], 0);
-        assert_eq!(snapshot["unknown_expire_s"], 60.0);
-        assert_eq!(snapshot["expired_rid_listed_again"], 0);
-        assert_eq!(snapshot["workers"][0]["status_counts"]["expired"], 1);
-        assert_eq!(ledger(&book, "a"), before);
-        let rows = trace_rows(&path);
-        let expired: Vec<&Value> = rows.iter().filter(|e| e["event"] == "expired").collect();
-        assert_eq!(expired.len(), 1, "{expired:?}");
-        let e = expired[0];
-        assert_eq!(e["entry"]["rid"], "lost");
-        assert_eq!(e["entry"]["status"], "expired");
-        assert_eq!(e["entry"]["reason"], UNKNOWN_EXPIRED_REASON);
-        assert_eq!(e["entry"]["uncached_tokens"], 12_000);
-        assert_eq!(e["policy"], "symmetric_pd_cost_function");
-        assert_eq!(e["expiry"]["expire_s"], 60.0);
-        assert_eq!(e["expiry"]["quiet_s"], 60.0);
-        assert_eq!(e["expiry"]["unknown_for_s"], 60.0);
-        assert!(e["expiry"]["since_last_progress_s"].is_null());
-        other.finish("prefill_response_success").unwrap();
-        assert_eq!(ledger(&book, "a"), (0, 0, 0, 0, 0));
     }
 
     /// An unknown entry that its P still lists does not expire, and the
@@ -8293,757 +6544,7 @@ mod tests {
         }
     }
 
-    // ---- OLP: --co-schedule-trade-wait olp / --co-schedule-trade-olp-shadow ----
-
-    /// An uncached book with OLP state.
-    fn olp_book(params: OlpParams, shadow: bool) -> Arc<CostBook> {
-        let book = CostBook::new_uncached(None).unwrap();
-        book.enable_olp(OlpConfig {
-            params,
-            shadow,
-            ..OlpConfig::default()
-        });
-        book
-    }
-
-    /// OLP parameters whose gate is open from the first decision (no
-    /// warm-up, no label pairs needed) and whose busy scale follows its own
-    /// measurement at once (prior weight ~0).
-    fn olp_open(scale_source: OlpScaleSource) -> OlpParams {
-        OlpParams {
-            scale_source,
-            warm_busy_s: 0.0,
-            warm_labels: 0,
-            min_pairs: 0,
-            b0_s: 1e-9,
-            ..OlpParams::default()
-        }
-    }
-
-    /// The engine load of a progress reply: the busy counters and the pool.
-    fn olp_load(busy_us: u64, tokens: u64) -> Value {
-        json!({
-            "total_prefill_busy_us": busy_us,
-            "total_prefill_uncached_tokens": tokens,
-            "max_total_num_tokens": 1_000_000,
-        })
-    }
-
-    /// `url` computes 8,000 tokens of a dispatched 10,000-token request in
-    /// one counter interval whose engine busy time is `slow` x the modelled
-    /// time; the request stays live with 2,000 tokens left.
-    fn olp_feed(book: &Arc<CostBook>, url: &str, slow: f64, at: Instant) -> Reservation {
-        let rid = format!("{url}-busy");
-        let mut r = uncached(book, &rid, url, 10_000);
-        r.mark_dispatched().unwrap();
-        // The first listing, at the estimate: acknowledged; counters start.
-        let first = progress(1, &[(rid.as_str(), 10_000)]);
-        book.apply_progress(url, first, olp_load(0, 0), at).unwrap();
-        let busy_us = (slow * OlpParams::default().work(8_000, 0, true) * 1e6).round() as u64;
-        let second = progress(2, &[(rid.as_str(), 2_000)]);
-        let later = at + std::time::Duration::from_millis(1);
-        book.apply_progress(url, second, olp_load(busy_us, 8_000), later)
-            .unwrap();
-        r
-    }
-
-    /// A cold 4,000-token request on `a` and `b` after `a` (4x slower than
-    /// modelled) and `b` (as modelled) each computed 8,000 tokens and kept
-    /// 2,000: equal ledger backlogs. Returns the selection and the decision.
-    fn olp_pick(
-        book: &Arc<CostBook>,
-        params: crate::scheduler::co_schedule::TradeParams,
-    ) -> (String, Value) {
-        let at = Instant::now();
-        let _a = olp_feed(book, "a", 4.0, at);
-        let _b = olp_feed(book, "b", 1.0, at);
-        let candidates = vec![candidate("a", 0), candidate("b", 0)];
-        let (selected, _r, decision) = book
-            .reserve_trade(4_000, Some("new".into()), candidates, params)
-            .unwrap();
-        (selected.worker_url, decision)
-    }
-
-    /// OLP on, gate open, busy scale: the slower P (engine busy 4x its
-    /// modelled time) loses the tie that the ledger gives it (equal
-    /// backlogs; the owner rule picks the smaller URL). Every candidate costs
-    /// R x (wait + service) with the OLP terms.
-    #[test]
-    fn olp_active_moves_a_tie_away_from_the_slower_p() {
-        use crate::scheduler::co_schedule::{TradeParams, TradeWait};
-        let plain = CostBook::new_uncached(None).unwrap();
-        let (ledger, decision) = olp_pick(&plain, TradeParams::default());
-        assert_eq!(ledger, "a");
-        assert!(decision.get("olp").is_none());
-        let olp = TradeParams {
-            wait: TradeWait::Olp,
-            ..TradeParams::default()
-        };
-        let (chosen, decision) = olp_pick(&olp_book(olp_open(OlpScaleSource::Busy), false), olp);
-        assert_eq!(chosen, "b");
-        assert_eq!(decision["olp"]["mode"], "olp");
-        assert_eq!(decision["olp"]["active"], true);
-        assert!(decision["olp"]["fallback"].is_null());
-        assert_eq!(decision["olp"]["olp_chosen"], decision["chosen"]);
-        assert_eq!(decision["olp"]["ledger_chosen"], "a");
-        assert_eq!(decision["wait"], "olp");
-        let rows = decision["candidates"].as_array().unwrap();
-        let k: Vec<f64> = rows.iter().map(|r| r["olp_k"].as_f64().unwrap()).collect();
-        assert!((k[0] - 4.0).abs() < 1e-3, "{k:?}");
-        assert!((k[1] - 1.0).abs() < 1e-3, "{k:?}");
-        for row in rows {
-            assert_eq!(row["wait_source"], "olp");
-            assert_eq!(row["olp_rows"], 1);
-            let wait = row["olp_wait_s"].as_f64().unwrap();
-            let service = row["olp_service_s"].as_f64().unwrap();
-            let cost = row["trade_cost"].as_f64().unwrap();
-            assert!((cost - 13_500.0 * (wait + service)).abs() < 1e-6, "{row}");
-        }
-    }
-
-    /// OLP on but cold (the default warm-up): every candidate takes the
-    /// ledger terms, so the choice, the owner and every cost equal the ledger
-    /// decision; the trace names the fallback and still has the predictions.
-    #[test]
-    fn olp_cold_gate_is_the_ledger_decision() {
-        use crate::scheduler::co_schedule::{TradeParams, TradeWait};
-        let plain = CostBook::new_uncached(None).unwrap();
-        let (want, ledger) = olp_pick(&plain, TradeParams::default());
-        let olp = TradeParams {
-            wait: TradeWait::Olp,
-            ..TradeParams::default()
-        };
-        let params = OlpParams {
-            scale_source: OlpScaleSource::Busy,
-            b0_s: 1e-9,
-            ..OlpParams::default()
-        };
-        let (chosen, decision) = olp_pick(&olp_book(params, false), olp);
-        assert_eq!(chosen, want);
-        assert_eq!(decision["olp"]["active"], false);
-        assert_eq!(decision["olp"]["fallback"], "cold");
-        assert_eq!(decision["olp"]["ledger_chosen"], decision["chosen"]);
-        assert_eq!(decision["olp"]["olp_chosen"], "b", "would-be choice");
-        for key in ["owner", "chosen", "trade_cost", "pulled_tokens"] {
-            assert_eq!(decision[key], ledger[key], "{key}");
-        }
-        let rows = decision["candidates"].as_array().unwrap();
-        for (row, plain_row) in rows.iter().zip(ledger["candidates"].as_array().unwrap()) {
-            assert_eq!(row["trade_cost"], plain_row["trade_cost"]);
-            assert_eq!(row["wait_source"], "ledger");
-            assert!(row["olp_wait_s"].is_number(), "the predictions are traced");
-        }
-    }
-
-    /// The shadow readout (wait ledger): the decision is the ledger decision
-    /// key for key; the trace only gains `olp` and the 11 `olp_*` keys of
-    /// every candidate.
-    #[test]
-    fn olp_shadow_traces_without_changing_the_decision() {
-        use crate::scheduler::co_schedule::TradeParams;
-        let plain = CostBook::new_uncached(None).unwrap();
-        let (want, ledger) = olp_pick(&plain, TradeParams::default());
-        let book = olp_book(olp_open(OlpScaleSource::Busy), true);
-        let (chosen, mut decision) = olp_pick(&book, TradeParams::default());
-        assert_eq!(chosen, want);
-        assert_eq!(decision["olp"]["mode"], "shadow");
-        assert_eq!(decision["olp"]["active"], false);
-        assert!(decision["olp"]["fallback"].is_null(), "gate would open");
-        assert_eq!(decision["olp"]["ledger_chosen"], decision["chosen"]);
-        assert_eq!(decision["olp"]["olp_chosen"], "b", "would-be choice");
-        assert_eq!(strip_olp_keys(&mut decision), 1 + 2 * 11);
-        assert_eq!(decision, ledger);
-    }
-
-    /// Scale source `label` (the default) end to end: P legs answered with
-    /// prefill_response_success become the labels of the next step (an
-    /// error answer does not), whose weighted fit is `fit`; that step's
-    /// decision is active and prices every candidate with the fit: wait =
-    /// a + bq * q_model, service = bo * own_model. The snapshot counts the
-    /// gate results.
-    #[test]
-    fn olp_label_fit_from_finished_p_legs_prices_an_active_decision() {
-        use crate::scheduler::co_schedule::{TradeParams, TradeWait};
-        let params = OlpParams {
-            // A step per millisecond; four labels fit, without the prior.
-            step_s: 0.001,
-            label_min_rows: 4,
-            label_n0: 0.0,
-            ..olp_open(OlpScaleSource::Label)
-        };
-        let book = olp_book(params, false);
-        let olp = TradeParams {
-            wait: TradeWait::Olp,
-            ..TradeParams::default()
-        };
-        // Five P legs on a, each reserved behind the ones before it (q_model
-        // grows) with its own size (own_model differs): a full-rank fit.
-        let mut legs: Vec<Reservation> = [1_000, 3_000, 2_000, 5_000, 4_000]
-            .iter()
-            .enumerate()
-            .map(|(i, &tokens)| {
-                let candidates = vec![candidate("a", 0)];
-                book.reserve_trade(tokens, Some(format!("leg{i}")), candidates, olp)
-                    .unwrap()
-                    .1
-            })
-            .collect();
-        for leg in &mut legs {
-            leg.mark_dispatched().unwrap();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let (labelled, failed) = legs.split_at_mut(4);
-        for leg in labelled {
-            leg.finish(PREFILL_SUCCESS_REASON).unwrap();
-        }
-        failed[0].finish("prefill_response_error").unwrap();
-        // Fresh progress views of both candidates, then a later step.
-        for url in ["a", "b"] {
-            book.apply_progress(url, progress(1, &[]), olp_load(0, 0), Instant::now())
-                .unwrap();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let candidates = vec![candidate("a", 0), candidate("b", 0)];
-        let (_, _r, decision) = book
-            .reserve_trade(4_000, Some("new".into()), candidates, olp)
-            .unwrap();
-        let step = &decision["olp"]["step"];
-        assert_eq!(step["label_fit"], "fit", "{step}");
-        assert_eq!(step["label_n"], 4, "{step}");
-        assert_eq!(decision["olp"]["active"], true);
-        assert!(decision["olp"]["fallback"].is_null());
-        assert_eq!(decision["olp"]["olp_chosen"], decision["chosen"]);
-        let fit = |key: &str| step[key].as_f64().unwrap();
-        let (a, bq, bo) = (fit("label_a"), fit("label_bq"), fit("label_bo"));
-        assert!((0.0..=0.5).contains(&a), "{step}");
-        assert!((0.8..=1.25).contains(&bq), "{step}");
-        assert!((0.8..=1.25).contains(&bo), "{step}");
-        for row in decision["candidates"].as_array().unwrap() {
-            assert_eq!(row["wait_source"], "olp");
-            let get = |key: &str| row[key].as_f64().unwrap();
-            let wait = a + bq * get("olp_q_model_s");
-            assert!((get("olp_wait_s") - wait).abs() < 1e-12, "{row}");
-            let service = bo * get("olp_own_model_s");
-            assert!((get("olp_service_s") - service).abs() < 1e-12, "{row}");
-        }
-        // Five stale decisions (no progress view of a yet), then this one.
-        let snapshot = book.snapshot();
-        let gate = &snapshot["olp"]["gate_total"];
-        assert_eq!(gate["decisions"], 6);
-        assert_eq!(gate["open"], 1);
-        assert_eq!(gate["stale"], 5);
-        assert_eq!(snapshot["olp"]["pool_workers_with_counters"], 2);
-    }
-
-    /// Labels: only a P-leg answered with prefill_response_success labels its
-    /// OLP decision; an error, an unknown end and a rollback drop theirs. An
-    /// ended entry leaves the live index; an unknown one stays.
-    #[test]
-    fn olp_labels_only_successful_p_legs() {
-        use crate::scheduler::co_schedule::TradeParams;
-        let book = olp_book(OlpParams::default(), true);
-        let trade = |rid: &str| {
-            let candidates = vec![candidate("a", 0)];
-            book.reserve_trade(1_000, Some(rid.into()), candidates, TradeParams::default())
-                .unwrap()
-                .1
-        };
-        let mut ok = trade("ok");
-        let mut err = trade("err");
-        let mut lost = trade("lost");
-        let rolled = trade("rolled");
-        for r in [&mut ok, &mut err, &mut lost] {
-            r.mark_dispatched().unwrap();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        ok.finish(PREFILL_SUCCESS_REASON).unwrap();
-        err.finish("prefill_response_error").unwrap();
-        lost.mark_unknown("prefill_transport_error").unwrap();
-        drop(rolled);
-        let t_s = book.seconds(Instant::now());
-        let state = book.state.lock();
-        let olp = state.olp.as_ref().unwrap();
-        assert_eq!((olp.labels_total(), olp.pending_len()), (1, 0));
-        assert_eq!(olp.live("a").collect::<Vec<_>>(), [lost.id]);
-        // A later step reads the label (done in the window before it).
-        let stats = olp.stats_at(t_s + 120.0);
-        assert_eq!(stats.n_labels, 1);
-        assert!(stats.mape_olp.is_some() && stats.mape_cf.is_some());
-        drop(state);
-    }
-
-    /// The OLP feed of a progress reply: a first listing only corrects the
-    /// cache hit (no chunk work); later decreases, and a first listing at 0,
-    /// are chunk work at h = input - old, with the restore while the entry
-    /// had no update. The engine counters of the same replies pair with it.
-    #[test]
-    fn olp_feed_skips_the_first_listing_correction() {
-        let book = olp_book(OlpParams::default(), true);
-        let mut x = uncached(&book, "x", "a", 10_000);
-        x.mark_dispatched().unwrap();
-        let mut y = uncached(&book, "y", "a", 3_000);
-        y.mark_dispatched().unwrap();
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
-        // x is first listed at 7,000 (a cache-hit correction of 3,000).
-        let first = progress(1, &[("x", 7_000)]);
-        book.apply_progress("a", first, olp_load(0, 0), at(1))
-            .unwrap();
-        // x: 4,000 computed after 3,000; y first listed at 0 (all computed).
-        let second = progress(2, &[("x", 3_000), ("y", 0)]);
-        book.apply_progress("a", second, olp_load(1_000_000, 7_000), at(2))
-            .unwrap();
-        // x: the last 3,000 after 7,000.
-        let third = progress(3, &[("x", 0)]);
-        book.apply_progress("a", third, olp_load(2_000_000, 10_000), at(3))
-            .unwrap();
-        let p = OlpParams::default();
-        let x_work = p.work(4_000, 3_000, false) + p.work(3_000, 7_000, false);
-        let want = x_work + p.work(3_000, 0, true);
-        let state = book.state.lock();
-        let sums = state.olp.as_ref().unwrap().own_sums("a").unwrap();
-        drop(state);
-        assert_eq!((sums.tok, sums.model_tok), (10_000.0, 10_000.0));
-        assert!((sums.model_s - want).abs() < 1e-9, "{sums:?}");
-        assert!((sums.busy_s - 2.0).abs() < 1e-9, "{sums:?}");
-    }
-
-    /// Flag off (no OLP state): no decision, row or trace event has an OLP
-    /// key, and a TRADE decision with the ledger wait allocates no OLP state.
-    #[test]
-    fn olp_off_writes_no_olp_key() {
-        use crate::scheduler::co_schedule::TradeParams;
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("trade.jsonl");
-        let book = CostBook::new_uncached(Some(&path)).unwrap();
-        let _busy = olp_feed(&book, "a", 4.0, Instant::now());
-        let candidates = vec![candidate("a", 0), candidate("b", 0)];
-        let (_, mut r, decision) = book
-            .reserve_trade(
-                4_000,
-                Some("new".into()),
-                candidates,
-                TradeParams::default(),
-            )
-            .unwrap();
-        r.mark_dispatched().unwrap();
-        r.finish(PREFILL_SUCCESS_REASON).unwrap();
-        assert!(book.snapshot().get("olp").is_none());
-        assert!(!decision.to_string().contains("olp"), "{decision}");
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"event\":\"snapshot\""), "{text}");
-        assert!(!text.contains("olp"), "{text}");
-        assert!(book.state.lock().olp.is_none());
-    }
-
-    // ---- OLP fast path: incremental queue, compact trace, async trace ----
-
-    /// A cost-function book (unknown expiry 60 s) with OLP; `incremental`
-    /// also turns `verify` on (the walk is computed and compared too).
-    fn olp_fast_book(
-        path: Option<&Path>,
-        params: OlpParams,
-        shadow: bool,
-        incremental: bool,
-        compact: bool,
-    ) -> Arc<CostBook> {
-        let book =
-            CostBook::new_uncached_with_policy(path, "symmetric_pd_cost_function", Some(secs(60)))
-                .unwrap();
-        book.enable_olp(OlpConfig {
-            params,
-            shadow,
-            incremental,
-            compact_trace: compact,
-            verify: incremental,
-            ..OlpConfig::default()
-        });
-        book
-    }
-
-    /// Every worker's incremental sums equal the exact sums of its active
-    /// entries (a walk of the ledger), and the OLP queue of both is the same
-    /// up to rounding.
-    fn assert_sums_equal_walk(book: &CostBook, at: &str) {
-        let st = book.state.lock();
-        let olp = st.olp.as_ref().unwrap();
-        let params = *olp.params();
-        let mut want: BTreeMap<String, crate::olp::QueueAgg> = BTreeMap::new();
-        for entry in st.entries.values().filter(|e| e.status.active()) {
-            want.entry(entry.worker_url.clone())
-                .or_default()
-                .add(&crate::olp::QueueAgg::of_row(olp_row(entry), params.chunk));
-        }
-        for url in st.workers.keys() {
-            let got = olp.queue_sums(url).expect("incremental");
-            let exact = want.get(url).copied().unwrap_or_default();
-            assert_eq!(got, exact, "{at}: sums of {url}");
-            let rows: Vec<_> = st
-                .entries
-                .values()
-                .filter(|e| e.status.active() && &e.worker_url == url)
-                .map(olp_row)
-                .collect();
-            let (walk, fast) = (params.queue(rows), params.queue_of(&got));
-            assert_eq!(
-                (walk.rows, walk.launched_tokens),
-                (fast.rows, fast.launched_tokens)
-            );
-            let scale = walk.q_model_s.abs().max(1e-300);
-            assert!(
-                (walk.q_model_s - fast.q_model_s).abs() <= 1e-12 * scale,
-                "{at}: {url} walk {} fast {}",
-                walk.q_model_s,
-                fast.q_model_s
-            );
-        }
-    }
-
-    /// `--co-schedule-trade-olp-incremental`: the per-P sums follow every
-    /// ledger event that changes a row: the reservation (a row not started
-    /// pays its restore), the first listing at the estimate (launched: no
-    /// restore, its input is launched), a first listing below the estimate,
-    /// a decrease, a listing at 0 (costs nothing), the end with success, an
-    /// unknown answer (the row stays), a rollback, the unknown expiry and a
-    /// P that leaves the candidate set and comes back (its rows stay). After
-    /// each event the sums are the exact sums of a ledger walk; the verify
-    /// counters show no difference at any decision; at the end no sum is
-    /// left.
-    #[test]
-    fn olp_incremental_sums_follow_every_ledger_event() {
-        use crate::scheduler::co_schedule::{TradeParams, TradeWait};
-        let olp = TradeParams {
-            wait: TradeWait::Olp,
-            ..TradeParams::default()
-        };
-        let book = olp_fast_book(None, olp_open(OlpScaleSource::Label), false, true, false);
-        let on = |rid: &str, tokens: u64, url: &str, hit: u64| {
-            book.reserve_trade(tokens, Some(rid.into()), vec![candidate(url, hit)], olp)
-                .unwrap()
-                .1
-        };
-        let mut r1 = on("r1", 20_000, "a", 8_000);
-        assert_sums_equal_walk(&book, "reserve r1");
-        let mut r2 = on("r2", 9_000, "a", 0);
-        let mut r3 = on("r3", 30_000, "b", 4_000);
-        let r4 = on("r4", 5_000, "b", 0);
-        assert_sums_equal_walk(&book, "reserve r2-r4");
-        for r in [&mut r1, &mut r2, &mut r3] {
-            r.mark_dispatched().unwrap();
-        }
-        assert_sums_equal_walk(&book, "dispatch");
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
-        // r1 at its estimate (launched, no update), r2 below it (update).
-        reply(&book, "a", at(1), &[("r1", 12_000), ("r2", 7_000)]);
-        assert_sums_equal_walk(&book, "first listing a");
-        {
-            let st = book.state.lock();
-            let sums = st.olp.as_ref().unwrap().queue_sums("a").unwrap();
-            assert_eq!(sums.rows, 2);
-            assert_eq!(sums.restore, 0, "both launched");
-            assert_eq!(sums.launched, 29_000);
-        }
-        reply(&book, "a", at(2), &[("r1", 3_808), ("r2", 0)]);
-        assert_sums_equal_walk(&book, "decrease and zero");
-        reply(&book, "b", at(3), &[("r3", 26_000)]);
-        assert_sums_equal_walk(&book, "first listing b");
-        r2.finish(PREFILL_SUCCESS_REASON).unwrap();
-        assert_sums_equal_walk(&book, "finish r2");
-        r3.mark_unknown("prefill_transport_error: test").unwrap();
-        assert_sums_equal_walk(&book, "unknown r3 stays");
-        drop(r4);
-        assert_sums_equal_walk(&book, "rollback r4");
-        // P a leaves the candidate set, then returns: its row stays.
-        let mut r5 = book
-            .reserve_trade(4_000, Some("r5".into()), vec![candidate("b", 0)], olp)
-            .unwrap()
-            .1;
-        assert_sums_equal_walk(&book, "decision on b only");
-        let candidates = vec![candidate("a", 0), candidate("b", 0)];
-        let (_, mut r6, decision) = book
-            .reserve_trade(6_000, Some("r6".into()), candidates, olp)
-            .unwrap();
-        assert_eq!(decision["olp"]["active"], true, "{decision}");
-        let rows: Vec<u64> = decision["candidates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| c["olp_rows"].as_u64().unwrap())
-            .collect();
-        assert_eq!(rows, [1, 2], "a: r1; b: r3 (unknown) and r5, not r4");
-        assert_sums_equal_walk(&book, "a back in the pool");
-        // The unknown r3 expires at a reply of b sent 61 s later.
-        r5.mark_dispatched().unwrap();
-        reply(&book, "b", at(61_000), &[("r5", 4_000)]);
-        assert_eq!(r3.debuginfo()["status"], "expired");
-        assert_sums_equal_walk(&book, "expiry r3");
-        for r in [&mut r1, &mut r5] {
-            r.finish(PREFILL_SUCCESS_REASON).unwrap();
-        }
-        drop(r6.finish("prefill_response_error"));
-        assert_sums_equal_walk(&book, "all ended");
-        let st = book.state.lock();
-        let olp = st.olp.as_ref().unwrap();
-        for url in ["a", "b"] {
-            assert_eq!(olp.queue_sums(url), Some(crate::olp::QueueAgg::default()));
-        }
-        let verify = olp.verify_stats();
-        assert_eq!(verify.decisions, 6, "{verify:?}");
-        assert_eq!(verify.candidates, 7, "{verify:?}");
-        assert_eq!(verify.rows_mismatch, 0);
-        assert_eq!(verify.launched_mismatch, 0);
-        assert_eq!(verify.olp_choice_mismatch, 0);
-        assert!(verify.q_max_rel_diff <= 1e-12, "{verify:?}");
-        drop(st);
-        drop((r1, r2, r3, r5, r6));
-    }
-
-    /// OLP enabled after entries exist (a book built in code): the sums
-    /// start from the active entries.
-    #[test]
-    fn olp_incremental_starts_from_the_active_entries() {
-        let book = CostBook::new_uncached(None).unwrap();
-        let mut a = uncached(&book, "x", "a", 10_000);
-        a.mark_dispatched().unwrap();
-        let _b = uncached(&book, "y", "a", 3_000);
-        let mut done = uncached(&book, "z", "b", 3_000);
-        done.mark_dispatched().unwrap();
-        done.finish(PREFILL_SUCCESS_REASON).unwrap();
-        book.enable_olp(OlpConfig {
-            incremental: true,
-            ..OlpConfig::default()
-        });
-        assert_sums_equal_walk(&book, "enable");
-        let st = book.state.lock();
-        let olp = st.olp.as_ref().unwrap();
-        assert_eq!(olp.queue_sums("a").unwrap().rows, 2);
-        assert_eq!(olp.queue_sums("b").unwrap().rows, 0);
-    }
-
-    /// A small deterministic generator for the scripted A/B below.
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn below(&mut self, n: u64) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            (self.0 >> 33) % n.max(1)
-        }
-    }
-
-    /// Incremental versus walk on the same inputs: two books (OLP decides,
-    /// gate open, label prior) take the same 400 scripted operations
-    /// (decisions over 2-3 of 3 P with cached prefixes, dispatches, replies
-    /// with first listings, decreases and zeros, ends, unknown answers,
-    /// rollbacks). Every decision chooses the same P with the same owner,
-    /// rows and launched tokens; q_model agrees to 1e-12; the verify counters
-    /// of the incremental book show no difference.
-    #[test]
-    fn olp_incremental_decisions_equal_the_walk() {
-        use crate::scheduler::co_schedule::{TradeParams, TradeWait};
-        let olp = TradeParams {
-            wait: TradeWait::Olp,
-            ..TradeParams::default()
-        };
-        let walk = olp_fast_book(None, olp_open(OlpScaleSource::Label), false, false, false);
-        let fast = olp_fast_book(None, olp_open(OlpScaleSource::Label), false, true, false);
-        let urls = ["a", "b", "c"];
-        let mut rng = Lcg(7);
-        // Live requests of both books: (rid, url, input, remaining, dispatched).
-        let mut live: Vec<(String, String, u64, u64, bool)> = Vec::new();
-        let mut handles: Vec<(Reservation, Reservation)> = Vec::new();
-        let t0 = Instant::now();
-        let mut sequence = 0u64;
-        let (mut decisions, mut active) = (0, 0);
-        for step in 0..400u64 {
-            // Every P answers each step (fresh views keep the gate open).
-            for url in urls {
-                sequence += 1;
-                let at = t0 + std::time::Duration::from_micros(10 * sequence);
-                let mut rows = Vec::new();
-                for (rid, u, _, remaining, dispatched) in live.iter_mut() {
-                    if u == url && *dispatched && rng.below(3) > 0 {
-                        let cut = rng.below(*remaining + 1);
-                        *remaining -= cut.min(*remaining) * u64::from(rng.below(2) == 0);
-                        rows.push((rid.clone(), *remaining));
-                    }
-                }
-                let rows: Vec<(&str, u64)> = rows.iter().map(|(r, n)| (r.as_str(), *n)).collect();
-                for book in [&walk, &fast] {
-                    book.apply_progress(url, progress(sequence, &rows), json!({}), at)
-                        .unwrap();
-                }
-            }
-            match rng.below(6) {
-                0..=2 => {
-                    let tokens = 1_000 + rng.below(60_000);
-                    let skip = rng.below(4) as usize;
-                    let candidates: Vec<Candidate> = urls
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != skip)
-                        .map(|(_, u)| candidate(u, rng.below(tokens)))
-                        .collect();
-                    let rid = format!("r{step}");
-                    let (s1, r1, d1) = walk
-                        .reserve_trade(tokens, Some(rid.clone()), candidates.clone(), olp)
-                        .unwrap();
-                    let (s2, r2, d2) = fast
-                        .reserve_trade(tokens, Some(rid.clone()), candidates, olp)
-                        .unwrap();
-                    decisions += 1;
-                    active += usize::from(d2["olp"]["active"] == true);
-                    assert_eq!(s1.worker_url, s2.worker_url, "step {step}");
-                    for key in ["chosen", "owner", "best"] {
-                        assert_eq!(d1[key], d2[key], "step {step} {key}");
-                    }
-                    assert_eq!(d1["olp"]["olp_chosen"], d2["olp"]["olp_chosen"]);
-                    let (c1, c2) = (
-                        d1["candidates"].as_array().unwrap(),
-                        d2["candidates"].as_array().unwrap(),
-                    );
-                    for (x, y) in c1.iter().zip(c2) {
-                        for key in ["olp_rows", "olp_launched_tokens", "olp_own_model_s"] {
-                            assert_eq!(x[key], y[key], "step {step} {key}");
-                        }
-                        let (q1, q2) = (
-                            x["olp_q_model_s"].as_f64().unwrap(),
-                            y["olp_q_model_s"].as_f64().unwrap(),
-                        );
-                        assert!(
-                            (q1 - q2).abs() <= 1e-12 * q1.abs().max(1e-300),
-                            "step {step}"
-                        );
-                    }
-                    let input = tokens;
-                    let remaining = input - s2.expected_hit;
-                    live.push((rid, s2.worker_url.clone(), input, remaining, false));
-                    handles.push((r1, r2));
-                }
-                3 => {
-                    // Dispatch one reserved request.
-                    if let Some(i) = live.iter().position(|l| !l.4) {
-                        live[i].4 = true;
-                        handles[i].0.mark_dispatched().unwrap();
-                        handles[i].1.mark_dispatched().unwrap();
-                    }
-                }
-                4 => {
-                    // End one request: success, error, unknown or rollback.
-                    if !live.is_empty() {
-                        let i = rng.below(live.len() as u64) as usize;
-                        let (_, _, _, _, dispatched) = live.remove(i);
-                        let (mut h1, mut h2) = handles.remove(i);
-                        match (dispatched, rng.below(3)) {
-                            (true, 0) => {
-                                h1.finish(PREFILL_SUCCESS_REASON).unwrap();
-                                h2.finish(PREFILL_SUCCESS_REASON).unwrap();
-                            }
-                            (true, 1) => {
-                                h1.finish("prefill_response_error").unwrap();
-                                h2.finish("prefill_response_error").unwrap();
-                            }
-                            (true, _) => {
-                                h1.mark_unknown("prefill_transport_error").unwrap();
-                                h2.mark_unknown("prefill_transport_error").unwrap();
-                            }
-                            (false, _) => {}
-                        }
-                        drop((h1, h2));
-                    }
-                }
-                _ => {}
-            }
-            assert_sums_equal_walk(&fast, &format!("step {step}"));
-        }
-        assert!(decisions > 100, "{decisions}");
-        assert!(
-            active * 2 > decisions,
-            "OLP decided {active} of {decisions}"
-        );
-        let verify = fast.olp_verify_stats().unwrap();
-        assert_eq!(verify.decisions, decisions as u64);
-        assert_eq!(verify.rows_mismatch + verify.launched_mismatch, 0);
-        assert_eq!(verify.olp_choice_mismatch, 0);
-        assert!(
-            walk.olp_verify_stats().unwrap().decisions == 0,
-            "walk book has no verify"
-        );
-        drop(handles);
-    }
-
-    /// `--co-schedule-trade-olp-trace-compact`: the decision and its
-    /// selection are those of the full trace; the decision's `olp` keeps
-    /// mode, active, fallback, k_pool, labels_total and both argmins (no
-    /// step statistics) and each candidate has the five core `olp_*` keys.
-    #[test]
-    fn olp_compact_trace_keeps_the_decision() {
-        use crate::scheduler::co_schedule::{TradeParams, TradeWait};
-        let olp = TradeParams {
-            wait: TradeWait::Olp,
-            ..TradeParams::default()
-        };
-        let full = olp_book(olp_open(OlpScaleSource::Busy), false);
-        let compact = olp_fast_book(None, olp_open(OlpScaleSource::Busy), false, false, true);
-        let (want, mut d_full) = olp_pick(&full, olp);
-        let (got, mut d_compact) = olp_pick(&compact, olp);
-        assert_eq!(got, want);
-        let mut keys: Vec<&str> = d_compact["olp"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            [
-                "active",
-                "fallback",
-                "k_pool",
-                "labels_total",
-                "ledger_chosen",
-                "mode",
-                "olp_chosen"
-            ]
-        );
-        for key in [
-            "active",
-            "fallback",
-            "ledger_chosen",
-            "olp_chosen",
-            "mode",
-            "k_pool",
-        ] {
-            assert_eq!(d_compact["olp"][key], d_full["olp"][key], "{key}");
-        }
-        for (row, full_row) in d_compact["candidates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .zip(d_full["candidates"].as_array().unwrap())
-        {
-            for key in [
-                "olp_wait_s",
-                "olp_service_s",
-                "olp_q_model_s",
-                "olp_own_model_s",
-                "olp_rows",
-            ] {
-                assert_eq!(row[key], full_row[key], "{key}");
-            }
-        }
-        assert_eq!(strip_olp_keys(&mut d_compact), 1 + 2 * 5);
-        assert_eq!(strip_olp_keys(&mut d_full), 1 + 2 * 11);
-        assert_eq!(d_compact, d_full);
-        let snapshot = compact.snapshot();
-        assert_eq!(snapshot["olp"]["trace"], "compact");
-        assert!(snapshot["olp"].get("queue").is_none());
-        assert!(full.snapshot()["olp"].get("trace").is_none());
-    }
+    // ---- async trace ----
 
     /// The rows of a trace without the wall-clock and elapsed fields.
     fn timeless_rows(path: &Path) -> Vec<Value> {
@@ -9105,7 +6606,7 @@ mod tests {
         book.snapshot();
     }
 
-    /// `--co-schedule-cost-trace-async`: the same operations write the same
+    /// `--trade-cost-trace-async`: the same operations write the same
     /// rows in the same order (sequence 1..n, no gap) as the synchronous
     /// trace, apart from the clock fields; `sync_trace` waits for the writer;
     /// dropping the book flushes the rest.
@@ -9394,7 +6895,7 @@ mod tests {
             .gwq_step(
                 trade(9.2, false),
                 &held,
-                &gwq_args(GlobalQueueMode::Sjf, &urls, &depth),
+                &gwq_args(GlobalQueueMode::Hrrn, &urls, &depth),
             )
             .unwrap();
         assert_eq!(step.plain, vec![0, 0]);
@@ -9441,7 +6942,7 @@ mod tests {
             .gwq_step(
                 trade(9.2, false),
                 &held,
-                &gwq_args(GlobalQueueMode::Sjf, &urls, &[9542]),
+                &gwq_args(GlobalQueueMode::Hrrn, &urls, &[9542]),
             )
             .unwrap();
         let Some((_, result)) = step.release else {
@@ -9495,5 +6996,753 @@ mod tests {
             .unwrap()
             .contains("cannot reuse a rid"));
         assert!(CostBook::new(None).unwrap().rid_refusal(None).is_none());
+    }
+
+    /// A book made with a policy label writes `"policy"` on every trace row
+    /// (reserve, dispatch, engine progress, finish, snapshot). The other
+    /// constructors write no `policy` key.
+    #[test]
+    fn policy_label_on_every_trace_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("labelled.jsonl");
+        let book =
+            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", None)
+                .unwrap();
+        let (_, mut r, _) = book
+            .reserve_trade_session(
+                10_000,
+                Some("r1".into()),
+                vec![candidate("a", 0)],
+                trade(18.4, false),
+                None,
+            )
+            .unwrap();
+        r.mark_dispatched().unwrap();
+        book.apply_progress("a", progress(1, &[("r1", 0)]), json!({}), Instant::now())
+            .unwrap();
+        r.finish("prefill_response_success").unwrap();
+        book.snapshot();
+        let read = |path: &Path| -> Vec<Value> {
+            std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        };
+        let rows = read(&path);
+        let events: Vec<&str> = rows.iter().filter_map(|e| e["event"].as_str()).collect();
+        for event in [
+            "reserve",
+            "dispatched",
+            "prefill_progress",
+            "finished",
+            "snapshot",
+        ] {
+            assert!(events.contains(&event), "{event} missing: {events:?}");
+        }
+        for row in &rows {
+            assert_eq!(row["policy"], "symmetric_pd_cost_function", "{row}");
+            assert_eq!(row["schema"], "cost-balance.v1", "{row}");
+        }
+        let path = tmp.path().join("plain.jsonl");
+        let plain = CostBook::new_uncached(Some(&path)).unwrap();
+        let _r = uncached(&plain, "r2", "a", 1_000);
+        plain.snapshot();
+        let rows = read(&path);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.get("policy").is_none()), "{rows:?}");
+    }
+
+    /// `--symmetric-pd-trace-session-moves`: the second decision of a session
+    /// that leaves its last P has p_changed, the previous P and its hit; a
+    /// request without a session has no record, and without the flag no
+    /// event has one.
+    #[test]
+    fn session_move_record_names_the_previous_p() {
+        for on in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("moves.jsonl");
+            let book = CostBook::new_uncached(Some(&path)).unwrap();
+            if on {
+                book.enable_session_moves();
+            }
+            let cands = || vec![candidate("a", 4000), candidate("b", 0)];
+            let session = Some("0/agent-1");
+            let (_, r1, d1) = book
+                .reserve_trade_session(5000, Some("s1".into()), cands(), trade(9.2, false), session)
+                .unwrap();
+            assert_eq!(d1["chosen"], "a");
+            let mut busy = uncached(&book, "busy", "a", 60_000);
+            busy.mark_dispatched().unwrap();
+            let (_, r2, d2) = book
+                .reserve_trade_session(5000, Some("s2".into()), cands(), trade(9.2, false), session)
+                .unwrap();
+            assert_eq!(d2["chosen"], "b");
+            let (_, r3, _) = book
+                .reserve_trade_session(5000, Some("s3".into()), cands(), trade(9.2, false), None)
+                .unwrap();
+            let events = trace_lines(&path);
+            let moves: Vec<&Value> = events
+                .iter()
+                .filter(|e| e["event"] == "reserve")
+                .map(|e| &e["session_move"])
+                .collect();
+            assert_eq!(moves.len(), 4, "s1, busy, s2, s3");
+            if !on {
+                assert!(moves.iter().all(|m| m.is_null()), "{moves:?}");
+                assert!(book.snapshot().get("session_moves").is_none());
+                drop((r1, r2, r3, busy));
+                continue;
+            }
+            let move_of = |rid: &str| {
+                events
+                    .iter()
+                    .find(|e| e["event"] == "reserve" && e["entry"]["rid"] == rid)
+                    .map(|e| e["session_move"].clone())
+                    .unwrap()
+            };
+            let (first, second) = (move_of("s1"), move_of("s2"));
+            assert!(move_of("busy").is_null(), "not a TRADE decision");
+            assert_eq!(first["prev_p"], Value::Null);
+            assert_eq!(first["p_changed"], false);
+            assert_eq!(first["session"], "0/agent-1");
+            assert_eq!(
+                (
+                    first["max_local_hit"].clone(),
+                    first["max_local_hit_p"].clone()
+                ),
+                (json!(4000), json!("a"))
+            );
+            assert_eq!(second["prev_p"], "a");
+            assert_eq!(second["p_changed"], true);
+            assert_eq!(second["chosen"], "b");
+            assert_eq!(second["prev_p_local_hit"], 4000);
+            assert_eq!(second["chosen_local_hit"], 0);
+            assert_eq!(second["pulled_tokens"], 0);
+            assert_eq!(second["input_tokens"], 5000);
+            assert!(move_of("s3").is_null(), "no session");
+            assert_eq!(
+                book.snapshot()["session_moves"],
+                json!({"decisions": 2, "p_changes": 1, "sessions": 1})
+            );
+            drop((r1, r2, r3, busy));
+        }
+    }
+
+    /// TRADE auto: the first decision is in start-up (the fallback 18.4 and
+    /// every auto key). With a 10-minute history, lambda = clamp(q x R /
+    /// R_hat) from the traced q and R_hat, and the candidates pay it.
+    #[test]
+    fn trade_auto_decision_resolves_lambda_and_traces_its_inputs() {
+        let book = CostBook::new_uncached(None).unwrap();
+        let decide = |rid: &str| {
+            let (_, r, d) = book
+                .reserve_trade_session(
+                    110_000,
+                    Some(rid.into()),
+                    vec![candidate("a", 100_000), pulling("b", 0, 100_000)],
+                    auto_trade(18.4),
+                    Some("0/agent-1"),
+                )
+                .unwrap();
+            drop(r);
+            d
+        };
+        let d = decide("s1");
+        assert_eq!(d["lambda_mode"], "auto");
+        assert_eq!(d["q_mode"], "sat");
+        assert_eq!(d["fallback_reason"], "startup");
+        assert_eq!(d["copy_lambda_used"], 18.4);
+        assert_eq!(d["copy_lambda"], 18.4);
+        assert_eq!(d["copy_lambda_fallback"], 18.4);
+        assert!(d["lambda_raw"].is_null());
+        assert_eq!(d["n_p"], 2);
+        assert_eq!(d["rate_mode"], "fixed");
+        assert_eq!(d["rate_used"], 13_500.0);
+        assert_eq!(d["session_known"], true);
+        assert_eq!(d["wait"], "ledger", "auto adds the later-option keys");
+        for key in [
+            "q",
+            "busy",
+            "inflight_mean",
+            "n_active",
+            "r_hat",
+            "auto_elapsed_s",
+            "auto_tau_s",
+            "session_idle_s",
+            "lambda_mu",
+            "lambda_min",
+            "lambda_max",
+            "rate_fallback",
+            "rate_fallback_reason",
+        ] {
+            assert!(d.get(key).is_some(), "{key}: {d}");
+        }
+        for row in d["candidates"].as_array().unwrap() {
+            for key in [
+                "auto_in_flight",
+                "auto_busy",
+                "auto_inflight_mean",
+                "auto_rate_tokens_per_s",
+            ] {
+                assert!(row.get(key).is_some(), "{key}: {row}");
+            }
+        }
+        let copy_b = d["candidates"][1]["copy_tokens"].as_f64().unwrap();
+        assert!((copy_b - 1_840_000.0).abs() < 1e-6, "{d}");
+        assert_eq!(d["chosen"], "a");
+        // A 10-minute history: a and b busy 3 s of every 4 s at 10,000
+        // tokens per busy second; 60 sessions with an event 5 s ago.
+        let Some(t0) = Instant::now().checked_sub(std::time::Duration::from_secs(600)) else {
+            return; // the monotonic clock is younger than 10 minutes
+        };
+        let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
+        let mut auto = crate::scheduler::trade::TradeAutoState::new(t0, 120.0);
+        auto.observe_pool(["a", "b"], t0);
+        let mut t = 0.0;
+        while t < 590.0 {
+            for p in ["a", "b"] {
+                auto.dispatched(p, at(t));
+                auto.prefill_done(p, Some(30_000), at(t + 3.0));
+            }
+            t += 4.0;
+        }
+        for i in 0..60u64 {
+            auto.session_started(i, at(594.0));
+            auto.session_finished(i, at(595.0));
+        }
+        book.state.lock().trade_auto = Some(auto);
+        let d = decide("s2");
+        assert!(d["fallback_reason"].is_null(), "{d}");
+        assert_eq!(d["n_active"], 60);
+        let q = d["q"].as_f64().unwrap();
+        let busy = d["busy"].as_f64().unwrap();
+        let r_hat = d["r_hat"].as_f64().unwrap();
+        let lambda = d["copy_lambda_used"].as_f64().unwrap();
+        assert!((q - 30.0 * busy).abs() < 1e-9, "{d}");
+        // The same operations as TradeParams::resolved (mu = 1).
+        let raw = q * (13_500.0 / r_hat);
+        assert_eq!(d["lambda_raw"], raw, "{d}");
+        assert_eq!(lambda, raw.clamp(4.6, 1000.0));
+        assert_eq!(d["copy_lambda"], lambda);
+        assert!(lambda > 15.0 && lambda < 45.0, "{d}");
+        let copy_b = d["candidates"][1]["copy_tokens"].as_f64().unwrap();
+        assert!((copy_b - lambda * 100_000.0).abs() < 1e-6, "{d}");
+    }
+
+    /// Fixed TRADE creates no auto state, key or event. Auto adds the
+    /// snapshot summary and one `trade_auto_p_empty` event per busy period,
+    /// and END removes a session from N_active at once.
+    #[test]
+    fn trade_auto_end_snapshot_and_fixed_mode_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fixed.jsonl");
+        let book = CostBook::new_uncached(Some(&path)).unwrap();
+        let (_, mut r, d) = book
+            .reserve_trade_session(
+                10_000,
+                Some("f1".into()),
+                vec![candidate("a", 0)],
+                trade(18.4, false),
+                Some("0/agent"),
+            )
+            .unwrap();
+        assert!(
+            d.get("lambda_mode").is_none() && d.get("wait").is_none(),
+            "{d}"
+        );
+        r.mark_dispatched().unwrap();
+        book.apply_progress("a", progress(1, &[("f1", 0)]), json!({}), Instant::now())
+            .unwrap();
+        r.finish("prefill_response_success").unwrap();
+        assert!(book.state.lock().trade_auto.is_none());
+        assert!(book.snapshot().get("trade_auto").is_none());
+        assert!(!book.trade_auto_end_session("0/agent"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("trade_auto"), "{text}");
+
+        let path = tmp.path().join("auto.jsonl");
+        let book = CostBook::new_uncached(Some(&path)).unwrap();
+        let decide = |rid: &str, session: Option<&str>| {
+            book.reserve_trade_session(
+                10_000,
+                Some(rid.into()),
+                vec![candidate("a", 0), candidate("b", 0)],
+                auto_trade(18.4),
+                session,
+            )
+            .unwrap()
+        };
+        let (_, r1, _) = decide("s1", Some("0/agent-1"));
+        let (_, r2, _) = decide("s2", Some("0/agent-2"));
+        drop((r1, r2));
+        let (_, r, d) = decide("probe1", None);
+        assert_eq!(d["n_active"], 2, "{d}");
+        assert_eq!(d["session_known"], false);
+        drop(r);
+        assert!(book.trade_auto_end_session("0/agent-1"));
+        assert!(!book.trade_auto_end_session("0/agent-1"));
+        let (_, r, d) = decide("probe2", None);
+        assert_eq!(d["n_active"], 1, "{d}");
+        drop(r);
+        // A dispatched request ends its P's busy period at the P response.
+        let (selected, mut r, _) = decide("busy", None);
+        r.mark_dispatched().unwrap();
+        r.finish("prefill_response_success").unwrap();
+        let snapshot = book.snapshot();
+        let auto = &snapshot["trade_auto"];
+        assert_eq!(auto["credited"], 1, "{snapshot}");
+        assert_eq!(auto["credited_tokens"], 10_000);
+        assert_eq!(auto["workers"].as_array().unwrap().len(), 2);
+        assert_eq!(auto["workers"][0]["in_flight"], 0);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let empties: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|event| event["event"] == "trade_auto_p_empty")
+            .collect();
+        assert_eq!(empties.len(), 1, "{text}");
+        assert_eq!(empties[0]["worker_url"], selected.worker_url.as_str());
+        assert_eq!(empties[0]["busy_period_requests"], 1);
+        assert!(empties[0]["busy_period_s"].as_f64().unwrap() >= 0.0);
+    }
+
+    /// TRADE auto: the P of an entry has one more in-flight request from its
+    /// dispatch until its prefill ends, released once on every path: 0
+    /// remaining work in a snapshot, a success or error response, a
+    /// transport error (unknown) with a late finish, a drop after dispatch.
+    /// A rollback before dispatch releases only the session. Only a
+    /// completed prefill credits tokens: the larger of the estimate and the
+    /// largest remaining work seen.
+    #[test]
+    fn trade_auto_ledger_counts_each_request_once_on_every_path() {
+        let book = CostBook::new_uncached(None).unwrap();
+        // 20,000 tokens with 8,000 cached on a: an estimate of 12,000 uncached.
+        let pick = |rid: &str, session: Option<&str>| {
+            book.reserve_trade_session(
+                20_000,
+                Some(rid.into()),
+                vec![candidate("a", 8_000)],
+                auto_trade(18.4),
+                session,
+            )
+            .unwrap()
+            .1
+        };
+        let in_flight = || {
+            book.state
+                .lock()
+                .trade_auto
+                .as_ref()
+                .unwrap()
+                .in_flight("a")
+        };
+        let agent = crate::scheduler::trade::trade_session_hash("0/agent");
+        let session = || {
+            book.state
+                .lock()
+                .trade_auto
+                .as_ref()
+                .unwrap()
+                .session_in_flight(agent)
+        };
+        let counts = || {
+            let st = book.state.lock();
+            let auto = st.trade_auto.as_ref().unwrap();
+            (auto.credited, auto.credited_tokens, auto.uncredited)
+        };
+        // Rolled back before dispatch: the P never counts; the session is released.
+        let r = pick("r1", Some("0/agent"));
+        assert_eq!((in_flight(), session()), (Some(0), Some(1)));
+        drop(r);
+        assert_eq!((in_flight(), session()), (Some(0), Some(0)));
+        // Dispatched (twice: idempotent), 15,000 remaining seen (a cache
+        // miss), then 0: released at the 0 and credited 15,000; the later P
+        // response changes nothing.
+        let t = Instant::now();
+        let at = |ms: u64| t + std::time::Duration::from_millis(ms);
+        let mut r = pick("r2", Some("0/agent"));
+        r.mark_dispatched().unwrap();
+        r.mark_dispatched().unwrap();
+        assert_eq!((in_flight(), session()), (Some(1), Some(1)));
+        book.apply_progress("a", progress(1, &[("r2", 15_000)]), json!({}), at(1))
+            .unwrap();
+        assert_eq!(in_flight(), Some(1));
+        book.apply_progress("a", progress(2, &[("r2", 0)]), json!({}), at(2))
+            .unwrap();
+        assert_eq!((in_flight(), session()), (Some(0), Some(0)));
+        assert_eq!(counts(), (1, 15_000, 0));
+        r.finish("prefill_response_success").unwrap();
+        assert_eq!((in_flight(), counts()), (Some(0), (1, 15_000, 0)));
+        // A success response without a 0 snapshot credits the estimate.
+        let mut r = pick("r3", None);
+        r.mark_dispatched().unwrap();
+        r.finish("prefill_response_success").unwrap();
+        assert_eq!((in_flight(), counts()), (Some(0), (2, 27_000, 0)));
+        // An error response releases without credit.
+        let mut r = pick("r4", None);
+        r.mark_dispatched().unwrap();
+        r.finish("prefill_response_error").unwrap();
+        assert_eq!((in_flight(), counts()), (Some(0), (2, 27_000, 1)));
+        // A transport error (unknown) releases; its late finish does not again.
+        let mut r = pick("r5", None);
+        r.mark_dispatched().unwrap();
+        r.mark_unknown("prefill_transport_error: reset").unwrap();
+        assert_eq!((in_flight(), counts()), (Some(0), (2, 27_000, 2)));
+        r.finish("prefill_response_success").unwrap();
+        assert_eq!((in_flight(), counts()), (Some(0), (2, 27_000, 2)));
+        // A drop after dispatch (unknown) releases the P and the session.
+        let mut r = pick("r6", Some("0/agent"));
+        r.mark_dispatched().unwrap();
+        assert_eq!((in_flight(), session()), (Some(1), Some(1)));
+        drop(r);
+        assert_eq!((in_flight(), session()), (Some(0), Some(0)));
+        assert_eq!(counts(), (2, 27_000, 3));
+        // Two overlapping requests: the P is empty only after both.
+        let (mut x, mut y) = (pick("r7", None), pick("r8", None));
+        x.mark_dispatched().unwrap();
+        y.mark_dispatched().unwrap();
+        assert_eq!(in_flight(), Some(2));
+        x.finish("prefill_response_success").unwrap();
+        assert_eq!(in_flight(), Some(1));
+        y.finish("prefill_response_success").unwrap();
+        assert_eq!(in_flight(), Some(0));
+    }
+
+    /// The floor of the pull price phi: lambda_P = max(min, lambda_q x
+    /// phi_P), min = --trade-copy-lambda-min (4.6). `c` (no
+    /// eviction, phi 0) pays 4.6 (floored) instead of 0, `b` (phi 0.25)
+    /// 18.4 x 0.25 = 4.6 (not floored), `d` (no host_room data) 18.4. The
+    /// floored pull of 100k tokens costs 460k: the request stays on the owner.
+    /// The snapshot counts the priced rows, the floored rows and the
+    /// decisions whose chosen P was floored.
+    #[test]
+    fn trade_phi_floor_is_the_auto_min() {
+        use crate::scheduler::trade::{TradePullPrice, TradeRateMode};
+        let Some(t0) = Instant::now().checked_sub(std::time::Duration::from_secs(600)) else {
+            return; // the monotonic clock is younger than 10 minutes
+        };
+        let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
+        let params = crate::scheduler::trade::TradeParams {
+            rate_mode: TradeRateMode::Auto,
+            pull_price: TradePullPrice::Phi,
+            ..auto_trade(18.4)
+        };
+        let room =
+            |c0: u64, c1: u64| json!({"evicted_class0_tokens": c0, "evicted_class1_tokens": c1});
+        let book = CostBook::new_uncached(None).unwrap();
+        book.enable_host_room();
+        book.enable_host_room_phi(120.0);
+        for (url, first, second) in [("b", (0, 0), (300, 100)), ("c", (50, 50), (50, 50))] {
+            book.note_host_room(url, room(first.0, first.1), at(589.0));
+            book.note_host_room(url, room(second.0, second.1), at(590.0));
+        }
+        let mut busy = uncached(&book, "busy", "a", 60_000);
+        busy.mark_dispatched().unwrap();
+        let (_, r, d) = book
+            .reserve_trade_session(
+                110_000,
+                Some("f1".into()),
+                vec![
+                    candidate("a", 100_000),
+                    pulling("b", 0, 100_000),
+                    pulling("c", 0, 100_000),
+                    pulling("d", 0, 100_000),
+                ],
+                params,
+                Some("0/agent-1"),
+            )
+            .unwrap();
+        drop(r);
+        let rows = d["candidates"].as_array().unwrap();
+        let col = |key: &str| rows.iter().map(|r| r[key].clone()).collect::<Vec<_>>();
+        assert_eq!(d["phi_lambda_min"], 4.6, "{d}");
+        assert_eq!(rows[2]["copy_lambda"], 4.6, "{d}");
+        assert_eq!(rows[1]["copy_lambda"], 4.6, "{d}");
+        assert_eq!(rows[3]["copy_lambda"], 18.4, "{d}");
+        assert_eq!(
+            col("phi_floored"),
+            [json!(false), json!(false), json!(true), json!(false)]
+        );
+        let copy_c = rows[2]["copy_tokens"].as_f64().unwrap();
+        assert!((copy_c - 460_000.0).abs() < 1e-6, "{d}");
+        assert_eq!(d["chosen"], "a", "the floor keeps the owner: {d}");
+        assert_eq!(
+            d["copy_lambda"], 18.4,
+            "the owner's price (no host_room data)"
+        );
+        assert_eq!(d["phi_floored"], false);
+        let prices = &book.snapshot()["phi_prices"];
+        assert_eq!(
+            (
+                prices["decisions"].clone(),
+                prices["rows"].clone(),
+                prices["rows_floored"].clone(),
+                prices["rows_zero"].clone(),
+                prices["chosen_floored"].clone()
+            ),
+            (json!(1), json!(4), json!(1), json!(0), json!(0))
+        );
+    }
+
+    /// Pull price phi: candidate P pays lambda_q x phi_P per pulled token.
+    /// lambda_q = the copy price auto before the clamp: the fallback 18.4
+    /// during start-up, then q (mu 1, R = R_hat). The owner `a` has 60k
+    /// pending; `b` evicted 300 class-0 and 100 class-1 host tokens (phi
+    /// 0.25), `c` evicted none (phi 0: a free pull), `d` has no host_room
+    /// data (it pays lambda_q, reason no_host_room). With the floor min 0
+    /// (the lambda = q words) the request moves to `c` with a pull, where the
+    /// lambda price keeps it on `a`. The lambda price writes no phi key, and
+    /// its copy charge is lambda x pulled. The decision's copy_lambda is the
+    /// price of the chosen P.
+    #[test]
+    fn trade_phi_prices_each_candidate_with_q_times_its_phi() {
+        use crate::scheduler::trade::{TradeLambdaMode, TradePullPrice, TradeRateMode};
+        let Some(t0) = Instant::now().checked_sub(std::time::Duration::from_secs(600)) else {
+            return; // the monotonic clock is younger than 10 minutes
+        };
+        let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
+        let lambda_params = crate::scheduler::trade::TradeParams {
+            rate_mode: TradeRateMode::Auto,
+            ..auto_trade(18.4)
+        };
+        let TradeLambdaMode::Auto { q, mu, max, .. } = lambda_params.copy_lambda_mode else {
+            unreachable!("auto_trade is auto");
+        };
+        let phi_params = crate::scheduler::trade::TradeParams {
+            pull_price: TradePullPrice::Phi,
+            copy_lambda_mode: TradeLambdaMode::Auto {
+                q,
+                mu,
+                min: 0.0,
+                max,
+            },
+            ..lambda_params
+        };
+        let room =
+            |c0: u64, c1: u64| json!({"evicted_class0_tokens": c0, "evicted_class1_tokens": c1});
+        let candidates = || {
+            vec![
+                candidate("a", 100_000),
+                pulling("b", 0, 100_000),
+                pulling("c", 0, 100_000),
+                pulling("d", 0, 100_000),
+            ]
+        };
+        let decide = |book: &Arc<CostBook>, rid: &str, params| {
+            let (_, r, d) = book
+                .reserve_trade_session(
+                    110_000,
+                    Some(rid.into()),
+                    candidates(),
+                    params,
+                    Some("0/agent-1"),
+                )
+                .unwrap();
+            drop(r);
+            d
+        };
+        let setup = |phi: bool| {
+            let book = CostBook::new_uncached(None).unwrap();
+            book.enable_host_room();
+            if phi {
+                book.enable_host_room_phi(120.0);
+            }
+            for (url, first, second) in [("b", (0, 0), (300, 100)), ("c", (50, 50), (50, 50))] {
+                book.note_host_room(url, room(first.0, first.1), at(589.0));
+                book.note_host_room(url, room(second.0, second.1), at(590.0));
+            }
+            // A section without the counters: no phi for `a`.
+            book.note_host_room("a", json!({"free_tokens": 0}), at(590.0));
+            let mut busy = uncached(&book, "busy", "a", 60_000);
+            busy.mark_dispatched().unwrap();
+            (book, busy)
+        };
+
+        // The lambda price: one lambda (the fallback 18.4), no phi key.
+        let (book, _busy) = setup(false);
+        let d = decide(&book, "l1", lambda_params);
+        assert_eq!(d["chosen"], "a", "{d}");
+        for key in [
+            "pull_price",
+            "phi_lambda_base",
+            "phi_base_source",
+            "phi_tau_s",
+        ] {
+            assert!(d.get(key).is_none(), "{key}: {d}");
+        }
+        for row in d["candidates"].as_array().unwrap() {
+            assert!(row.get("copy_lambda").is_none() && row.get("phi_hat").is_none());
+        }
+        let copy_d = d["candidates"][3]["copy_tokens"].as_f64().unwrap();
+        assert!((copy_d - 18.4 * 100_000.0).abs() < 1e-6, "{d}");
+        assert!(book.snapshot().get("phi_by_p").is_none());
+
+        // The phi price during start-up: lambda_q = the fallback 18.4.
+        let (book, _busy) = setup(true);
+        let d = decide(&book, "p1", phi_params);
+        assert_eq!(d["pull_price"], "phi");
+        assert_eq!(d["phi_base_source"], "startup");
+        assert_eq!(d["phi_lambda_base"], 18.4);
+        assert_eq!(d["phi_tau_s"], 120.0);
+        let rows = d["candidates"].as_array().unwrap();
+        let col = |key: &str| rows.iter().map(|r| r[key].clone()).collect::<Vec<_>>();
+        assert_eq!(
+            col("phi_source"),
+            [
+                json!("no_host_room"),
+                json!("phi"),
+                json!("no_eviction"),
+                json!("no_host_room")
+            ]
+        );
+        let lambda_b = rows[1]["copy_lambda"].as_f64().unwrap();
+        assert!(
+            (rows[1]["phi_hat"].as_f64().unwrap() - 0.25).abs() < 1e-12,
+            "{d}"
+        );
+        assert!((lambda_b - 18.4 * 0.25).abs() < 1e-9, "{d}");
+        assert_eq!(rows[2]["copy_lambda"], 0.0);
+        assert_eq!(rows[2]["phi_hat"], 0.0);
+        assert_eq!(rows[3]["copy_lambda"], 18.4);
+        assert!(rows[3]["phi_hat"].is_null());
+        let copy_b = rows[1]["copy_tokens"].as_f64().unwrap();
+        assert!((copy_b - lambda_b * 100_000.0).abs() < 1e-6, "{d}");
+        assert_eq!(rows[2]["copy_tokens"], 0.0);
+        assert_eq!(d["chosen"], "c", "the free pull moves the request: {d}");
+        assert_eq!(d["pulled_tokens"], 100_000);
+        // The decision reports the price of the chosen P (and the auto one).
+        assert_eq!(d["copy_lambda"], 0.0, "{d}");
+        assert_eq!(d["copy_lambda_used"], 0.0, "{d}");
+        assert_eq!(d["copy_lambda_auto"], 18.4, "{d}");
+        assert_eq!(d["phi_lambda_min"], 0.0, "{d}");
+        assert_eq!(d["phi_floored"], false, "{d}");
+        assert!(rows.iter().all(|r| r["phi_floored"] == false), "{d}");
+        let snapshot = book.snapshot();
+        let phi_b = &snapshot["phi_by_p"]["b"];
+        assert!((phi_b["phi_hat"].as_f64().unwrap() - 0.25).abs() < 1e-12);
+        assert_eq!(snapshot["phi_by_p"]["c"]["source"], "no_eviction");
+        assert_eq!(snapshot["phi_by_p"]["a"]["source"], "no_host_room");
+        assert_eq!(snapshot["phi_invalid"], 1);
+
+        // After tau of auto history: lambda_q = q (mu 1, R = R_hat).
+        let mut auto = crate::scheduler::trade::TradeAutoState::new(t0, 120.0);
+        auto.observe_pool(["a", "b", "c", "d"], t0);
+        let mut t = 0.0;
+        while t < 590.0 {
+            for p in ["a", "b", "c", "d"] {
+                auto.dispatched(p, at(t));
+                auto.prefill_done(p, Some(30_000), at(t + 3.0));
+            }
+            t += 4.0;
+        }
+        for i in 0..60u64 {
+            auto.session_started(i, at(594.0));
+            auto.session_finished(i, at(595.0));
+        }
+        book.state.lock().trade_auto = Some(auto);
+        let d = decide(&book, "p2", phi_params);
+        assert!(d["fallback_reason"].is_null(), "{d}");
+        assert_eq!(d["phi_base_source"], "q");
+        let q = d["q"].as_f64().unwrap();
+        assert_eq!(d["lambda_raw"], q, "R = R_hat and mu 1: {d}");
+        assert_eq!(d["phi_lambda_base"], q);
+        let rows = d["candidates"].as_array().unwrap();
+        let lambda_b = rows[1]["copy_lambda"].as_f64().unwrap();
+        assert!((lambda_b - q * 0.25).abs() < 1e-9, "{d}");
+        assert_eq!(rows[3]["copy_lambda"], q);
+        assert_eq!(d["chosen"], "c", "{d}");
+        assert_eq!(
+            book.snapshot()["phi_prices"]["rows_zero"],
+            2,
+            "c in both decisions"
+        );
+    }
+
+    /// Regression: a P-leg that the engine never listed gets
+    /// a transport error and stays unknown while its P keeps answering. It
+    /// holds its work until a reply of its P sent 60 s after it became
+    /// unknown, then expires: every counter of its worker returns to its
+    /// value before the reservation (another request stays), the RID leaves
+    /// the active map but stays used, the TRADE auto end (applied at the
+    /// transport error) is not applied again, and the trace has exactly one
+    /// `expired` event with the reason and the evidence, also after later
+    /// replies and snapshots.
+    #[test]
+    fn unknown_never_listed_expires_after_the_expiry_and_releases_its_work_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cost.jsonl");
+        let expire = Some(secs(60));
+        let book =
+            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", expire)
+                .unwrap();
+        let mut other = uncached(&book, "other", "a", 7_000);
+        other.mark_dispatched().unwrap();
+        let before = ledger(&book, "a");
+        assert_eq!(before, (7_000, 7_000, 0, 7_000, 1));
+        // 20,000 tokens with 8,000 cached: 12,000 uncached.
+        let (_, mut lost, _) = book
+            .reserve_trade_session(
+                20_000,
+                Some("lost".into()),
+                vec![candidate("a", 8_000)],
+                auto_trade(18.4),
+                Some("0/agent"),
+            )
+            .unwrap();
+        lost.mark_dispatched().unwrap();
+        lost.mark_unknown("prefill_transport_error: upstream timed out")
+            .unwrap();
+        let held = ledger(&book, "a");
+        assert_eq!(held, (19_000, 19_000, 0, 19_000, 2));
+        let auto = || {
+            let st = book.state.lock();
+            let auto = st.trade_auto.as_ref().unwrap();
+            (auto.in_flight("a"), auto.credited, auto.uncredited)
+        };
+        // The transport error ended the prefill (no credit).
+        assert_eq!(auto(), (Some(0), 0, 1));
+        let since = unknown_since(&book, &lost);
+        let just_before = since + secs(60) - std::time::Duration::from_millis(1);
+        reply(&book, "a", just_before, &[]);
+        assert_eq!(ledger(&book, "a"), held, "held before the expiry");
+        assert_eq!(book.snapshot()["unknown_requests"], 1);
+        reply(&book, "a", since + secs(60), &[]);
+        assert_eq!(ledger(&book, "a"), before);
+        {
+            let st = book.state.lock();
+            assert!(st.unknown.is_empty());
+            assert!(!st.active_by_rid.contains_key("lost"));
+            assert!(st.used_rids.contains("lost"));
+            assert_eq!(st.entries[&lost.id].status, Status::Expired);
+        }
+        assert_eq!(lost.debuginfo()["reason"], UNKNOWN_EXPIRED_REASON);
+        assert_eq!(auto(), (Some(0), 0, 1), "auto end applied once");
+        assert!(book
+            .reserve_uncached(1, Some("lost".into()), vec![candidate("a", 0)], 12288)
+            .is_err());
+        // Later replies and snapshots change nothing and write no second event.
+        reply(&book, "a", since + secs(600), &[]);
+        let snapshot = book.snapshot();
+        assert_eq!(snapshot["unknown_requests"], 0);
+        assert_eq!(snapshot["unknown_expire_s"], 60.0);
+        assert_eq!(snapshot["expired_rid_listed_again"], 0);
+        assert_eq!(snapshot["workers"][0]["status_counts"]["expired"], 1);
+        assert_eq!(ledger(&book, "a"), before);
+        let rows = trace_rows(&path);
+        let expired: Vec<&Value> = rows.iter().filter(|e| e["event"] == "expired").collect();
+        assert_eq!(expired.len(), 1, "{expired:?}");
+        let e = expired[0];
+        assert_eq!(e["entry"]["rid"], "lost");
+        assert_eq!(e["entry"]["status"], "expired");
+        assert_eq!(e["entry"]["reason"], UNKNOWN_EXPIRED_REASON);
+        assert_eq!(e["entry"]["uncached_tokens"], 12_000);
+        assert_eq!(e["policy"], "symmetric_pd_cost_function");
+        assert_eq!(e["expiry"]["expire_s"], 60.0);
+        assert_eq!(e["expiry"]["quiet_s"], 60.0);
+        assert_eq!(e["expiry"]["unknown_for_s"], 60.0);
+        assert!(e["expiry"]["since_last_progress_s"].is_null());
+        other.finish("prefill_response_success").unwrap();
+        assert_eq!(ledger(&book, "a"), (0, 0, 0, 0, 0));
     }
 }

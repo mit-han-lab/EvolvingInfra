@@ -40,7 +40,7 @@ use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
 use sgl_router::kv_hint::{KvHintConfig, KvWorkerMapEntry};
 use sgl_router::policies::factory::build_registry_with_defaults;
 use sgl_router::proxy::Proxy;
-use sgl_router::scheduler::co_schedule::TradeParams;
+use sgl_router::scheduler::trade::TradeParams;
 use sgl_router::scheduler::{DSelect, PSelect, RoleWeight};
 use sgl_router::server::app::build_router;
 use sgl_router::server::app_context::AppContext;
@@ -56,6 +56,7 @@ use zeromq::{Endpoint, RouterSocket, Socket, SocketRecv, SocketSend, ZmqMessage}
 
 const COMPLETIONS: &str = "/v1/completions";
 const GENERATE: &str = "/generate";
+const CHAT: &str = "/v1/chat/completions";
 const CHOICE_TIMEOUT: Duration = Duration::from_millis(500);
 
 // ---------------------------------------------------------------------------
@@ -365,7 +366,7 @@ async fn engine_loads(e: Engine) -> Response {
 }
 
 async fn serve_engine(e: Engine, listener: tokio::net::TcpListener) {
-    let (ec, eg, el) = (e.clone(), e.clone(), e);
+    let (ec, eg, eh, el) = (e.clone(), e.clone(), e.clone(), e);
     let app = axum::Router::new()
         .route(
             COMPLETIONS,
@@ -377,6 +378,13 @@ async fn serve_engine(e: Engine, listener: tokio::net::TcpListener) {
             post(move |Json(mut body): Json<Value>| {
                 body["mock_route"] = json!(GENERATE);
                 engine_completions(eg.clone(), body)
+            }),
+        )
+        .route(
+            CHAT,
+            post(move |Json(mut body): Json<Value>| {
+                body["mock_route"] = json!(CHAT);
+                engine_completions(eh.clone(), body)
             }),
         )
         .route("/v1/loads", get(move || engine_loads(el.clone())));
@@ -526,7 +534,6 @@ async fn fixture(opts: Opts) -> Fixture {
             trace_session_moves: false,
             trade_e3: None,
             pull_from_any_holder: false,
-            olp: None,
             trace_async: false,
         });
         let kv = KvHintConfig {
@@ -573,7 +580,6 @@ async fn fixture(opts: Opts) -> Fixture {
             cache_aware: None,
             sticky: None,
             kv_hint,
-            co_schedule: None,
             pd_decode_policy: PdDecodePolicy::AffinityMinLoad,
             pd_decode_tokens: Some(PdDecodeTokensConfig::default()),
             pd_decision_replay: None,
@@ -787,6 +793,58 @@ async fn flex_late_d_fit_req_native_binds_the_fewest_requests_that_fit() {
         })
         .await
     );
+}
+
+/// A chat request under late D choose on symmetric workers: the P-leg
+/// (`kv_export` with the candidates, `late_d`) and one D-leg per candidate
+/// (`kv_import`) go to the engines' chat route with the messages, and the
+/// candidate that fits with the fewest requests answers.
+#[tokio::test]
+async fn flex_late_d_serves_chat_on_the_engines_chat_route() {
+    let f = fixture(Opts {
+        fit_native: true,
+        ..opts(
+            Some(LateDecodeRule::FitReq),
+            vec![Some((5, 100_000)), Some((1, 100)), Some((2, 100_000))],
+        )
+    })
+    .await;
+    let messages = json!([{"role": "user", "content": "x ".repeat(256)}]);
+    let res = f
+        .post_to(
+            CHAT,
+            json!({"model": "tiny", "messages": messages, "max_tokens": 4, "rid": "r-chat"}),
+            None,
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["choices"][0]["text"], "x");
+
+    let p = f.seen.of(|b| b.get("kv_export").is_some());
+    assert_eq!(p.len(), 1);
+    let (_, p_body) = &p[0];
+    assert_eq!(p_body["mock_route"], CHAT);
+    assert_eq!(p_body["messages"], messages);
+    assert_eq!(p_body["late_d"]["mode"], "choose");
+    assert_eq!(p_body["late_d"]["k"], 3);
+    let id = p_body["kv_export"]["transfer_id"].as_u64().unwrap();
+    let legs = f.seen.of(|b| b.get("kv_import").is_some());
+    assert_eq!(legs.len(), 3);
+    for (_, b) in &legs {
+        assert_eq!(b["mock_route"], CHAT);
+        assert_eq!(b["messages"], messages);
+        assert_eq!(b["kv_import"]["transfer_id"].as_u64(), Some(id));
+        assert!(b["late_d"]["cand_idx"].is_u64());
+        assert_eq!(b["rid"], "r-chat");
+    }
+    let want = f
+        .d_urls
+        .iter()
+        .position(|u| f.d_capacity[u] == Some((2, 100_000)))
+        .unwrap() as u64;
+    assert_eq!(f.transfers.get(id).winner, Some(want));
+    let late = f.ctx.late_bind.as_ref().unwrap();
+    assert_eq!(late.stats().legs_winner.load(Ordering::Relaxed), 1);
 }
 
 /// A native `/generate` request under late D choose takes the plain Split:

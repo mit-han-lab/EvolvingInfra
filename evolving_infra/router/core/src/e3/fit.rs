@@ -227,7 +227,7 @@ pub enum LaunchSource {
     Window,
     Calibration,
     Constant,
-    /// `--co-schedule-trade-e3-frozen-fit`: offline warmup constants.
+    /// `--trade-e3-frozen-fit`: offline warmup constants.
     Frozen,
 }
 

@@ -118,6 +118,6 @@ def test_kimi_config_passes_its_tokenizer_environment_and_image_layout(stack, tm
     assert s.cfg["engine_env"]["SGLANG_PREFILL_STATE_PUSH_PORT"] == 26648
     assert s.cfg["frontend"]["image_config"]["layout_type"] == "kimi_k25"
     args = s.cfg["router_args"]
-    assert "--co-schedule-trade" in args and "--co-schedule-trade-wait=e3" in args
+    assert "--trade-wait=e3" in args
     files = [a.split("=", 1)[1] for a in args if "e3/" in a]
     assert len(files) == 2 and all(f.startswith("/") and Path(f).is_file() for f in files), "full paths"

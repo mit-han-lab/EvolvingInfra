@@ -106,7 +106,7 @@ pub fn from_header(headers: &HeaderMap, name: &str) -> Result<Option<RequestIden
 /// The session identity of a request for the TRADE copy price `auto`
 /// (N_active): the identity of [`KV_SESSION_HEADER`], else of
 /// [`CONTEXT_HEADER`], as
-/// [`crate::scheduler::co_schedule::trade_session_key`]. A missing or
+/// [`crate::scheduler::trade::trade_session_key`]. A missing or
 /// invalid header gives None; this never rejects a request (the routes
 /// validate the headers they use themselves).
 pub fn trade_session_key(headers: &HeaderMap) -> Option<String> {
@@ -114,10 +114,7 @@ pub fn trade_session_key(headers: &HeaderMap) -> Option<String> {
         .into_iter()
         .find_map(|name| from_header(headers, name).ok().flatten())
         .map(|identity| {
-            crate::scheduler::co_schedule::trade_session_key(
-                &identity.agent_id,
-                identity.subagent_id,
-            )
+            crate::scheduler::trade::trade_session_key(&identity.agent_id, identity.subagent_id)
         })
 }
 

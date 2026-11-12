@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! TRADE `wait = e3`: the subscriber of the P engines' state push
-//! (`--co-schedule-trade-e3-push-port PORT`).
+//! (`--trade-e3-push-port PORT`).
 //!
 //! The P engine (DecoupledEngine prefill state push, wire contract v1 in
 //! `prefill_state_push.py`) publishes its `prefill_routing`
@@ -49,7 +49,7 @@
 //!
 //! The decision ([`crate::cost_balance`]) uses a P's pushed state instead of
 //! its polled snapshot when the state is at most
-//! `--co-schedule-trade-eft-max-view-age-ms` old, has the epoch of the P's
+//! `--trade-e3-max-view-age-ms` old, has the epoch of the P's
 //! polled snapshot (the push and the poll read one tracker, so another epoch
 //! means a wrong endpoint or a restart between them) and is usable;
 //! otherwise it uses the polled snapshot and names the reason.

@@ -42,7 +42,6 @@ fn config(_worker_url: &str) -> Config {
             cache_aware: None,
             sticky: None,
             kv_hint: None,
-            co_schedule: None,
             pd_decode_policy: sgl_router::config::PdDecodePolicy::AffinityMinLoad,
             pd_decision_replay: None,
             pd_decode_tokens: None,
