@@ -149,6 +149,37 @@ impl AppContext {
         policies: Arc<PolicyRegistry>,
         active_load: Arc<ActiveLoadRegistry>,
     ) -> Self {
+        let prepared_config = crate::backend::execution::PreparedConfig::from_env()
+            .expect("valid EVOLVING_INFRA_PREPARED_CONFIG");
+        Self::with_role_control_inputs(
+            config,
+            tokenizers,
+            proxy,
+            registry,
+            policies,
+            active_load,
+            prepared_config,
+            None,
+        )
+    }
+
+    /// [`Self::with_active_load`] with the inputs that production reads from
+    /// the environment given explicitly: the prepared-input configuration
+    /// (`EVOLVING_INFRA_PREPARED_CONFIG`) and, with external role control,
+    /// the role controller's credential (`None`: read from
+    /// `EVOLVING_INFRA_ROLE_CONTROL_TOKEN_FILE`). Tests use it to run role
+    /// control without process-wide environment variables.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_role_control_inputs(
+        config: Config,
+        tokenizers: Arc<TokenizerRegistry>,
+        proxy: Arc<Proxy>,
+        registry: Arc<WorkerRegistry>,
+        policies: Arc<PolicyRegistry>,
+        active_load: Arc<ActiveLoadRegistry>,
+        prepared_config: Option<crate::backend::execution::PreparedConfig>,
+        role_key: Option<String>,
+    ) -> Self {
         let metrics = MetricsRegistry::new();
         // Wire the per-worker active-load gauge so `sgl_router_active_load`
         // mirrors the live counter on every register / drop / sweep.
@@ -191,8 +222,6 @@ impl AppContext {
             .as_ref()
             .and_then(|c| c.dynamo.as_ref())
             .map(|c| Arc::new(crate::kv_hint::KvHintInjector::new(c)));
-        let prepared_config = crate::backend::execution::PreparedConfig::from_env()
-            .expect("valid EVOLVING_INFRA_PREPARED_CONFIG");
         // The cost function reserves at admit. With prepared inputs the
         // execution registry owns the reservation and applies the tokenizer's
         // P-leg callbacks (upload = dispatch, terminal P = finish, uncertain
@@ -205,12 +234,15 @@ impl AppContext {
             "external role control requires prepared usage callbacks"
         );
         let external_role_key = external.then(|| {
-            let path = std::env::var_os("EVOLVING_INFRA_ROLE_CONTROL_TOKEN_FILE")
-                .expect("external role control requires EVOLVING_INFRA_ROLE_CONTROL_TOKEN_FILE");
-            let key = std::fs::read_to_string(path)
-                .expect("read role controller credential")
-                .trim()
-                .to_string();
+            let key = role_key.unwrap_or_else(|| {
+                let path = std::env::var_os("EVOLVING_INFRA_ROLE_CONTROL_TOKEN_FILE").expect(
+                    "external role control requires EVOLVING_INFRA_ROLE_CONTROL_TOKEN_FILE",
+                );
+                std::fs::read_to_string(path)
+                    .expect("read role controller credential")
+                    .trim()
+                    .to_string()
+            });
             assert!(
                 key.len() >= 32 && !key.chars().any(char::is_whitespace),
                 "invalid role control credential"

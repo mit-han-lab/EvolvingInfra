@@ -390,6 +390,16 @@ pub(crate) struct ChooseDispatch {
     /// store (the D-legs went without pixels). Held until the request
     /// ends: by the stream when streaming, else until the answer is read.
     pub(crate) image_hold: Option<crate::image_source::Hold>,
+    /// symmetric_pd: the arrival pick's D-leg in its worker's in-flight
+    /// decode count (the backend ledger), and the function that counts a
+    /// D-leg on a worker. At the bind the count moves to the bound decode
+    /// and lasts as long as its answer (the stream, when streaming); a
+    /// request that ends before the bind drops it. A decode->prefill drain
+    /// waits for it. `None` outside symmetric_pd.
+    pub(crate) decode_reservation: Option<(
+        crate::backend::state::DecodeReservation,
+        crate::backend::execution::ReserveDecode,
+    )>,
 }
 
 /// The breaker slot a D-leg claimed with `allow()`. A leg dropped without an
@@ -517,6 +527,7 @@ pub(crate) async fn dispatch(
         duration_guard,
         ttft_hook,
         image_hold,
+        decode_reservation,
     } = d;
     let Choose {
         late,
@@ -925,7 +936,15 @@ pub(crate) async fn dispatch(
     if let Some(arm) = smg_arm {
         arm.arm();
     }
-    let decode_guard = (decode.load_guard(), charge, smg_load);
+    // symmetric_pd: the in-flight count moves from the arrival pick to the
+    // bound decode (counted there first, so the request never leaves the
+    // ledger) and rides with the answer.
+    let d_reservation = decode_reservation.map(|(arrival, reserve)| {
+        let bound = reserve(&decode.url);
+        drop(arrival);
+        bound
+    });
+    let decode_guard = (decode.load_guard(), charge, smg_load, d_reservation);
     let abort_flag = ctx.config.proxy.abort_decode_on_prefill_failure;
     let decode_url_header = HeaderValue::from_str(&decode.url).ok();
     let result = if streaming {

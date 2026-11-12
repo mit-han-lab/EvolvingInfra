@@ -831,6 +831,14 @@ async fn dispatch(
                 duration_guard: streaming.then(make_duration_guard),
                 ttft_hook: streaming.then(make_ttft_hook),
                 image_hold: late_image_hold.take(),
+                decode_reservation: spd_decision
+                    .as_mut()
+                    .and_then(|d| d.d_reservation.take())
+                    .zip(ctx.symmetric_pd.as_ref().map(|spd| {
+                        let spd = Arc::clone(spd);
+                        Arc::new(move |w: &str| spd.reserve_decode(w))
+                            as crate::backend::execution::ReserveDecode
+                    })),
             },
         )
         .await
