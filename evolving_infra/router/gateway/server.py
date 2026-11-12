@@ -61,9 +61,8 @@ class Gateway:
         try:
             async with self.session.post(f"{self.router}/kv_sessions/end", json={
                     "agent_id": branch.agent_id, "subagent_id": branch.subagent_id}) as r:
-                if r.status >= 300:
-                    log.warning("end %s/%d: HTTP %d %s", branch.agent_id, branch.subagent_id, r.status,
-                                (await r.text())[:200])
+                if r.status >= 300 and "unknown KV session" not in (text := await r.text()):
+                    log.warning("end %s/%d: HTTP %d %s", branch.agent_id, branch.subagent_id, r.status, text[:200])
                 else:
                     self.ended += 1
         except Exception as e:  # noqa: BLE001 - the branch is forgotten either way
@@ -81,32 +80,36 @@ class Gateway:
             return await self.forward(request, body, None)
         body.pop("rid", None)  # the router derives it from the identity
         assignment = self.tracker.assign(messages)
-        reached = False
+        outcome = {"sent": False, "ok": False}
         try:
-            response, reached = await self.forward(request, body, assignment.header, report=True)
-            return response
-        finally:
-            self.tracker.finish(assignment, reached_router=reached)
+            return await self.forward(request, body, assignment.header, outcome)
+        finally:  # also when the client disconnects and this handler is cancelled
+            self.tracker.finish(assignment, reached_router=outcome["sent"], ok=outcome["ok"])
 
-    async def forward(self, request: web.Request, body, identity: str | None, report: bool = False):
+    async def forward(self, request: web.Request, body, identity: str | None, outcome: dict | None = None):
         headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
         headers["Content-Type"] = "application/json"
         if identity:
             headers["x-agent-context"] = identity
-        reached = False
+        outcome = {} if outcome is None else outcome
+        out = None
         try:
+            outcome["sent"] = True  # from here the router may have registered the branch
             async with self.session.post(self.router + request.path, json=body, headers=headers) as upstream:
-                reached = 200 <= upstream.status < 300
                 out = web.StreamResponse(status=upstream.status, headers={
                     k: v for k, v in upstream.headers.items() if k.lower() not in HOP})
                 await out.prepare(request)
                 async for chunk in upstream.content.iter_any():
                     await out.write(chunk)
                 await out.write_eof()
+                outcome["ok"] = 200 <= upstream.status < 300
         except aiohttp.ClientError as e:
+            if out is not None and out.prepared:  # headers are sent: end the reply where it broke
+                log.warning("upstream broke mid-reply: %r", e)
+                return out
             out = web.json_response({"error": {"message": f"router unreachable: {e}", "type": "server_error"}},
                                     status=502)
-        return (out, reached) if report else out
+        return out
 
     async def passthrough(self, request: web.Request) -> web.StreamResponse:
         headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}

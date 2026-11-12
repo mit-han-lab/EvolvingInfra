@@ -36,6 +36,9 @@ def _text(content) -> str:
                 elif part.get("type") == "image_url":
                     url = (part.get("image_url") or {}).get("url", "")
                     out.append("<image:" + hashlib.sha256(str(url).encode()).hexdigest()[:16] + ">")
+                else:  # other parts (files, refusals, thinking): their content, without cache markers
+                    rest = {k: v for k, v in part.items() if k != "cache_control"}
+                    out.append(json.dumps(rest, sort_keys=True, ensure_ascii=False))
             else:
                 out.append(str(part))
         return "".join(out)
@@ -59,7 +62,8 @@ class Branch:
     history: list = field(default_factory=list)  # message keys of its earlier requests, newest last
     next_request_id: int = 0
     inflight: int = 0
-    sent: bool = False          # at least one request reached the router with this identity
+    sent: bool = False          # at least one request was sent to the router with this identity
+    last_ok: bool = True        # the last request completed (a failed one may be retried as is)
     last_used: float = field(default_factory=time.monotonic)
     ended: bool = False
 
@@ -86,14 +90,17 @@ class Tracker:
         keys = tuple(message_key(m) for m in messages if isinstance(m, dict))
         now = time.monotonic() if now is None else now
         live = [b for b in self.branches if not b.ended]
-        best = max((b for b in live if b.prefix and len(b.prefix) <= len(keys) and keys[:len(b.prefix)] == b.prefix),
+        # A request continues a branch when it is longer than the branch's last request, or repeats a
+        # failed one (a retry). Two conversations that open with the same messages stay apart.
+        best = max((b for b in live if b.prefix and keys[:len(b.prefix)] == b.prefix
+                    and (len(keys) > len(b.prefix) or (len(keys) == len(b.prefix) and not b.last_ok))),
                    key=lambda b: len(b.prefix), default=None)
         if best is not None and not best.inflight:
             branch = best
         else:
             # A busy branch, or a fork from an earlier turn: a new branch of the same agent.
             def depth(b):
-                hit = [len(p) for p in b.history + [b.prefix] if p and len(p) <= len(keys) and keys[:len(p)] == p]
+                hit = [len(p) for p in b.history + [b.prefix] if p and len(p) < len(keys) and keys[:len(p)] == p]
                 return max(hit, default=0)
             parent = max(live, key=depth, default=None) if best is None else best
             if parent is None or depth(parent) == 0:
@@ -114,10 +121,14 @@ class Tracker:
         branch.last_used = now
         return Assignment(branch, request_id)
 
-    def finish(self, assignment: Assignment, *, reached_router: bool, now: float | None = None) -> None:
+    def finish(self, assignment: Assignment, *, reached_router: bool, ok: bool = True,
+               now: float | None = None) -> None:
+        """reached_router: the request was sent to the router (it may have registered the branch);
+        ok: it completed."""
         branch = assignment.branch
         branch.inflight -= 1
         branch.sent = branch.sent or reached_router
+        branch.last_ok = ok
         branch.last_used = time.monotonic() if now is None else now
 
     def idle(self, idle_secs: float, now: float | None = None) -> list[Branch]:

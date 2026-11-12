@@ -57,6 +57,11 @@ writes its launch script.
   between turns (compaction) starts a new agent; the old branch ends after its idle time. Code that
   knows its agents and branches gives them exactly with
   [`connect-agent`](../../skills/connect-agent/SKILL.md).
+- A harness's sub-agent (a Claude Code Task, a Codex sub-agent) is a conversation of its own, so
+  the gateway gives it its own agent, not a branch of its parent. A branch of an agent is a
+  concurrent continuation or a fork from an earlier turn of the same conversation.
+- The gateway keeps its identities in memory. A restarted gateway sends no END for the branches
+  it knew, and the router keeps their sessions until it restarts too.
 - KV session retention needs a FULL-only cache tree: DeepSeek-V4-Flash (FULL+SWA) runs without it,
   and the gateway then sends no session END.
 - The gateway sends chat completions on the plain path. A stack started with `--planner` (KV

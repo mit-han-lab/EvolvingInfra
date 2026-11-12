@@ -124,3 +124,57 @@ def test_without_retention_no_end_is_sent():
         assert [s[0] for s in seen] == ["chat"]
 
     asyncio.run(run())
+
+
+def test_two_conversations_that_open_alike_stay_apart():
+    t = Tracker()
+    a = t.assign([SYS, U1])
+    t.finish(a, reached_router=True)
+    b = t.assign([SYS, U1])
+    assert b.branch.agent_id != a.branch.agent_id
+
+
+def test_a_retry_of_a_failed_request_continues_its_branch():
+    t = Tracker()
+    a = t.assign([SYS, U1])
+    t.finish(a, reached_router=True, ok=False)
+    b = t.assign([SYS, U1])
+    assert b.branch is a.branch and b.request_id == 1
+
+
+def test_unknown_content_parts_are_part_of_the_key():
+    x = {"role": "user", "content": [{"type": "file", "file": {"file_id": "a"}}]}
+    y = {"role": "user", "content": [{"type": "file", "file": {"file_id": "b"}}]}
+    assert message_key(x) != message_key(y)
+
+
+def test_a_branch_whose_request_failed_still_gets_end():
+    async def run():
+        seen = []
+
+        async def chat(request):
+            seen.append(("chat", request.headers.get("x-agent-context"), None))
+            return web.json_response({"error": "boom"}, status=500)
+
+        async def end(request):
+            seen.append(("end", None, await request.json()))
+            return web.json_response({"accepted": True})
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", chat)
+        app.router.add_post("/kv_sessions/end", end)
+        router = TestServer(app)
+        await router.start_server()
+        gateway = Gateway(str(router.make_url("")), idle_end_secs=0.05, sweep_secs=0.02)
+        client = TestClient(TestServer(gateway.app()))
+        await client.start_server()
+        try:
+            r = await client.post("/v1/chat/completions", json={"model": "m", "messages": [SYS, U1]})
+            assert r.status == 500
+            await asyncio.sleep(0.2)
+        finally:
+            await client.close()
+            await router.close()
+        assert [s[0] for s in seen] == ["chat", "end"]
+
+    asyncio.run(run())
