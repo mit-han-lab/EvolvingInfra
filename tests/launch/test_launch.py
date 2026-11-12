@@ -87,10 +87,10 @@ def test_config_and_planner(stack):
 
 
 def test_own_index(monkeypatch):
-    monkeypatch.setattr(hardware.socket, "gethostname", lambda: "nvl72d022-T02")
-    monkeypatch.setattr(hardware.socket, "getfqdn", lambda: "nvl72d022-T02.cluster")
-    assert hardware.own_index(["nvl72d011-T07", "nvl72d022-T02"]) == 1
-    assert hardware.own_index(["nvl72d011-T07.cluster", "nvl72d022-T02.cluster"]) == 1
+    monkeypatch.setattr(hardware.socket, "gethostname", lambda: "rack02-node07")
+    monkeypatch.setattr(hardware.socket, "getfqdn", lambda: "rack02-node07.cluster")
+    assert hardware.own_index(["rack01-node03", "rack02-node07"]) == 1
+    assert hardware.own_index(["rack01-node03.cluster", "rack02-node07.cluster"]) == 1
 
 
 def test_one_node_config_replaces_flags_of_its_base(stack):
