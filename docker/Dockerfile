@@ -86,13 +86,14 @@ COPY pyproject.toml README.md LICENSE NOTICE /opt/evolving-infra/
 COPY evolving_infra/router/frontend /opt/evolving-infra/evolving_infra/router/frontend
 COPY evolving_infra/router/indexer /opt/evolving-infra/evolving_infra/router/indexer
 COPY evolving_infra/router/client /opt/evolving-infra/evolving_infra/router/client
+COPY evolving_infra/router/gateway /opt/evolving-infra/evolving_infra/router/gateway
 COPY evolving_infra/planner /opt/evolving-infra/evolving_infra/planner
 COPY evolving_infra/launch /opt/evolving-infra/evolving_infra/launch
 COPY examples /opt/evolving-infra/examples
 RUN python3 -m venv /opt/indexer-venv \
  && /opt/indexer-venv/bin/pip install -q "ai-dynamo==${DYNAMO_VERSION}" msgpack pyzmq \
  && /opt/indexer-venv/bin/pip install -q "/opt/evolving-infra[frontend,indexer,planner]" 'fastapi<0.142' \
- && /opt/indexer-venv/bin/python -c 'import dynamo.llm, evolving_infra.router.frontend, evolving_infra.router.indexer, evolving_infra.planner, evolving_infra.launch' \
+ && /opt/indexer-venv/bin/python -c 'import dynamo.llm, evolving_infra.router.frontend, evolving_infra.router.indexer, evolving_infra.router.gateway, evolving_infra.planner, evolving_infra.launch' \
  && ln -s /opt/indexer-venv/bin/evolving-infra /usr/local/bin/evolving-infra
 
 # ---------------------------------------------------------------- replay client
