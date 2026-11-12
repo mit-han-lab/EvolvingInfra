@@ -43,7 +43,8 @@ cluster's login node, run them through the scheduler (`srun -N1 --container-imag
 
 Each host needs GPUs with RDMA NICs and the model at the same path. The launcher finds the NIC
 of every GPU and whether `nvidia_peermem` is loaded; you do not pass them. It prints what it
-found; `peer memory 0` means the module is not loaded and transfers go through host memory.
+found; `peer memory 0` means the module is not loaded and GPU memory is registered with the
+NICs through dma-buf (`WITH_NVIDIA_PEERMEM=0`), as on GB300 nodes.
 
 **Check**: every host lists its GPUs and at least one RDMA device, and finds `evolving-infra`
 or the image's runtime. Without an RDMA device P/D transfers cannot run: say so and stop.
@@ -77,7 +78,8 @@ The repository has no config to copy for it. Derive one, on one host first:
 
 1. **Start from the nearest example.** Copy `glm52-1node.yaml` with its base into a new
    directory `examples/<hardware>/` and set `model` and `served_model_name`. The model
-   directory needs `tokenizer.json`: the frontend reads it.
+   directory needs `tokenizer.json`: the router reads it (`tokenizer:` in the config names
+   another file).
 2. **Engine flags.** The engine takes SGLang's flags. Take the model's own flags
    (quantization, attention and MoE backends, `--trust-remote-code`) from its model card or
    its SGLang launch command, and replace the GLM-5.2 ones. Drop every `--dsa-*` flag for a
@@ -143,7 +145,8 @@ srun --overlap -N1 -n1 $C bash -c '<the request of step 5>' > $RUN/reply.json
 ### 5. Wait and verify
 
 The first host prints `ready: http://<ip>:30900/v1 (N workers, xPyD)` and writes `run/READY`.
-A first start takes about 20 minutes (weights, CUDA graphs). Then:
+A first start takes about 20 minutes (weights, CUDA graphs). Then, for a stack started without
+`--planner`:
 
 ```bash
 curl -s http://127.0.0.1:30900/v1/completions -H 'Content-Type: application/json' \
@@ -157,9 +160,18 @@ The reply's `choices[0].text` holds generated text. Report the URL, the workers,
 the reply. Each process logs to `run/logs/<name>.log`; `SIGTERM` to `evolving-infra serve`
 stops everything it started.
 
-**Check**: `run/READY` exists and the reply's `choices[0].text` holds generated text. If it
-does not become ready, or the request fails, use the [`diagnose-run`](../diagnose-run/SKILL.md)
-skill.
+With `--planner` and KV session retention (on unless the config sets `retention: false`), the
+router answers this request with HTTP 400 ("requires /symmetric_pd/prepared lifecycle
+callbacks"): it accepts generation on the prepared path only. Check that stack with
+`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30900/readyz` (200 once a prefill and
+a decode worker are up) and `curl -s http://127.0.0.1:30900/v1/models` (lists
+`<served_model_name>`). To check generation, start the same config once without `--planner` and
+send the request above, or send a prepared-path request as the
+[`connect-agent`](../connect-agent/SKILL.md) skill describes.
+
+**Check**: `run/READY` exists and the reply's `choices[0].text` holds generated text (with
+`--planner`: `/readyz` returns 200 and `/v1/models` lists the model). If it does not become
+ready, or the request fails, use the [`diagnose-run`](../diagnose-run/SKILL.md) skill.
 
 ## Returns
 
