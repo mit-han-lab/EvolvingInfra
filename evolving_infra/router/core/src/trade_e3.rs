@@ -138,7 +138,6 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use crate::e3::numeric::{py_cmp, py_max, quantile, sort_py};
-use crate::eft_cheap::{is_true, nonneg_int};
 use crate::e3::{
     arrival_rates, error_bound, features, fit_gpu_classes, fit_launch_intervals, make_params,
     receipt_delays, resolve_gpu, router_floor_ms, router_lag_next, row_ready, step_of, ArrivalRow,
@@ -146,6 +145,7 @@ use crate::e3::{
     GpuSample, GpuSources, InflightPass, Input, LagSample, LaunchAnchor, LaunchFit, LaunchSample,
     Output, Params, Partial, QueueRow, RowSource, RxLine, RxParams, Target,
 };
+use crate::eft_cheap::{is_true, nonneg_int};
 
 /// The deploy mode of the router's poll path: snapshot poll,
 /// router calibration without GPU times, the production rules.
@@ -586,9 +586,8 @@ impl FrozenFit {
             .clone();
         let file: FrozenFitFile =
             serde_json::from_value(body).map_err(|e| format!("{}: {e}", path.display()))?;
-        let refuse = |what: &str| -> Result<Self, String> {
-            Err(format!("{}: {what}", path.display()))
-        };
+        let refuse =
+            |what: &str| -> Result<Self, String> { Err(format!("{}: {what}", path.display())) };
         let finite = |xs: &[f64]| xs.iter().all(|x| x.is_finite());
         let gpu = file.gpu_busy;
         if gpu.small.is_none() && gpu.large.is_none() {
@@ -630,9 +629,7 @@ impl FrozenFit {
         let c = constants;
         let scalars = [c.idle_delay_s, c.phi_s, c.boot_s, c.lag_none_s];
         if !finite(&scalars) || !finite(&c.lag_next) {
-            return refuse(
-                "idle_delay_s, phi_s, boot_s, lag_none_s and lag_next must be finite",
-            );
+            return refuse("idle_delay_s, phi_s, boot_s, lag_none_s and lag_next must be finite");
         }
         for (name, got, want) in [
             ("chunk_tokens", file.chunk_tokens, CHUNK_TOKENS),

@@ -10,16 +10,16 @@ use clap::Parser;
 use std::num::NonZeroU32;
 
 use crate::config::{
-    default_cb_cool_down, default_symmetric_pd_load_poll_ms, default_symmetric_pd_max_queue_wait_ms,
-    default_symmetric_pd_max_uncached_tokens, default_proxy_request_timeout_secs,
-    default_stale_request_timeout_secs, resolve_mode, ActiveLoadConfig, CacheAwareConfig,
-    CircuitBreakerConfig, CoScheduleConfig, Config, DiscoveryBackend, SymmetricPdConfig,
-    SymmetricPdCostFunctionConfig, SymmetricPdDSelect, SymmetricPdImportCachePolicy, SymmetricPdPSelect,
-    SymmetricPdPreset,
-    SymmetricPdWorkerSpec, GatewayCacheAwareConfig, K8sDiscoveryConfig, KvIndexerEndpointConfig,
-    KvPullScope, LogFormat, ModelConfig, ObservabilityConfig, PdDecisionReplayConfig,
-    PdDecodePolicy, PdDecodeTokensConfig, PolicyKind, ProxyConfig, ServerConfig,
-    StaticUrlsDiscoveryConfig, StickyConfig, SYMMETRIC_PD_MAX_QUEUE_WAIT_MS_CAP,
+    default_cb_cool_down, default_proxy_request_timeout_secs, default_stale_request_timeout_secs,
+    default_symmetric_pd_load_poll_ms, default_symmetric_pd_max_queue_wait_ms,
+    default_symmetric_pd_max_uncached_tokens, resolve_mode, ActiveLoadConfig, CacheAwareConfig,
+    CircuitBreakerConfig, CoScheduleConfig, Config, DiscoveryBackend, GatewayCacheAwareConfig,
+    K8sDiscoveryConfig, KvIndexerEndpointConfig, KvPullScope, LogFormat, ModelConfig,
+    ObservabilityConfig, PdDecisionReplayConfig, PdDecodePolicy, PdDecodeTokensConfig, PolicyKind,
+    ProxyConfig, ServerConfig, StaticUrlsDiscoveryConfig, StickyConfig, SymmetricPdConfig,
+    SymmetricPdCostFunctionConfig, SymmetricPdDSelect, SymmetricPdImportCachePolicy,
+    SymmetricPdPSelect, SymmetricPdPreset, SymmetricPdWorkerSpec,
+    SYMMETRIC_PD_MAX_QUEUE_WAIT_MS_CAP,
 };
 
 const DEFAULT_KV_INDEXER_QUERY_TIMEOUT_MS: u64 = 100;
@@ -1235,10 +1235,12 @@ impl Cli {
                          --pd-late-decode-rule fit_req"
                     ))
                 }
-                (None, true) => return Err(anyhow!(
+                (None, true) => {
+                    return Err(anyhow!(
                     "--pd-late-decode-rule fit_req requires --pd-late-decode-fit-capacity-tokens \
                          (fixed capacity) or --pd-late-decode-fit-native (observed capacity)"
-                )),
+                ))
+                }
                 _ => {}
             }
         }
@@ -1259,17 +1261,24 @@ impl Cli {
     /// stay off: the cost function needs the KV directory and the servicers.
     fn apply_symmetric_pd_preset(&mut self) {
         use crate::config::{LateDecodeMode, LateDecodeRule};
-        if self.policy != PolicyKind::SymmetricPd || self.symmetric_pd_preset != SymmetricPdPreset::Paper {
+        if self.policy != PolicyKind::SymmetricPd
+            || self.symmetric_pd_preset != SymmetricPdPreset::Paper
+        {
             return;
         }
         self.symmetric_pd_force_split = true;
-        self.symmetric_pd_d_select.get_or_insert(SymmetricPdDSelect::RoundRobin);
+        self.symmetric_pd_d_select
+            .get_or_insert(SymmetricPdDSelect::RoundRobin);
         self.symmetric_pd_load_poll_ms.get_or_insert(100);
         if self.pd_late_decode.is_none() && self.symmetric_pd_decision_replay.is_none() {
             self.pd_late_decode = Some(LateDecodeMode::Choose);
-            let rule = *self.pd_late_decode_rule.get_or_insert(LateDecodeRule::FitReq);
-            self.pd_late_decode_candidates.get_or_insert_with(|| "all".into());
-            self.pd_late_decode_local.get_or_insert_with(|| "off".into());
+            let rule = *self
+                .pd_late_decode_rule
+                .get_or_insert(LateDecodeRule::FitReq);
+            self.pd_late_decode_candidates
+                .get_or_insert_with(|| "all".into());
+            self.pd_late_decode_local
+                .get_or_insert_with(|| "off".into());
             if rule == LateDecodeRule::FitReq && self.pd_late_decode_fit_capacity_tokens.is_none() {
                 self.pd_late_decode_fit_native = true;
                 self.pd_native_decode_state = true;
@@ -1278,14 +1287,20 @@ impl Cli {
         self.symmetric_pd_kv_session_retention = !self.symmetric_pd_no_kv_session_retention;
         // A worker that serves decode now may serve prefill after a role
         // change, so imported KV keeps the engine's host write policy.
-        self.symmetric_pd_import_cache_policy.get_or_insert(SymmetricPdImportCachePolicy::Retain);
+        self.symmetric_pd_import_cache_policy
+            .get_or_insert(SymmetricPdImportCachePolicy::Retain);
         if self.symmetric_pd_external_role_control {
-            self.symmetric_pd_role_drain_timeout_secs.get_or_insert(DEFAULT_ROLE_DRAIN_TIMEOUT_SECS);
+            self.symmetric_pd_role_drain_timeout_secs
+                .get_or_insert(DEFAULT_ROLE_DRAIN_TIMEOUT_SECS);
         }
         if self.kv_indexer_url.is_some() {
-            self.kv_indexer_timeout_ms.get_or_insert(PAPER_PRESET_KV_HINT_INDEXER_TIMEOUT_MS);
+            self.kv_indexer_timeout_ms
+                .get_or_insert(PAPER_PRESET_KV_HINT_INDEXER_TIMEOUT_MS);
         }
-        let servicers = self.kv_worker_map.as_deref().is_some_and(|map| map.contains("servicer"));
+        let servicers = self
+            .kv_worker_map
+            .as_deref()
+            .is_some_and(|map| map.contains("servicer"));
         if self.kv_indexer_url.is_some() && servicers && self.symmetric_pd_p_select.is_none() {
             self.symmetric_pd_p_select = Some(SymmetricPdPSelect::CostFunction);
             self.symmetric_pd_pull_hint = true;
@@ -1293,7 +1308,8 @@ impl Cli {
             self.kv_pull_scope.get_or_insert(KvPullScope::Any);
             self.co_schedule_trade = true;
             self.co_schedule_uncached_balance = true;
-            self.co_schedule_load_poll_ms.get_or_insert(DEFAULT_COST_FUNCTION_LOAD_POLL_MS);
+            self.co_schedule_load_poll_ms
+                .get_or_insert(DEFAULT_COST_FUNCTION_LOAD_POLL_MS);
             self.kv_pull_hint_min_incremental_tokens
                 .get_or_insert(crate::scheduler::co_schedule::TRADE_MIN_PULL_TOKENS as u32);
         }
@@ -1311,8 +1327,8 @@ impl Cli {
         let mut symmetric_pd = self.build_symmetric_pd()?;
         // `--symmetric-pd-p-select cost-function`: the TRADE flags of the
         // co-schedule policy configure the symmetric_pd P selection.
-        let flex_cost_function =
-            symmetric_pd.is_some() && self.symmetric_pd_p_select == Some(SymmetricPdPSelect::CostFunction);
+        let flex_cost_function = symmetric_pd.is_some()
+            && self.symmetric_pd_p_select == Some(SymmetricPdPSelect::CostFunction);
         let gateway_cache_aware = self.build_gateway_cache_aware()?;
         let pd_decision_replay = match &self.pd_decision_replay {
             Some(p) => {
@@ -1435,7 +1451,8 @@ impl Cli {
                  enabled by --cb-threshold)"
             ));
         }
-        let tuned_cache_aware = self.dynamo_cache_aware || self.cache_threshold.is_some()
+        let tuned_cache_aware = self.dynamo_cache_aware
+            || self.cache_threshold.is_some()
             || self.balance_abs_threshold.is_some()
             || self.balance_rel_threshold.is_some()
             || self.kv_indexer_endpoint.is_some()
@@ -1446,8 +1463,12 @@ impl Cli {
                 "cache-aware tuning flags require --policy cache_aware_zmq"
             ));
         }
-        if self.dynamo_cache_aware && (self.inject_kv_pull_hint || self.kv_indexer_endpoint.is_some()) {
-            return Err(anyhow!("Dynamo cache-aware uses one indexer and does not inject cross-P pulls"));
+        if self.dynamo_cache_aware
+            && (self.inject_kv_pull_hint || self.kv_indexer_endpoint.is_some())
+        {
+            return Err(anyhow!(
+                "Dynamo cache-aware uses one indexer and does not inject cross-P pulls"
+            ));
         }
         if self.kv_indexer_query_timeout_ms == Some(0) {
             return Err(anyhow!(
@@ -1494,9 +1515,7 @@ impl Cli {
             let fallback_policy = self.sticky_fallback_policy.unwrap_or(d.fallback_policy);
             if matches!(
                 fallback_policy,
-                PolicyKind::Sticky
-                    | PolicyKind::CacheAwareZmq
-                    | PolicyKind::GatewayCacheAware
+                PolicyKind::Sticky | PolicyKind::CacheAwareZmq | PolicyKind::GatewayCacheAware
             ) {
                 return Err(anyhow!(
                     "--sticky-fallback-policy must be one of round_robin / random / \
@@ -1605,7 +1624,9 @@ impl Cli {
             + u8::from(self.co_schedule_uncached_balance);
         let reserved_mode = mode_count > 0;
         if self.co_schedule_on_demand_load_refresh && !self.co_schedule_uncached_balance {
-            return Err(anyhow!("on-demand load refresh requires --co-schedule-uncached-balance"));
+            return Err(anyhow!(
+                "on-demand load refresh requires --co-schedule-uncached-balance"
+            ));
         }
         if mode_count > 1 {
             return Err(anyhow!(
@@ -1864,7 +1885,10 @@ impl Cli {
             }
             for (name, value) in [
                 ("--co-schedule-trade-pull-fixed-ms", params.pull_fixed_ms),
-                ("--co-schedule-trade-pull-ms-per-100k", params.pull_ms_per_100k),
+                (
+                    "--co-schedule-trade-pull-ms-per-100k",
+                    params.pull_ms_per_100k,
+                ),
                 ("--co-schedule-trade-copy-lambda", params.copy_lambda),
                 ("--co-schedule-trade-margin-noise", params.margin_noise_k),
                 ("--co-schedule-trade-hol-weight", params.hol_weight),
@@ -1959,9 +1983,18 @@ impl Cli {
                 });
             } else {
                 let olp_only = [
-                    (self.co_schedule_trade_olp_params.is_some(), "--co-schedule-trade-olp-params"),
-                    (self.co_schedule_trade_olp_incremental, "--co-schedule-trade-olp-incremental"),
-                    (self.co_schedule_trade_olp_trace_compact, "--co-schedule-trade-olp-trace-compact"),
+                    (
+                        self.co_schedule_trade_olp_params.is_some(),
+                        "--co-schedule-trade-olp-params",
+                    ),
+                    (
+                        self.co_schedule_trade_olp_incremental,
+                        "--co-schedule-trade-olp-incremental",
+                    ),
+                    (
+                        self.co_schedule_trade_olp_trace_compact,
+                        "--co-schedule-trade-olp-trace-compact",
+                    ),
                 ];
                 if let Some((_, flag)) = olp_only.iter().find(|(set, _)| *set) {
                     return Err(anyhow!(
@@ -2171,7 +2204,9 @@ impl Cli {
         // The uncached balance writes the cost trace only when one is given;
         // the other reserved modes need it.
         let trace = self.co_schedule_cost_trace.is_some();
-        if (reserved_mode && !trace && !self.co_schedule_uncached_balance) || (trace && !reserved_mode) {
+        if (reserved_mode && !trace && !self.co_schedule_uncached_balance)
+            || (trace && !reserved_mode)
+        {
             return Err(anyhow!(
                 "reserved placement requires --co-schedule-cost-trace, and vice versa"
             ));
@@ -2193,7 +2228,9 @@ impl Cli {
                      cost model)"
                 )
             })?;
-            let load_poll_ms = self.co_schedule_load_poll_ms.unwrap_or(DEFAULT_COST_FUNCTION_LOAD_POLL_MS);
+            let load_poll_ms = self
+                .co_schedule_load_poll_ms
+                .unwrap_or(DEFAULT_COST_FUNCTION_LOAD_POLL_MS);
             if load_poll_ms == 0 {
                 return Err(anyhow!("--co-schedule-load-poll-ms must be greater than 0"));
             }
@@ -2208,16 +2245,16 @@ impl Cli {
                     load_poll_ms,
                     unknown_expire_secs,
                     loads_host_room: self.symmetric_pd_loads_host_room,
-                    gwq_auto: self
-                        .symmetric_pd_gwq_auto
-                        .then(|| crate::config::SymmetricPdGwqAutoConfig {
+                    gwq_auto: self.symmetric_pd_gwq_auto.then(|| {
+                        crate::config::SymmetricPdGwqAutoConfig {
                             room: if self.symmetric_pd_gwq_room.as_deref() == Some("predicted") {
                                 crate::global_queue::GlobalQueueRoom::Predicted
                             } else {
                                 crate::global_queue::GlobalQueueRoom::Tokens
                             },
                             ..Default::default()
-                        }),
+                        }
+                    }),
                     trace_session_moves: self.symmetric_pd_trace_session_moves,
                     trade_e3: trade_e3.clone().map(crate::config::SymmetricPdTradeE3),
                     pull_from_any_holder: self.symmetric_pd_pull_from_any_holder,
@@ -2294,7 +2331,12 @@ impl Cli {
         // symmetric_pd: the indexer is optional (placement degrades to load /
         // role only, logged), so the flags are accepted but not required.
         let flex_selected = symmetric_pd.is_some();
-        if tuned_kv_hint && !self.inject_kv_pull_hint && !co_sched_selected && !flex_selected && !self.dynamo_cache_aware {
+        if tuned_kv_hint
+            && !self.inject_kv_pull_hint
+            && !co_sched_selected
+            && !flex_selected
+            && !self.dynamo_cache_aware
+        {
             return Err(anyhow!(
                 "--kv-indexer-url / --kv-pull-hint-min-tokens / \
                  --kv-pull-hint-min-incremental-tokens / --kv-pull-hint-local-prefix-fallback / --kv-indexer-timeout-ms / \
@@ -2303,7 +2345,11 @@ impl Cli {
             ));
         }
         let flex_wants_indexer = flex_selected && self.kv_indexer_url.is_some();
-        let mut kv_hint = if self.inject_kv_pull_hint || co_sched_selected || flex_wants_indexer || self.dynamo_cache_aware {
+        let mut kv_hint = if self.inject_kv_pull_hint
+            || co_sched_selected
+            || flex_wants_indexer
+            || self.dynamo_cache_aware
+        {
             let requirer = if self.inject_kv_pull_hint {
                 "--inject-kv-pull-hint"
             } else if co_sched_selected {
@@ -2320,13 +2366,17 @@ impl Cli {
                 .kv_worker_map
                 .ok_or_else(|| anyhow!("{requirer} requires --kv-worker-map"))?;
             let worker_map = parse_kv_worker_map(&map_json)?;
-            let timeout_ms = self.kv_indexer_timeout_ms.unwrap_or(DEFAULT_KV_HINT_INDEXER_TIMEOUT_MS);
+            let timeout_ms = self
+                .kv_indexer_timeout_ms
+                .unwrap_or(DEFAULT_KV_HINT_INDEXER_TIMEOUT_MS);
             if timeout_ms == 0 {
                 return Err(anyhow!("--kv-indexer-timeout-ms must be greater than 0"));
             }
             Some(crate::kv_hint::KvHintConfig {
                 indexer_url,
-                min_tokens: self.kv_pull_hint_min_tokens.unwrap_or(DEFAULT_KV_PULL_HINT_MIN_TOKENS),
+                min_tokens: self
+                    .kv_pull_hint_min_tokens
+                    .unwrap_or(DEFAULT_KV_PULL_HINT_MIN_TOKENS),
                 // TRADE never pulls below 512, so its gate defaults to 512.
                 min_incremental_tokens: self.kv_pull_hint_min_incremental_tokens.unwrap_or(
                     if self.co_schedule_trade {
@@ -2395,7 +2445,11 @@ impl Cli {
         let cache_aware = if tuned_cache_aware {
             let d = CacheAwareConfig::default();
             Some(CacheAwareConfig {
-                dynamo: if self.dynamo_cache_aware { kv_hint.take() } else { None },
+                dynamo: if self.dynamo_cache_aware {
+                    kv_hint.take()
+                } else {
+                    None
+                },
                 cache_threshold: self.cache_threshold.unwrap_or(d.cache_threshold),
                 balance_abs_threshold: self
                     .balance_abs_threshold
@@ -2565,7 +2619,9 @@ impl Cli {
             || self.symmetric_pd_trace_session_moves
             || self.symmetric_pd_pull_from_any_holder;
         if tuned && !selected {
-            return Err(anyhow!("--symmetric-pd-* flags require --policy symmetric_pd"));
+            return Err(anyhow!(
+                "--symmetric-pd-* flags require --policy symmetric_pd"
+            ));
         }
         if !selected {
             return Ok(None);
@@ -2577,9 +2633,12 @@ impl Cli {
         if let Some(path) = &self.symmetric_pd_workers_file {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| anyhow!("--symmetric-pd-workers-file {path:?}: {e}"))?;
-            let file_workers: Vec<SymmetricPdWorkerSpec> = serde_json::from_str(&text).map_err(|e| {
-                anyhow!("--symmetric-pd-workers-file {path:?} is not a JSON array of workers: {e}")
-            })?;
+            let file_workers: Vec<SymmetricPdWorkerSpec> =
+                serde_json::from_str(&text).map_err(|e| {
+                    anyhow!(
+                        "--symmetric-pd-workers-file {path:?} is not a JSON array of workers: {e}"
+                    )
+                })?;
             workers.extend(file_workers);
         }
         let mut seen = std::collections::HashSet::new();
@@ -2632,24 +2691,47 @@ impl Cli {
             self.check_flex_cost_function()?;
         } else {
             let cost_function_only = [
-                (self.symmetric_pd_unknown_expire_secs.is_some(), "--symmetric-pd-unknown-expire-secs"),
-                (self.symmetric_pd_loads_host_room, "--symmetric-pd-loads-host-room"),
+                (
+                    self.symmetric_pd_unknown_expire_secs.is_some(),
+                    "--symmetric-pd-unknown-expire-secs",
+                ),
+                (
+                    self.symmetric_pd_loads_host_room,
+                    "--symmetric-pd-loads-host-room",
+                ),
                 (self.symmetric_pd_gwq_auto, "--symmetric-pd-gwq-auto"),
-                (self.symmetric_pd_gwq_room.is_some(), "--symmetric-pd-gwq-room"),
-                (self.symmetric_pd_trace_session_moves, "--symmetric-pd-trace-session-moves"),
-                (self.symmetric_pd_pull_from_any_holder, "--symmetric-pd-pull-from-any-holder"),
+                (
+                    self.symmetric_pd_gwq_room.is_some(),
+                    "--symmetric-pd-gwq-room",
+                ),
+                (
+                    self.symmetric_pd_trace_session_moves,
+                    "--symmetric-pd-trace-session-moves",
+                ),
+                (
+                    self.symmetric_pd_pull_from_any_holder,
+                    "--symmetric-pd-pull-from-any-holder",
+                ),
             ];
             if let Some((_, flag)) = cost_function_only.iter().find(|(set, _)| *set) {
-                return Err(anyhow!("{flag} requires --symmetric-pd-p-select cost-function"));
+                return Err(anyhow!(
+                    "{flag} requires --symmetric-pd-p-select cost-function"
+                ));
             }
         }
-        if self.symmetric_pd_owner_threshold_tokens.is_some() || self.symmetric_pd_detour_margin_tokens.is_some() {
+        if self.symmetric_pd_owner_threshold_tokens.is_some()
+            || self.symmetric_pd_detour_margin_tokens.is_some()
+        {
             if placement.p_select != crate::scheduler::placement::PSelect::CoSchedule {
                 return Err(anyhow!("--symmetric-pd-owner-threshold-tokens / --symmetric-pd-detour-margin-tokens require --symmetric-pd-p-select co-schedule"));
             }
         }
-        if let Some(v) = self.symmetric_pd_owner_threshold_tokens { placement.co_schedule.owner_threshold_tokens = v; }
-        if let Some(v) = self.symmetric_pd_detour_margin_tokens { placement.co_schedule.detour_margin_tokens = v; }
+        if let Some(v) = self.symmetric_pd_owner_threshold_tokens {
+            placement.co_schedule.owner_threshold_tokens = v;
+        }
+        if let Some(v) = self.symmetric_pd_detour_margin_tokens {
+            placement.co_schedule.detour_margin_tokens = v;
+        }
         if let Some(v) = self.symmetric_pd_d_select {
             placement.d_select = v.into();
         }
@@ -2664,7 +2746,9 @@ impl Cli {
         }
         if let Some(v) = self.symmetric_pd_balance_rel {
             if !v.is_finite() || v < 1.0 {
-                return Err(anyhow!("--symmetric-pd-balance-rel must be finite and >= 1"));
+                return Err(anyhow!(
+                    "--symmetric-pd-balance-rel must be finite and >= 1"
+                ));
             }
             placement.balance_rel = v;
         }
@@ -2742,13 +2826,13 @@ impl Cli {
         } else {
             None
         };
-        let import_cache_policy =
-            self.symmetric_pd_import_cache_policy
-                .unwrap_or(if self.symmetric_pd_decode_host_return {
-                    SymmetricPdImportCachePolicy::Retain
-                } else {
-                    SymmetricPdImportCachePolicy::Auto
-                });
+        let import_cache_policy = self.symmetric_pd_import_cache_policy.unwrap_or(
+            if self.symmetric_pd_decode_host_return {
+                SymmetricPdImportCachePolicy::Retain
+            } else {
+                SymmetricPdImportCachePolicy::Auto
+            },
+        );
         let decode_host_return = if self.symmetric_pd_decode_host_return {
             if import_cache_policy != SymmetricPdImportCachePolicy::Retain {
                 return Err(anyhow!(
@@ -2788,8 +2872,12 @@ impl Cli {
                     return Err(anyhow!("missing peer servicer for {}", worker.url));
                 }
             }
-            let timeout_ms = self.symmetric_pd_decode_host_return_timeout_ms.unwrap_or(10_000);
-            let max_tokens = self.symmetric_pd_decode_host_return_max_tokens.unwrap_or(65_536);
+            let timeout_ms = self
+                .symmetric_pd_decode_host_return_timeout_ms
+                .unwrap_or(10_000);
+            let max_tokens = self
+                .symmetric_pd_decode_host_return_max_tokens
+                .unwrap_or(65_536);
             if !(1..=60_000).contains(&timeout_ms) || !(1..=1_048_576).contains(&max_tokens) {
                 return Err(anyhow!(
                     "decode host return timeout must be in 1..=60000 ms and max tokens in 1..=1048576"
@@ -2847,7 +2935,9 @@ impl Cli {
                  rides on the P-leg as the pull hint"
             ));
         }
-        if self.symmetric_pd_max_queue_wait_ms.is_some() || self.symmetric_pd_max_uncached_tokens.is_some() {
+        if self.symmetric_pd_max_queue_wait_ms.is_some()
+            || self.symmetric_pd_max_uncached_tokens.is_some()
+        {
             return Err(anyhow!(
                 "--symmetric-pd-p-select cost-function never holds a request: \
                  --symmetric-pd-max-queue-wait-ms and --symmetric-pd-max-uncached-tokens do not apply"
@@ -2900,7 +2990,10 @@ impl Cli {
     /// `--symmetric-pd-worker` URLs join the static list (they are the
     /// fleet), so a symmetric P/D deployment needs no separate
     /// `--worker-urls`; with `--service-discovery` they only carry weights.
-    fn build_discovery(&self, symmetric_pd: Option<&SymmetricPdConfig>) -> Result<DiscoveryBackend> {
+    fn build_discovery(
+        &self,
+        symmetric_pd: Option<&SymmetricPdConfig>,
+    ) -> Result<DiscoveryBackend> {
         let mut static_urls = self.worker_urls.clone();
         if let Some(flex) = symmetric_pd {
             if !self.service_discovery {
@@ -3074,7 +3167,11 @@ mod tests {
         assert!(flex.placement.force_split);
         assert!(flex.kv_session_retention);
         assert_eq!(format!("{:?}", flex.placement.d_select), "RoundRobin");
-        assert_eq!(format!("{:?}", flex.placement.p_select), "CacheFirst", "no KV directory");
+        assert_eq!(
+            format!("{:?}", flex.placement.p_select),
+            "CacheFirst",
+            "no KV directory"
+        );
         assert!(flex.cost_function.is_none());
         let late = &c.proxy.late_decode;
         assert_eq!(late.mode, LateDecodeMode::Choose);
@@ -3085,7 +3182,10 @@ mod tests {
         no_retention.push("--symmetric-pd-no-kv-session-retention");
         let c = into_config_owned(with_model(&no_retention)).unwrap();
         let flex = c.model.symmetric_pd.as_ref().unwrap();
-        assert!(!flex.kv_session_retention && flex.placement.force_split, "only retention is off");
+        assert!(
+            !flex.kv_session_retention && flex.placement.force_split,
+            "only retention is off"
+        );
 
         let mut with_kv = workers.to_vec();
         with_kv.extend([
@@ -3101,18 +3201,32 @@ mod tests {
         let cost = flex.cost_function.as_ref().unwrap();
         assert_eq!(cost.trade.copy_lambda, 4.6);
         assert!(cost.cost_trace.is_none());
-        assert_eq!(flex.import_cache_policy, SymmetricPdImportCachePolicy::Retain);
+        assert_eq!(
+            flex.import_cache_policy,
+            SymmetricPdImportCachePolicy::Retain
+        );
         assert_eq!(c.model.kv_hint.as_ref().unwrap().indexer_timeout_ms, 200);
-        assert!(flex.role_drain_timeout.is_none(), "no external role control");
+        assert!(
+            flex.role_drain_timeout.is_none(),
+            "no external role control"
+        );
 
         let mut roles = with_kv.clone();
         roles.push("--symmetric-pd-external-role-control");
         let c = into_config_owned(with_model(&roles)).unwrap();
         let flex = c.model.symmetric_pd.as_ref().unwrap();
-        assert_eq!(flex.role_drain_timeout, Some(std::time::Duration::from_secs(5)));
+        assert_eq!(
+            flex.role_drain_timeout,
+            Some(std::time::Duration::from_secs(5))
+        );
 
         let mut given = with_kv.clone();
-        given.extend(["--symmetric-pd-p-select", "cache-first", "--pd-late-decode-rule", "d1"]);
+        given.extend([
+            "--symmetric-pd-p-select",
+            "cache-first",
+            "--pd-late-decode-rule",
+            "d1",
+        ]);
         let c = into_config_owned(with_model(&given)).unwrap();
         let flex = c.model.symmetric_pd.as_ref().unwrap();
         assert_eq!(format!("{:?}", flex.placement.p_select), "CacheFirst");
@@ -3134,21 +3248,38 @@ mod tests {
 
     #[test]
     fn dynamo_cache_aware_is_a_single_cache_source_without_transfer() {
-        let args = with_model(&["--worker-urls", "http://p:1", "--policy", "cache_aware_zmq",
-            "--dynamo-cache-aware", "--kv-indexer-url", "http://index:2",
-            "--kv-worker-map", r#"[{"id":1,"url":"http://p:1","servicer":"p:3"}]"#,
-            "--pd-decode-policy", "round-robin"]);
+        let args = with_model(&[
+            "--worker-urls",
+            "http://p:1",
+            "--policy",
+            "cache_aware_zmq",
+            "--dynamo-cache-aware",
+            "--kv-indexer-url",
+            "http://index:2",
+            "--kv-worker-map",
+            r#"[{"id":1,"url":"http://p:1","servicer":"p:3"}]"#,
+            "--pd-decode-policy",
+            "round-robin",
+        ]);
         let cfg = into_config_owned(args.clone()).unwrap();
         assert!(cfg.model.cache_aware.unwrap().dynamo.is_some());
         assert!(cfg.model.kv_hint.is_none());
         assert!(cfg.model.co_schedule.is_none());
         assert!(cfg.model.symmetric_pd.is_none());
-        for extra in [vec!["--inject-kv-pull-hint"], vec!["--kv-indexer-endpoint", "http://grpc:4"]] {
-            let mut bad = args.clone(); bad.extend(extra.into_iter().map(str::to_owned));
+        for extra in [
+            vec!["--inject-kv-pull-hint"],
+            vec!["--kv-indexer-endpoint", "http://grpc:4"],
+        ] {
+            let mut bad = args.clone();
+            bad.extend(extra.into_iter().map(str::to_owned));
             assert!(into_config_owned(bad).is_err());
         }
-        assert!(into_config_owned(with_model(&["--worker-urls", "http://p:1",
-            "--co-schedule-on-demand-load-refresh"])).is_err());
+        assert!(into_config_owned(with_model(&[
+            "--worker-urls",
+            "http://p:1",
+            "--co-schedule-on-demand-load-refresh"
+        ]))
+        .is_err());
     }
 
     #[test]
@@ -3830,8 +3961,13 @@ mod tests {
 
         let mut args = base.to_vec();
         args.extend(["--pd-late-decode", "choose", "--pd-late-decode-rule", "po2"]);
-        let err = into_config_owned(with_model(&args)).unwrap_err().to_string();
-        assert!(err.contains("po2 is not available with --policy symmetric_pd"), "{err}");
+        let err = into_config_owned(with_model(&args))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("po2 is not available with --policy symmetric_pd"),
+            "{err}"
+        );
 
         // External role control (dynamic roles) is accepted.
         let mut args = base.to_vec();
@@ -3846,7 +3982,13 @@ mod tests {
         ]);
         let on = into_config_owned(with_model(&args)).unwrap();
         assert!(on.proxy.late_decode.choose());
-        assert!(on.model.symmetric_pd.as_ref().unwrap().external_role_control);
+        assert!(
+            on.model
+                .symmetric_pd
+                .as_ref()
+                .unwrap()
+                .external_role_control
+        );
 
         let table =
             std::env::temp_dir().join(format!("late-d-replay-{}.jsonl", std::process::id()));
@@ -3861,7 +4003,9 @@ mod tests {
             "--pd-late-decode-rule",
             "d1",
         ]);
-        let err = into_config_owned(with_model(&args)).unwrap_err().to_string();
+        let err = into_config_owned(with_model(&args))
+            .unwrap_err()
+            .to_string();
         let _ = std::fs::remove_file(&table);
         assert!(
             err.contains("conflicts with --symmetric-pd-decision-replay"),
@@ -3923,7 +4067,9 @@ mod tests {
 
         let mut args = base.to_vec();
         args.extend(["--symmetric-pd-cache-threshold", "0.5"]);
-        let err = into_config_owned(with_model(&args)).unwrap_err().to_string();
+        let err = into_config_owned(with_model(&args))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("takes the --gateway-ca-* flags"), "{err}");
 
         // The --gateway-ca-* flags with another symmetric_pd P selection: refused.
@@ -3937,7 +4083,10 @@ mod tests {
         ]))
         .unwrap_err()
         .to_string();
-        assert!(err.contains("require --policy gateway_cache_aware"), "{err}");
+        assert!(
+            err.contains("require --policy gateway_cache_aware"),
+            "{err}"
+        );
     }
 
     /// sgl-model-gateway `fit_req` flags: the fixed capacity, the observed
@@ -4598,7 +4747,10 @@ mod tests {
         assert_eq!(trade.pull_fixed_ms, 450.0);
         assert_eq!(trade.pull_ms_per_100k, 100.0);
         assert_eq!(trade.copy_lambda, 4.6);
-        assert!(!trade.exclude_unlaunched, "the backlog is the full ledger by default");
+        assert!(
+            !trade.exclude_unlaunched,
+            "the backlog is the full ledger by default"
+        );
 
         let mut tuned = on.clone();
         tuned.extend([
@@ -4668,13 +4820,26 @@ mod tests {
         let no_balance: Vec<_> = on
             .iter()
             .copied()
-            .filter(|s| *s != "--co-schedule-uncached-balance" && *s != "--co-schedule-cost-trace"
-                && *s != "/tmp/trade-test.jsonl")
+            .filter(|s| {
+                *s != "--co-schedule-uncached-balance"
+                    && *s != "--co-schedule-cost-trace"
+                    && *s != "/tmp/trade-test.jsonl"
+            })
             .collect();
-        let err = into_config_owned(with_model(&no_balance)).unwrap_err().to_string();
-        assert!(err.contains("requires --co-schedule-uncached-balance"), "{err}");
-        let err = into_config_owned(with_model(&["--worker-urls", "http://x:30000",
-            "--co-schedule-trade"])).unwrap_err().to_string();
+        let err = into_config_owned(with_model(&no_balance))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("requires --co-schedule-uncached-balance"),
+            "{err}"
+        );
+        let err = into_config_owned(with_model(&[
+            "--worker-urls",
+            "http://x:30000",
+            "--co-schedule-trade",
+        ]))
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("require --policy co_schedule"), "{err}");
     }
 
@@ -4709,26 +4874,45 @@ mod tests {
         assert_eq!(gate(&[]).unwrap(), 0, "no TRADE: gate off by default");
         assert_eq!(gate(&["--co-schedule-trade"]).unwrap(), 512);
         assert_eq!(
-            gate(&["--co-schedule-trade", "--kv-pull-hint-min-incremental-tokens", "512"]).unwrap(),
+            gate(&[
+                "--co-schedule-trade",
+                "--kv-pull-hint-min-incremental-tokens",
+                "512"
+            ])
+            .unwrap(),
             512
         );
         assert_eq!(
-            gate(&["--co-schedule-trade", "--kv-pull-hint-min-incremental-tokens", "2048"])
-                .unwrap(),
+            gate(&[
+                "--co-schedule-trade",
+                "--kv-pull-hint-min-incremental-tokens",
+                "2048"
+            ])
+            .unwrap(),
             2048
         );
         for low in ["0", "1", "511"] {
-            let err = gate(&["--co-schedule-trade", "--kv-pull-hint-min-incremental-tokens", low])
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("at least 512"), "{low}: {err}");
-        }
-        let err = gate(&["--co-schedule-trade", "--kv-pull-hint-local-prefix-fallback"])
+            let err = gate(&[
+                "--co-schedule-trade",
+                "--kv-pull-hint-min-incremental-tokens",
+                low,
+            ])
             .unwrap_err()
             .to_string();
+            assert!(err.contains("at least 512"), "{low}: {err}");
+        }
+        let err = gate(&[
+            "--co-schedule-trade",
+            "--kv-pull-hint-local-prefix-fallback",
+        ])
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("local-prefix-fallback"), "{err}");
         // Without TRADE both stay allowed.
-        assert_eq!(gate(&["--kv-pull-hint-min-incremental-tokens", "1"]).unwrap(), 1);
+        assert_eq!(
+            gate(&["--kv-pull-hint-min-incremental-tokens", "1"]).unwrap(),
+            1
+        );
         assert!(gate(&[
             "--kv-pull-hint-min-incremental-tokens",
             "512",
@@ -4818,7 +5002,10 @@ mod tests {
         assert_eq!(model.sources["sha256"], "file");
 
         for (extra, message) in [
-            (vec!["--co-schedule-trade-wait", "eft"], "requires --co-schedule-trade-eft-model"),
+            (
+                vec!["--co-schedule-trade-wait", "eft"],
+                "requires --co-schedule-trade-eft-model",
+            ),
             (
                 vec!["--co-schedule-trade-eft-model", model_path.as_str()],
                 "need --co-schedule-trade-wait eft",
@@ -4848,7 +5035,10 @@ mod tests {
                 "max-view-age-ms",
             ),
             (vec!["--co-schedule-trade-margin-noise=-1"], "margin-noise"),
-            (vec!["--co-schedule-trade-margin-noise", "inf"], "margin-noise"),
+            (
+                vec!["--co-schedule-trade-margin-noise", "inf"],
+                "margin-noise",
+            ),
         ] {
             let mut args = vec!["--co-schedule-trade"];
             args.extend(extra);
@@ -4857,8 +5047,16 @@ mod tests {
         }
         // Unknown values and the flags without --co-schedule-trade.
         for extra in [
-            vec!["--co-schedule-trade", "--co-schedule-trade-wait", "simulated"],
-            vec!["--co-schedule-trade", "--co-schedule-trade-dup-charge", "none"],
+            vec![
+                "--co-schedule-trade",
+                "--co-schedule-trade-wait",
+                "simulated",
+            ],
+            vec![
+                "--co-schedule-trade",
+                "--co-schedule-trade-dup-charge",
+                "none",
+            ],
             vec!["--co-schedule-trade-wait", "eft"],
             vec!["--co-schedule-trade-dup-charge", "all"],
             vec!["--co-schedule-trade-margin-noise", "1"],
@@ -5217,9 +5415,18 @@ mod tests {
         assert!(trade.is_original());
 
         for (extra, message) in [
-            (vec!["--co-schedule-trade-hol-weight=-1"], "--co-schedule-trade-hol-weight"),
-            (vec!["--co-schedule-trade-hol-weight", "NaN"], "--co-schedule-trade-hol-weight"),
-            (vec!["--co-schedule-trade-hol-weight", "inf"], "--co-schedule-trade-hol-weight"),
+            (
+                vec!["--co-schedule-trade-hol-weight=-1"],
+                "--co-schedule-trade-hol-weight",
+            ),
+            (
+                vec!["--co-schedule-trade-hol-weight", "NaN"],
+                "--co-schedule-trade-hol-weight",
+            ),
+            (
+                vec!["--co-schedule-trade-hol-weight", "inf"],
+                "--co-schedule-trade-hol-weight",
+            ),
             (
                 vec!["--co-schedule-trade-hol-rate-window-secs", "0"],
                 "--co-schedule-trade-hol-rate-window-secs",
@@ -6030,7 +6237,12 @@ mod tests {
 
     #[test]
     fn symmetric_pd_zero_hold_is_valid_without_changing_default() {
-        let base = ["--policy", "symmetric_pd", "--symmetric-pd-worker", "http://p:30000,8998,1,1"];
+        let base = [
+            "--policy",
+            "symmetric_pd",
+            "--symmetric-pd-worker",
+            "http://p:30000,8998,1,1",
+        ];
         let default = into_config_owned(with_model(&base)).unwrap();
         assert_eq!(default.model.symmetric_pd.unwrap().max_queue_wait_ms, 2000);
         let mut args = base.to_vec();
@@ -6108,7 +6320,9 @@ mod tests {
             SymmetricPdImportCachePolicy::GpuOnly
         );
         let args = ["--symmetric-pd-import-cache-policy", "drop"];
-        let err = into_config_owned(with_model(&args)).unwrap_err().to_string();
+        let err = into_config_owned(with_model(&args))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("require --policy symmetric_pd"), "{err}");
     }
 
@@ -6125,14 +6339,24 @@ mod tests {
         let default = into_config_owned(with_model(&base)).unwrap();
         let default = default.model.symmetric_pd.unwrap();
         assert!(default.decode_host_return.is_none());
-        assert_eq!(default.import_cache_policy, SymmetricPdImportCachePolicy::Auto);
+        assert_eq!(
+            default.import_cache_policy,
+            SymmetricPdImportCachePolicy::Auto
+        );
         let mapping = r#"[{"id":1,"url":"http://p:30000","servicer":"p:18100"},{"id":2,"url":"http://d:30000/","servicer":"d:18100"}]"#;
         let mut args = base.to_vec();
-        args.extend(["--symmetric-pd-decode-host-return", "--kv-worker-map", mapping]);
+        args.extend([
+            "--symmetric-pd-decode-host-return",
+            "--kv-worker-map",
+            mapping,
+        ]);
         let config = into_config_owned(with_model(&args)).unwrap();
         assert!(config.model.kv_hint.is_none());
         let flex = config.model.symmetric_pd.unwrap();
-        assert_eq!(flex.import_cache_policy, SymmetricPdImportCachePolicy::Retain);
+        assert_eq!(
+            flex.import_cache_policy,
+            SymmetricPdImportCachePolicy::Retain
+        );
         let returns = flex.decode_host_return.unwrap();
         assert_eq!(returns.servicers["http://p:30000"], "p:18100");
         assert_eq!(returns.servicers["http://d:30000"], "d:18100");
@@ -6152,7 +6376,12 @@ mod tests {
             "2000",
         ]);
         let config = into_config_owned(with_model(&args)).unwrap();
-        let returns = config.model.symmetric_pd.unwrap().decode_host_return.unwrap();
+        let returns = config
+            .model
+            .symmetric_pd
+            .unwrap()
+            .decode_host_return
+            .unwrap();
         assert_eq!((returns.timeout_ms, returns.max_tokens), (2000, 128));
     }
 
@@ -6290,16 +6519,25 @@ mod tests {
 
     #[test]
     fn pd_decision_replay_flag_maps_and_validates() {
-        let base = ["--policy", "cache_aware_zmq", "--worker-urls", "http://10.0.0.1:30000"];
+        let base = [
+            "--policy",
+            "cache_aware_zmq",
+            "--worker-urls",
+            "http://10.0.0.1:30000",
+        ];
         let c = into_config_owned(with_model(&base)).unwrap();
         assert!(c.model.pd_decision_replay.is_none());
         let mut args = base.to_vec();
         args.extend(["--pd-decision-replay-header", "X-Key"]);
-        let err = into_config_owned(with_model(&args)).unwrap_err().to_string();
+        let err = into_config_owned(with_model(&args))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("requires --pd-decision-replay"), "{err}");
         let mut args = base.to_vec();
         args.extend(["--pd-decision-replay", "/nonexistent/replay.json"]);
-        let err = into_config_owned(with_model(&args)).unwrap_err().to_string();
+        let err = into_config_owned(with_model(&args))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not a readable file"), "{err}");
         let dir = std::env::temp_dir().join(format!("pd-replay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -6313,15 +6551,28 @@ mod tests {
         assert_eq!(r.table, path);
         assert_eq!(r.header, "X-SMG-Routing-Key");
         let mut args = base.to_vec();
-        args.extend(["--pd-decision-replay", path_s.as_str(), "--pd-decision-replay-header", " X-Key "]);
+        args.extend([
+            "--pd-decision-replay",
+            path_s.as_str(),
+            "--pd-decision-replay-header",
+            " X-Key ",
+        ]);
         let c = into_config_owned(with_model(&args)).unwrap();
         assert_eq!(c.model.pd_decision_replay.as_ref().unwrap().header, "X-Key");
         // symmetric_pd has its own replay flag.
         let args = [
-            "--policy", "symmetric_pd", "--symmetric-pd-worker", "http://10.0.0.1:30000,8998,1,1",
-            "--symmetric-pd-worker", "http://10.0.0.5:30000,8998,1,1", "--pd-decision-replay", path_s.as_str(),
+            "--policy",
+            "symmetric_pd",
+            "--symmetric-pd-worker",
+            "http://10.0.0.1:30000,8998,1,1",
+            "--symmetric-pd-worker",
+            "http://10.0.0.5:30000,8998,1,1",
+            "--pd-decision-replay",
+            path_s.as_str(),
         ];
-        let err = into_config_owned(with_model(&args)).unwrap_err().to_string();
+        let err = into_config_owned(with_model(&args))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("traditional PD path"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6343,12 +6594,19 @@ mod tests {
         // Header without a table is an orphan flag.
         let mut args = base.to_vec();
         args.extend(["--symmetric-pd-decision-replay-header", "X-Key"]);
-        let err = into_config_owned(with_model(&args)).unwrap_err().to_string();
-        assert!(err.contains("requires --symmetric-pd-decision-replay"), "{err}");
+        let err = into_config_owned(with_model(&args))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("requires --symmetric-pd-decision-replay"),
+            "{err}"
+        );
         // Missing file is rejected at config time.
         let mut args = base.to_vec();
         args.extend(["--symmetric-pd-decision-replay", "/nonexistent/replay.json"]);
-        let err = into_config_owned(with_model(&args)).unwrap_err().to_string();
+        let err = into_config_owned(with_model(&args))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not a readable file"), "{err}");
         // An existing file maps through, with a custom header.
         let dir = std::env::temp_dir().join(format!("symmetric_pd-replay-{}", std::process::id()));
@@ -6369,7 +6627,9 @@ mod tests {
         assert_eq!(f.decision_replay_header, "X-Key");
         // Orphan without --policy symmetric_pd.
         let args = ["--symmetric-pd-decision-replay", path_s.as_str()];
-        let err = into_config_owned(with_model(&args)).unwrap_err().to_string();
+        let err = into_config_owned(with_model(&args))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("require --policy symmetric_pd"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6431,21 +6691,36 @@ mod tests {
         ];
         let c = into_config_owned(with_model(&base)).unwrap();
         assert_eq!(
-            c.model.symmetric_pd.as_ref().unwrap().placement.host_hit_factor,
+            c.model
+                .symmetric_pd
+                .as_ref()
+                .unwrap()
+                .placement
+                .host_hit_factor,
             1.0,
             "default"
         );
         let mut args = base.to_vec();
         args.extend(["--symmetric-pd-host-hit-factor", "0"]);
         let c = into_config_owned(with_model(&args)).unwrap();
-        assert_eq!(c.model.symmetric_pd.as_ref().unwrap().placement.host_hit_factor, 0.0);
+        assert_eq!(
+            c.model
+                .symmetric_pd
+                .as_ref()
+                .unwrap()
+                .placement
+                .host_hit_factor,
+            0.0
+        );
         let mut args = base.to_vec();
         args.extend(["--symmetric-pd-pull-hint"]);
         let c = into_config_owned(with_model(&args)).unwrap();
         assert!(c.model.symmetric_pd.as_ref().unwrap().pull_hint);
         let mut args = base.to_vec();
         args.extend(["--symmetric-pd-host-hit-factor", "1.5"]);
-        let err = into_config_owned(with_model(&args)).unwrap_err().to_string();
+        let err = into_config_owned(with_model(&args))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("--symmetric-pd-host-hit-factor"), "{err}");
     }
 
@@ -6630,7 +6905,10 @@ mod tests {
         ]))
         .unwrap_err()
         .to_string();
-        assert!(err.contains("not available with --policy symmetric_pd"), "{err}");
+        assert!(
+            err.contains("not available with --policy symmetric_pd"),
+            "{err}"
+        );
         assert!(err.contains("--symmetric-pd-kv-session-retention"), "{err}");
 
         // Every other policy refuses it.
@@ -6652,25 +6930,41 @@ mod tests {
     #[test]
     fn symmetric_pd_co_schedule_is_explicit_and_keeps_native_defaults() {
         let base = [
-            "--policy", "symmetric_pd",
-            "--symmetric-pd-worker", "http://10.0.0.1:30000,8998,1,0",
-            "--symmetric-pd-worker", "http://10.0.0.5:30000,8998,0,1",
+            "--policy",
+            "symmetric_pd",
+            "--symmetric-pd-worker",
+            "http://10.0.0.1:30000,8998,1,0",
+            "--symmetric-pd-worker",
+            "http://10.0.0.5:30000,8998,0,1",
         ];
         let mut args = base.to_vec();
         args.extend([
-            "--symmetric-pd-p-select", "co-schedule",
-            "--symmetric-pd-d-select", "round-robin",
-            "--symmetric-pd-owner-threshold-tokens", "8192",
-            "--symmetric-pd-detour-margin-tokens", "1024",
+            "--symmetric-pd-p-select",
+            "co-schedule",
+            "--symmetric-pd-d-select",
+            "round-robin",
+            "--symmetric-pd-owner-threshold-tokens",
+            "8192",
+            "--symmetric-pd-detour-margin-tokens",
+            "1024",
         ]);
         let config = into_config_owned(with_model(&args)).unwrap();
         let flex = config.model.symmetric_pd.unwrap();
-        assert_eq!(flex.placement.p_select, crate::scheduler::placement::PSelect::CoSchedule);
-        assert_eq!(flex.placement.d_select, crate::scheduler::placement::DSelect::RoundRobin);
+        assert_eq!(
+            flex.placement.p_select,
+            crate::scheduler::placement::PSelect::CoSchedule
+        );
+        assert_eq!(
+            flex.placement.d_select,
+            crate::scheduler::placement::DSelect::RoundRobin
+        );
         assert_eq!(flex.placement.co_schedule.owner_threshold_tokens, 8192);
         assert_eq!(flex.placement.co_schedule.detour_margin_tokens, 1024);
         let default = into_config_owned(with_model(&base)).unwrap();
-        assert_eq!(default.model.symmetric_pd.unwrap().placement.p_select, crate::scheduler::placement::PSelect::CacheFirst);
+        assert_eq!(
+            default.model.symmetric_pd.unwrap().placement.p_select,
+            crate::scheduler::placement::PSelect::CacheFirst
+        );
         let mut invalid = base.to_vec();
         invalid.extend(["--symmetric-pd-owner-threshold-tokens", "8192"]);
         assert!(into_config_owned(with_model(&invalid)).is_err());
@@ -6783,7 +7077,10 @@ mod tests {
         ]))
         .unwrap_err()
         .to_string();
-        assert!(err.contains("--symmetric-pd-max-queue-wait-ms"), "got: {err}");
+        assert!(
+            err.contains("--symmetric-pd-max-queue-wait-ms"),
+            "got: {err}"
+        );
         let c = into_config_owned(with_model(&[
             "--policy",
             "symmetric_pd",
@@ -6807,7 +7104,10 @@ mod tests {
             r#"[{"id":1,"url":"http://a:30000"}]"#,
         ]))
         .unwrap();
-        let kv = c.model.kv_hint.expect("indexer config built for symmetric_pd");
+        let kv = c
+            .model
+            .kv_hint
+            .expect("indexer config built for symmetric_pd");
         assert_eq!(kv.indexer_url, "http://indexer:8090");
         assert_eq!(kv.worker_map[0].url, "http://a:30000");
         assert!(kv.worker_map[0].servicer.is_empty());
@@ -6946,8 +7246,8 @@ mod tests {
     #[test]
     fn symmetric_pd_cost_function_accepts_the_startup_argv() {
         use crate::config::{LateDecodeMode, LateDecodeRule};
-        use crate::scheduler::placement::{DSelect, PSelect};
         use crate::scheduler::co_schedule::{TradeAutoQ, TradeLambdaMode, TradeRateMode};
+        use crate::scheduler::placement::{DSelect, PSelect};
         let cfg = cost_function_config(&[], &[]).unwrap();
         // The co-schedule policy is not built: its flags configure symmetric_pd.
         assert!(cfg.model.co_schedule.is_none());
@@ -6966,7 +7266,10 @@ mod tests {
             !cost.loads_host_room,
             "the host_room poll is off by default"
         );
-        assert_eq!(cost.cost_trace.as_deref().and_then(|p| p.to_str()), Some("/tmp/flex-cost.jsonl"));
+        assert_eq!(
+            cost.cost_trace.as_deref().and_then(|p| p.to_str()),
+            Some("/tmp/flex-cost.jsonl")
+        );
         let trade = cost.trade;
         assert_eq!(
             trade.copy_lambda_mode,
@@ -7000,7 +7303,8 @@ mod tests {
         let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/e3");
         let table = format!("{fixtures}/bound-params.json");
         let cost = |add: &[&str]| {
-            cost_function_config(&[], add).map(|c| c.model.symmetric_pd.unwrap().cost_function.unwrap())
+            cost_function_config(&[], add)
+                .map(|c| c.model.symmetric_pd.unwrap().cost_function.unwrap())
         };
         // Off by default: no E3 state, the token rule.
         let off = cost(&["--symmetric-pd-gwq-auto"]).unwrap();
@@ -7106,7 +7410,11 @@ mod tests {
             assert!(err.contains(want), "{add:?}: {err}");
         };
         refused(
-            &["--symmetric-pd-gwq-auto", "--symmetric-pd-gwq-room", "predicted"],
+            &[
+                "--symmetric-pd-gwq-auto",
+                "--symmetric-pd-gwq-room",
+                "predicted",
+            ],
             "--symmetric-pd-gwq-room predicted requires --co-schedule-trade-e3-bound-table",
         );
         refused(
@@ -7235,7 +7543,8 @@ mod tests {
     #[test]
     fn symmetric_pd_unknown_expire_secs() {
         for (value, want) in [("0", 0), ("1", 1), ("120", 120)] {
-            let cfg = cost_function_config(&[], &["--symmetric-pd-unknown-expire-secs", value]).unwrap();
+            let cfg =
+                cost_function_config(&[], &["--symmetric-pd-unknown-expire-secs", value]).unwrap();
             let cost = cfg.model.symmetric_pd.unwrap().cost_function.unwrap();
             assert_eq!(cost.unknown_expire_secs, want, "{value}");
         }
@@ -7249,7 +7558,8 @@ mod tests {
         ]))
         .unwrap_err()
         .to_string();
-        let want = "--symmetric-pd-unknown-expire-secs requires --symmetric-pd-p-select cost-function";
+        let want =
+            "--symmetric-pd-unknown-expire-secs requires --symmetric-pd-p-select cost-function";
         assert!(err.contains(want), "{err}");
         let err = into_config_owned(with_model(&[
             "--worker-urls",
@@ -7289,7 +7599,8 @@ mod tests {
         ]))
         .unwrap_err()
         .to_string();
-        let want = "--symmetric-pd-pull-from-any-holder requires --symmetric-pd-p-select cost-function";
+        let want =
+            "--symmetric-pd-pull-from-any-holder requires --symmetric-pd-p-select cost-function";
         assert!(err.contains(want), "{err}");
         let err = into_config_owned(with_model(&[
             "--worker-urls",
@@ -7312,7 +7623,8 @@ mod tests {
         use crate::olp::{OlpParams, OlpScaleSource};
         use crate::scheduler::co_schedule::{TradeParams, TradeWait};
         let cost = |add: &[&str]| {
-            cost_function_config(&[], add).map(|c| c.model.symmetric_pd.unwrap().cost_function.unwrap())
+            cost_function_config(&[], add)
+                .map(|c| c.model.symmetric_pd.unwrap().cost_function.unwrap())
         };
         // Off by default.
         let off = cost(&[]).unwrap();
@@ -7423,7 +7735,8 @@ mod tests {
                 .to_string()
         };
         let err = co_schedule(&["--co-schedule-trade-wait", "olp"]);
-        let want = "--co-schedule-trade-wait olp requires --policy symmetric_pd --symmetric-pd-p-select \
+        let want =
+            "--co-schedule-trade-wait olp requires --policy symmetric_pd --symmetric-pd-p-select \
                     cost-function";
         assert!(err.contains(want), "{err}");
         let err = co_schedule(&["--co-schedule-trade-olp-shadow"]);
@@ -7439,7 +7752,8 @@ mod tests {
     #[test]
     fn symmetric_pd_cost_function_olp_fast_flags() {
         let cost = |add: &[&str]| {
-            cost_function_config(&[], add).map(|c| c.model.symmetric_pd.unwrap().cost_function.unwrap())
+            cost_function_config(&[], add)
+                .map(|c| c.model.symmetric_pd.unwrap().cost_function.unwrap())
         };
         let off = cost(&["--co-schedule-trade-wait", "olp"]).unwrap();
         let olp_off = off.olp.clone().unwrap();
@@ -7607,7 +7921,10 @@ mod tests {
         let on = cost(
             cost_function_config(
                 &[],
-                &["--symmetric-pd-gwq-auto", "--symmetric-pd-trace-session-moves"],
+                &[
+                    "--symmetric-pd-gwq-auto",
+                    "--symmetric-pd-trace-session-moves",
+                ],
             )
             .unwrap(),
         );
@@ -7720,7 +8037,8 @@ mod tests {
         ]))
         .unwrap_err()
         .to_string();
-        let want = format!("{need} --policy symmetric_pd with --symmetric-pd-p-select cost-function");
+        let want =
+            format!("{need} --policy symmetric_pd with --symmetric-pd-p-select cost-function");
         assert!(err.contains(&want), "{err}");
         let psi = ["--co-schedule-trade-pull-price", "psi"];
         let err = cost_function_config(&[], &psi).unwrap_err().to_string();

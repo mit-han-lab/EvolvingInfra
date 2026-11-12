@@ -49,7 +49,10 @@ pub async fn plan(
         .prepared_config
         .as_ref()
         .ok_or_else(|| ApiError::BadRequest("prepared inputs not configured".into()))?;
-    let flex = ctx.symmetric_pd.as_ref().ok_or(ApiError::SymmetricPdDisabled)?;
+    let flex = ctx
+        .symmetric_pd
+        .as_ref()
+        .ok_or(ApiError::SymmetricPdDisabled)?;
     let mut input = cfg
         .input(&req.prepared, &ctx.config.model.id)
         .map_err(ApiError::BadRequest)?;
@@ -271,7 +274,10 @@ pub async fn summary(State(ctx): State<Arc<AppContext>>) -> Json<Value> {
 /// JSON `workers` map of load views, or `SymmetricPdDisabled`. Includes freshness and
 /// unknown-state information; does not trigger a new engine poll or placement.
 pub async fn backend_loads(State(ctx): State<Arc<AppContext>>) -> Result<Json<Value>, ApiError> {
-    let flex = ctx.symmetric_pd.as_ref().ok_or(ApiError::SymmetricPdDisabled)?;
+    let flex = ctx
+        .symmetric_pd
+        .as_ref()
+        .ok_or(ApiError::SymmetricPdDisabled)?;
     Ok(Json(json!({"workers": flex.backend_load_views()})))
 }
 
@@ -286,17 +292,23 @@ pub struct ReplaceRoles {
     #[serde(deserialize_with = "unique_roles")]
     desired: crate::backend::registry::RoleAssignments,
 }
-fn unique_roles<'de, D: serde::Deserializer<'de>>(d: D)
-    -> Result<crate::backend::registry::RoleAssignments, D::Error> {
+fn unique_roles<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<crate::backend::registry::RoleAssignments, D::Error> {
     struct RolesVisitor;
     impl<'de> serde::de::Visitor<'de> for RolesVisitor {
         type Value = crate::backend::registry::RoleAssignments;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             f.write_str("unique worker URL to role map")
         }
-        fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> Result<Self::Value, M::Error> {
             let mut roles = Self::Value::new();
-            while let Some((url, role)) = map.next_entry::<String, crate::backend::registry::RoleAssignment>()? {
+            while let Some((url, role)) =
+                map.next_entry::<String, crate::backend::registry::RoleAssignment>()?
+            {
                 if roles.insert(url, role).is_some() {
                     return Err(serde::de::Error::custom("duplicate worker URL"));
                 }
@@ -307,28 +319,47 @@ fn unique_roles<'de, D: serde::Deserializer<'de>>(d: D)
     d.deserialize_map(RolesVisitor)
 }
 fn external_credential(ctx: &AppContext, headers: &HeaderMap) -> Result<(), ApiError> {
-    let key = ctx.external_role_key.as_deref()
+    let key = ctx
+        .external_role_key
+        .as_deref()
         .ok_or_else(|| ApiError::BadRequest("external role control is disabled".into()))?;
     if bearer(headers)? != key {
-        return Err(ApiError::BadRequest("invalid controller credentials".into()));
+        return Err(ApiError::BadRequest(
+            "invalid controller credentials".into(),
+        ));
     }
     Ok(())
 }
-pub async fn roles(State(ctx): State<Arc<AppContext>>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+pub async fn roles(
+    State(ctx): State<Arc<AppContext>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
     external_credential(&ctx, &headers)?;
-    let flex = ctx.symmetric_pd.as_ref().ok_or(ApiError::SymmetricPdDisabled)?;
+    let flex = ctx
+        .symmetric_pd
+        .as_ref()
+        .ok_or(ApiError::SymmetricPdDisabled)?;
     if !flex.config().external_role_control {
-        return Err(ApiError::BadRequest("external role control is disabled".into()));
+        return Err(ApiError::BadRequest(
+            "external role control is disabled".into(),
+        ));
     }
-    Ok(Json(json!({"assignment": flex.role_assignments().map_err(ApiError::BadRequest)?,
+    Ok(Json(
+        json!({"assignment": flex.role_assignments().map_err(ApiError::BadRequest)?,
         "completed_workload": ctx.external_workload.as_ref().map(|w| w.totals()),
         "decode_population": ctx.executions.decode_population(),
-        "draining": flex.role_drains()})))
+        "draining": flex.role_drains()}),
+    ))
 }
 pub async fn replace_roles(
-    State(ctx): State<Arc<AppContext>>, headers: HeaderMap, Json(req): Json<ReplaceRoles>,
+    State(ctx): State<Arc<AppContext>>,
+    headers: HeaderMap,
+    Json(req): Json<ReplaceRoles>,
 ) -> Result<Json<Value>, ApiError> {
-    let flex = ctx.symmetric_pd.as_ref().ok_or(ApiError::SymmetricPdDisabled)?;
+    let flex = ctx
+        .symmetric_pd
+        .as_ref()
+        .ok_or(ApiError::SymmetricPdDisabled)?;
     external_credential(&ctx, &headers)?;
     let (roles, draining) = flex
         .replace_role_assignments(&req.epoch, req.revision, &req.expected, &req.desired)
@@ -378,7 +409,7 @@ mod tests {
     use crate::{
         config::SymmetricPdConfig,
         discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec},
-        scheduler::{DSelect, SymmetricPdRuntime, PSelect, PlaceHttpRequest, RoleWeight},
+        scheduler::{DSelect, PSelect, PlaceHttpRequest, RoleWeight, SymmetricPdRuntime},
         workers::SymmetricPdWorkerInfo,
     };
     use axum::{
@@ -390,7 +421,8 @@ mod tests {
 
     #[test]
     fn role_update_rejects_duplicate_urls_and_requires_controller_key() {
-        let request = r#"{"epoch":"e","revision":0,"expected":{"u":"prefill","u":"decode"},"desired":{}}"#;
+        let request =
+            r#"{"epoch":"e","revision":0,"expected":{"u":"prefill","u":"decode"},"desired":{}}"#;
         assert!(serde_json::from_str::<ReplaceRoles>(request).is_err());
         let mut ctx = AppContext::stub();
         let mut headers = HeaderMap::new();

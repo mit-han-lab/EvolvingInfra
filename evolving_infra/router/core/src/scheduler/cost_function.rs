@@ -60,10 +60,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::co_schedule::{
-    trade_pull_tokens, TradeLambdaMode, TradePullPrice, TradeWait,
-    TRADE_MIN_PULL_TOKENS,
+    trade_pull_tokens, TradeLambdaMode, TradePullPrice, TradeWait, TRADE_MIN_PULL_TOKENS,
 };
-use super::{SymmetricPdError, PlaceInput};
+use super::{PlaceInput, SymmetricPdError};
 use crate::co_schedule::{fetch_progress_poll, include_rejected};
 use crate::config::SymmetricPdCostFunctionConfig;
 use crate::cost_balance::{Candidate, CostBook, Reservation};
@@ -85,7 +84,8 @@ pub const HINT_LOG_POLICY: &str = "SymmetricPdCostFunction";
 
 /// The refusal of `POST /symmetric_pd/place` with the cost function (HTTP 400):
 /// that endpoint reports neither the dispatch nor the end of a request.
-pub const PLACE_REFUSAL: &str = "/symmetric_pd/place is not available with --symmetric-pd-p-select \
+pub const PLACE_REFUSAL: &str =
+    "/symmetric_pd/place is not available with --symmetric-pd-p-select \
                                  cost-function: the cost ledger needs each request's dispatch \
                                  and end";
 
@@ -1705,7 +1705,10 @@ mod tests {
         let kv = kv(512, urls);
         let cf = CostFunction::new(
             SymmetricPdCostFunctionConfig {
-                trade: TradeParams { copy_lambda: 9.2, ..TradeParams::default() },
+                trade: TradeParams {
+                    copy_lambda: 9.2,
+                    ..TradeParams::default()
+                },
                 cost_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,

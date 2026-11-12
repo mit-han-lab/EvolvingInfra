@@ -30,7 +30,10 @@ pub async fn place(
     State(ctx): State<Arc<AppContext>>,
     body: Bytes,
 ) -> Result<Json<PlaceHttpResponse>, ApiError> {
-    let flex = ctx.symmetric_pd.as_ref().ok_or(ApiError::SymmetricPdDisabled)?;
+    let flex = ctx
+        .symmetric_pd
+        .as_ref()
+        .ok_or(ApiError::SymmetricPdDisabled)?;
     if flex.cost_function_enabled() {
         // The cost ledger needs the dispatch and the end of each request;
         // this endpoint only places.

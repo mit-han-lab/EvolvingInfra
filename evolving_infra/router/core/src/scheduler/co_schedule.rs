@@ -852,8 +852,7 @@ pub fn trade_cost_full(
     };
     // mu = 0 leaves the total untouched (bit for bit).
     if params.hol_weight > 0.0 {
-        cost.hol_tokens =
-            trade_hol_tokens(params, arrival_rate_per_s, cost.wait_s, cost.service_s);
+        cost.hol_tokens = trade_hol_tokens(params, arrival_rate_per_s, cost.wait_s, cost.service_s);
         cost.total += cost.hol_tokens;
     }
     cost
@@ -1034,10 +1033,7 @@ pub fn select_trade(params: &TradeParams, inputs: &[TradeInput<'_>]) -> TradeSel
         protect_reason: None,
     };
     if params.margin_noise_k > 0.0 && has_owner && best != owner {
-        let (b_o, b_w) = (
-            selection.costs[owner].wait_s,
-            selection.costs[best].wait_s,
-        );
+        let (b_o, b_w) = (selection.costs[owner].wait_s, selection.costs[best].wait_s);
         let margin = params.margin_noise_k * (b_o * b_o + b_w * b_w).sqrt();
         let gain =
             (selection.costs[owner].total - selection.costs[best].total) / params.rate_tokens_per_s;
@@ -2432,7 +2428,10 @@ mod trade_tests {
         for backlog in [0u128, 3_000, 7_425, 20_000] {
             let c = trade_cost(&params(0.0), backlog, 4_000, 100_000);
             let wait = backlog as f64 / 13_500.0;
-            assert!(close(c.total, 13_500.0 * (wait.max(0.55) + 4_000.0 / 13_500.0)));
+            assert!(close(
+                c.total,
+                13_500.0 * (wait.max(0.55) + 4_000.0 / 13_500.0)
+            ));
         }
     }
 
@@ -2626,11 +2625,31 @@ mod trade_tests {
         assert_eq!(p.hol_weight, 0.0);
         assert_eq!(p.hol_rate_window_s, 60.0);
         assert!(p.is_original());
-        assert!(!TradeParams { wait: TradeWait::Eft, ..p }.is_original());
-        assert!(!TradeParams { dup_charge: TradeDupCharge::All, ..p }.is_original());
-        assert!(!TradeParams { margin_noise_k: 1.0, ..p }.is_original());
-        assert!(!TradeParams { hol_weight: 1.0, ..p }.is_original());
-        assert!(TradeParams { hol_rate_window_s: 5.0, ..p }.is_original());
+        assert!(!TradeParams {
+            wait: TradeWait::Eft,
+            ..p
+        }
+        .is_original());
+        assert!(!TradeParams {
+            dup_charge: TradeDupCharge::All,
+            ..p
+        }
+        .is_original());
+        assert!(!TradeParams {
+            margin_noise_k: 1.0,
+            ..p
+        }
+        .is_original());
+        assert!(!TradeParams {
+            hol_weight: 1.0,
+            ..p
+        }
+        .is_original());
+        assert!(TradeParams {
+            hol_rate_window_s: 5.0,
+            ..p
+        }
+        .is_original());
         for lambda in [0.0, 1.0, 9.2] {
             let p = params(lambda);
             for backlog in [0u128, 1, 5_400, 7_425, 27_000, 40_000, 1_000_003] {
@@ -2696,7 +2715,11 @@ mod trade_tests {
             assert!(!new.margin_protected && new.margin_s.is_none());
             for (a, b) in new.costs.iter().zip(&costs) {
                 assert_eq!(a.total.to_bits(), b.total.to_bits(), "round {round}");
-                assert_eq!(a.copy_tokens.to_bits(), b.copy_tokens.to_bits(), "round {round}");
+                assert_eq!(
+                    a.copy_tokens.to_bits(),
+                    b.copy_tokens.to_bits(),
+                    "round {round}"
+                );
             }
         }
     }
@@ -2717,14 +2740,23 @@ mod trade_tests {
             margin_noise_k: 1.0,
             ..params(0.0)
         };
-        let s = select_trade(&TradeParams { wait: TradeWait::Eft, ..k1 }, &inputs);
+        let s = select_trade(
+            &TradeParams {
+                wait: TradeWait::Eft,
+                ..k1
+            },
+            &inputs,
+        );
         assert_eq!(s.owner, 1, "the cheaper of the two equally cached Ps");
         assert_eq!(s.best, 1);
         assert_eq!(s.chosen, 1);
         assert!(!s.margin_protected);
         assert!(s.margin_s.is_none(), "the best P is the owner: no margin");
         // The ledger wait keeps the first version's owner (lower backlog).
-        let ledger: Vec<_> = inputs.iter().map(|i| TradeInput { wait: None, ..*i }).collect();
+        let ledger: Vec<_> = inputs
+            .iter()
+            .map(|i| TradeInput { wait: None, ..*i })
+            .collect();
         let s = select_trade(&k1, &ledger);
         assert_eq!(s.owner, 0);
         assert_eq!(s.chosen, 0);
@@ -2734,7 +2766,13 @@ mod trade_tests {
             eft(input("http://b", 0, 0, 31_000, 0), 1.0, 0.25),
             eft(input("http://c", 50_000, 0, 31_000, 0), 0.5, 0.75),
         ];
-        let s = select_trade(&TradeParams { wait: TradeWait::Eft, ..params(0.0) }, &tie);
+        let s = select_trade(
+            &TradeParams {
+                wait: TradeWait::Eft,
+                ..params(0.0)
+            },
+            &tie,
+        );
         assert_eq!(s.costs[1].total, s.costs[2].total);
         assert_eq!(s.owner, 0);
         assert_eq!(s.chosen, 2, "the shorter wait B_w");
@@ -2778,7 +2816,10 @@ mod trade_tests {
     #[test]
     fn eft_terms_replace_the_ledger_wait_and_service() {
         let p = params(0.0);
-        let w = TradeWaitTerms { wait_s: 0.2, service_s: 0.3 };
+        let w = TradeWaitTerms {
+            wait_s: 0.2,
+            service_s: 0.3,
+        };
         // Ledger backlog 27,000 (2 s) would hide the 0.55 s pull; B_w = 0.2 s does not.
         let c = trade_cost_full(&p, 27_000, 1_000, 100_000, 0, Some(w), 0.0);
         assert!(close(c.backlog, 0.2 * 13_500.0));
@@ -2794,7 +2835,10 @@ mod trade_tests {
             1_000,
             100_000,
             0,
-            Some(TradeWaitTerms { wait_s: 3.0, service_s: 0.3 }),
+            Some(TradeWaitTerms {
+                wait_s: 3.0,
+                service_s: 0.3,
+            }),
             0.0,
         );
         assert_eq!(c.exposed_pull_s, 0.0);
@@ -2810,12 +2854,24 @@ mod trade_tests {
         assert_eq!(s.best, 1);
         assert!(!s.margin_protected);
         // The same inputs on the ledger keep the owner.
-        let ledger: Vec<_> = inputs.iter().map(|i| TradeInput { wait: None, ..*i }).collect();
+        let ledger: Vec<_> = inputs
+            .iter()
+            .map(|i| TradeInput { wait: None, ..*i })
+            .collect();
         assert_eq!(select_trade(&p, &ledger).chosen, 0);
         // Mixed: a fallback P (ledger terms) next to an EFT P.
-        let mixed = [inputs[0], TradeInput { wait: None, ..inputs[1] }];
+        let mixed = [
+            inputs[0],
+            TradeInput {
+                wait: None,
+                ..inputs[1]
+            },
+        ];
         let s = select_trade(&p, &mixed);
-        assert!(close(s.costs[1].total, 2_000.0 + 13_500.0 * p.pull_seconds(18_000)));
+        assert!(close(
+            s.costs[1].total,
+            2_000.0 + 13_500.0 * p.pull_seconds(18_000)
+        ));
         assert_eq!(s.chosen, 1);
     }
 
@@ -2827,15 +2883,28 @@ mod trade_tests {
             input("http://a", 60_000, 30_000, 10_000, 0),
             input("http://b", 0, 0, 40_000, 0),
         ];
-        assert_eq!(trade_duplicate_tokens(&inputs, 0), 0, "the owner holds the most");
+        assert_eq!(
+            trade_duplicate_tokens(&inputs, 0),
+            0,
+            "the owner holds the most"
+        );
         assert_eq!(trade_duplicate_tokens(&inputs, 1), 30_000);
-        let pulled = TradeParams { copy_lambda: 1.0, ..TradeParams::default() };
+        let pulled = TradeParams {
+            copy_lambda: 1.0,
+            ..TradeParams::default()
+        };
         let s = select_trade(&pulled, &inputs);
         assert_eq!(s.chosen, 1, "40,000 < 70,000 without the duplicate price");
-        assert_eq!(s.costs[1].dup_tokens, 30_000, "recorded although not charged");
+        assert_eq!(
+            s.costs[1].dup_tokens, 30_000,
+            "recorded although not charged"
+        );
         assert_eq!(s.costs[1].copy_tokens, 0.0);
         assert_eq!(s.costs[0].dup_tokens, 0);
-        let all = TradeParams { dup_charge: TradeDupCharge::All, ..pulled };
+        let all = TradeParams {
+            dup_charge: TradeDupCharge::All,
+            ..pulled
+        };
         let s = select_trade(&all, &inputs);
         assert_eq!(s.costs[1].dup_tokens, 30_000);
         assert!(close(s.costs[1].copy_tokens, 30_000.0));
@@ -2865,12 +2934,24 @@ mod trade_tests {
         assert_eq!(s.chosen, 1);
         assert!(s.margin_s.is_none());
         // k = 0.9: margin 3.6 s < 3.8 s -> moves. k = 1.0: 4 s >= 3.8 s -> stays.
-        let s = select_trade(&TradeParams { margin_noise_k: 0.9, ..off }, &inputs);
+        let s = select_trade(
+            &TradeParams {
+                margin_noise_k: 0.9,
+                ..off
+            },
+            &inputs,
+        );
         assert_eq!(s.chosen, 1);
         assert!(close(s.margin_s.unwrap(), 3.6));
         assert!(close(s.owner_gain_s.unwrap(), 3.8));
         assert!(!s.margin_protected);
-        let s = select_trade(&TradeParams { margin_noise_k: 1.0, ..off }, &inputs);
+        let s = select_trade(
+            &TradeParams {
+                margin_noise_k: 1.0,
+                ..off
+            },
+            &inputs,
+        );
         assert_eq!(s.best, 1);
         assert_eq!(s.chosen, 0);
         assert!(s.margin_protected);
@@ -2879,7 +2960,13 @@ mod trade_tests {
             eft(input("http://a", 0, 0, 31_000, 0), 4.0, 0.3),
             eft(input("http://b", 0, 0, 31_000, 0), 0.0, 0.3),
         ];
-        let s = select_trade(&TradeParams { margin_noise_k: 10.0, ..off }, &cold);
+        let s = select_trade(
+            &TradeParams {
+                margin_noise_k: 10.0,
+                ..off
+            },
+            &cold,
+        );
         assert!(!s.has_owner);
         assert_eq!(s.chosen, 1);
         assert!(s.margin_s.is_none());
@@ -2892,7 +2979,10 @@ mod trade_tests {
         // Ledger: backlog 27,000 (B = 2 s), u = 13,500 (S = 1 s), a = 2/s,
         // mu = 0.5: HOL = 0.5 x 13,500 x 2 x 1 x (2 + 0.5) = 33,750;
         // total = 27,000 + 13,500 + 33,750 = 74,250.
-        let p = TradeParams { hol_weight: 0.5, ..params(0.0) };
+        let p = TradeParams {
+            hol_weight: 0.5,
+            ..params(0.0)
+        };
         assert!(close(trade_hol_tokens(&p, 2.0, 2.0, 1.0), 33_750.0));
         let c = trade_cost_full(&p, 27_000, 13_500, 0, 0, None, 2.0);
         assert!(close(c.hol_tokens, 33_750.0));
@@ -2901,15 +2991,25 @@ mod trade_tests {
         // EFT terms: B_w = 0.4 s, S_w = 0.2 s, a = 3/s, mu = 1:
         // HOL = 13,500 x 3 x 0.2 x (0.4 + 0.1) = 4,050;
         // total = 13,500 x (0.4 + 0.2) + 4,050 = 12,150.
-        let p1 = TradeParams { hol_weight: 1.0, wait: TradeWait::Eft, ..params(0.0) };
-        let w = TradeWaitTerms { wait_s: 0.4, service_s: 0.2 };
+        let p1 = TradeParams {
+            hol_weight: 1.0,
+            wait: TradeWait::Eft,
+            ..params(0.0)
+        };
+        let w = TradeWaitTerms {
+            wait_s: 0.4,
+            service_s: 0.2,
+        };
         let c = trade_cost_full(&p1, 0, 1_000, 0, 0, Some(w), 3.0);
         assert!(close(c.hol_tokens, 4_050.0));
         assert!(close(c.total, 12_150.0));
         // A pull: B_w = 0.2 s, the 0.55 s pull is 0.35 s exposed, S_w = 0.3 s,
         // a = 1/s: HOL = 13,500 x 1 x 0.3 x (0.2 + 0.15) = 1,417.5 (the pull
         // time is not added to B).
-        let w = TradeWaitTerms { wait_s: 0.2, service_s: 0.3 };
+        let w = TradeWaitTerms {
+            wait_s: 0.2,
+            service_s: 0.3,
+        };
         let c = trade_cost_full(&p1, 0, 1_000, 100_000, 0, Some(w), 1.0);
         assert!(close(c.exposed_pull_s, 0.35));
         assert!(close(c.hol_tokens, 1_417.5));
@@ -2924,14 +3024,21 @@ mod trade_tests {
         assert!(close(c.total, 40_500.0));
         // select_trade uses the a_w of each input: a 74,250 > b 53,500.
         let inputs = [
-            TradeInput { arrival_rate_per_s: 2.0, ..input("http://a", 27_000, 0, 13_500, 0) },
+            TradeInput {
+                arrival_rate_per_s: 2.0,
+                ..input("http://a", 27_000, 0, 13_500, 0)
+            },
             input("http://b", 40_000, 0, 13_500, 0),
         ];
         let s = select_trade(&p, &inputs);
         assert!(close(s.costs[0].total, 74_250.0));
         assert_eq!(s.costs[1].hol_tokens, 0.0);
         assert_eq!(s.chosen, 1);
-        assert_eq!(select_trade(&params(0.0), &inputs).chosen, 0, "40,500 < 53,500");
+        assert_eq!(
+            select_trade(&params(0.0), &inputs).chosen,
+            0,
+            "40,500 < 53,500"
+        );
     }
 
     /// The TRADE cost and selection before the HOL term,
@@ -3164,7 +3271,11 @@ mod trade_tests {
                 .collect();
             let p = TradeParams {
                 copy_lambda: [0.0, 9.2][next(2) as usize],
-                wait: if eft { TradeWait::Eft } else { TradeWait::Ledger },
+                wait: if eft {
+                    TradeWait::Eft
+                } else {
+                    TradeWait::Ledger
+                },
                 dup_charge: [TradeDupCharge::Pulled, TradeDupCharge::All][next(2) as usize],
                 margin_noise_k: [0.0, 0.5, 1.0][next(3) as usize],
                 hol_rate_window_s: [1.0, 60.0][next(2) as usize],
@@ -3174,11 +3285,26 @@ mod trade_tests {
             let new = select_trade(&p, &inputs);
             let old = pre_hol::select_trade(&p, &inputs);
             assert_eq!(
-                (new.chosen, new.owner, new.has_owner, new.best, new.margin_protected),
-                (old.chosen, old.owner, old.has_owner, old.best, old.margin_protected),
+                (
+                    new.chosen,
+                    new.owner,
+                    new.has_owner,
+                    new.best,
+                    new.margin_protected
+                ),
+                (
+                    old.chosen,
+                    old.owner,
+                    old.has_owner,
+                    old.best,
+                    old.margin_protected
+                ),
                 "round {round}"
             );
-            assert_eq!(new.margin_s.map(f64::to_bits), old.margin_s.map(f64::to_bits));
+            assert_eq!(
+                new.margin_s.map(f64::to_bits),
+                old.margin_s.map(f64::to_bits)
+            );
             assert_eq!(
                 new.owner_gain_s.map(f64::to_bits),
                 old.owner_gain_s.map(f64::to_bits)
@@ -3206,7 +3332,10 @@ mod trade_tests {
                 assert_eq!(a.arrival_rate_per_s, inputs[i].arrival_rate_per_s);
             }
         }
-        assert!(eft_rounds > 0 && margin_rounds > 0, "{eft_rounds} {margin_rounds}");
+        assert!(
+            eft_rounds > 0 && margin_rounds > 0,
+            "{eft_rounds} {margin_rounds}"
+        );
     }
 
     /// A big cold prefill: u = 64,000, no cached owner, no pull, two P,
@@ -3224,8 +3353,14 @@ mod trade_tests {
     #[test]
     fn hol_sends_a_big_cold_prefill_to_the_p_with_fewer_arrivals() {
         let inputs = [
-            TradeInput { arrival_rate_per_s: 2.0, ..input("http://a", 20_000, 0, 64_000, 0) },
-            TradeInput { arrival_rate_per_s: 0.3, ..input("http://b", 30_000, 0, 64_000, 0) },
+            TradeInput {
+                arrival_rate_per_s: 2.0,
+                ..input("http://a", 20_000, 0, 64_000, 0)
+            },
+            TradeInput {
+                arrival_rate_per_s: 0.3,
+                ..input("http://b", 30_000, 0, 64_000, 0)
+            },
         ];
         let off = params(9.2);
         let s = select_trade(&off, &inputs);
@@ -3234,7 +3369,13 @@ mod trade_tests {
         assert!(close(s.costs[0].total, 84_000.0));
         assert!(close(s.costs[1].total, 94_000.0));
         assert_eq!(s.costs[0].hol_tokens, 0.0);
-        let s = select_trade(&TradeParams { hol_weight: 1.0, ..off }, &inputs);
+        let s = select_trade(
+            &TradeParams {
+                hol_weight: 1.0,
+                ..off
+            },
+            &inputs,
+        );
         assert_eq!(s.chosen, 1);
         let hol_a: f64 = 2.0 * 64_000.0 * 52_000.0 / 13_500.0;
         let hol_b: f64 = 0.3 * 64_000.0 * 62_000.0 / 13_500.0;
@@ -3245,8 +3386,28 @@ mod trade_tests {
         assert!(close(s.costs[0].total, 84_000.0 + hol_a));
         assert!(close(s.costs[1].total, 94_000.0 + hol_b));
         // Around the change at mu = 0.0247.
-        assert_eq!(select_trade(&TradeParams { hol_weight: 0.02, ..off }, &inputs).chosen, 0);
-        assert_eq!(select_trade(&TradeParams { hol_weight: 0.03, ..off }, &inputs).chosen, 1);
+        assert_eq!(
+            select_trade(
+                &TradeParams {
+                    hol_weight: 0.02,
+                    ..off
+                },
+                &inputs
+            )
+            .chosen,
+            0
+        );
+        assert_eq!(
+            select_trade(
+                &TradeParams {
+                    hol_weight: 0.03,
+                    ..off
+                },
+                &inputs
+            )
+            .chosen,
+            1
+        );
     }
 
     /// A small warm request: its owner holds 40,000 of its 41,000 tokens
@@ -3265,9 +3426,18 @@ mod trade_tests {
     #[test]
     fn hol_keeps_a_small_warm_request_where_mu_zero_puts_it() {
         let inputs = [
-            TradeInput { arrival_rate_per_s: 2.0, ..input("http://a", 20_000, 40_000, 1_000, 0) },
-            TradeInput { arrival_rate_per_s: 0.5, ..input("http://b", 5_000, 0, 1_000, 40_000) },
-            TradeInput { arrival_rate_per_s: 0.3, ..input("http://c", 0, 0, 41_000, 0) },
+            TradeInput {
+                arrival_rate_per_s: 2.0,
+                ..input("http://a", 20_000, 40_000, 1_000, 0)
+            },
+            TradeInput {
+                arrival_rate_per_s: 0.5,
+                ..input("http://b", 5_000, 0, 1_000, 40_000)
+            },
+            TradeInput {
+                arrival_rate_per_s: 0.3,
+                ..input("http://c", 0, 0, 41_000, 0)
+            },
         ];
         for (lambda, expected) in [(9.2, 0usize), (0.0, 1)] {
             let off = params(lambda);
@@ -3275,11 +3445,26 @@ mod trade_tests {
             assert_eq!(base.owner, 0);
             assert_eq!(base.chosen, expected, "lambda {lambda}");
             for mu in [0.25, 0.5, 1.0, 2.0, 4.0] {
-                let s = select_trade(&TradeParams { hol_weight: mu, ..off }, &inputs);
+                let s = select_trade(
+                    &TradeParams {
+                        hol_weight: mu,
+                        ..off
+                    },
+                    &inputs,
+                );
                 assert_eq!(s.chosen, base.chosen, "lambda {lambda}, mu {mu}");
-                assert!(close(s.costs[0].hol_tokens, mu * 2.0 * 1_000.0 * 20_500.0 / 13_500.0));
-                assert!(close(s.costs[1].hol_tokens, mu * 0.5 * 1_000.0 * 5_500.0 / 13_500.0));
-                assert!(close(s.costs[2].hol_tokens, mu * 0.3 * 41_000.0 * 20_500.0 / 13_500.0));
+                assert!(close(
+                    s.costs[0].hol_tokens,
+                    mu * 2.0 * 1_000.0 * 20_500.0 / 13_500.0
+                ));
+                assert!(close(
+                    s.costs[1].hol_tokens,
+                    mu * 0.5 * 1_000.0 * 5_500.0 / 13_500.0
+                ));
+                assert!(close(
+                    s.costs[2].hol_tokens,
+                    mu * 0.3 * 41_000.0 * 20_500.0 / 13_500.0
+                ));
             }
         }
     }
@@ -3310,11 +3495,17 @@ mod trade_tests {
         // W = 5 s at 10 s: the placements at 0 s and 0.2 s are older than W.
         assert_eq!(arrivals.rate_per_s("http://a", at(10.0), 5.0), 0.0);
         arrivals.record("http://a", at(8.0));
-        assert!(close(arrivals.rate_per_s("http://a", at(10.0), 5.0), 1.0 / 5.0));
+        assert!(close(
+            arrivals.rate_per_s("http://a", at(10.0), 5.0),
+            1.0 / 5.0
+        ));
         // A full window: 61 s after the first placement, divide by W = 60 s;
         // only the placements at 8 s and 30 s are in it.
         arrivals.record("http://a", at(30.0));
-        assert!(close(arrivals.rate_per_s("http://a", at(61.0), 60.0), 2.0 / 60.0));
+        assert!(close(
+            arrivals.rate_per_s("http://a", at(61.0), 60.0),
+            2.0 / 60.0
+        ));
         assert_eq!(arrivals.rate_per_s("http://b", at(61.0), 60.0), 0.0);
         // The prune drops the old entries (and b, left without one); the
         // rates and the start of the history do not change.
@@ -3323,10 +3514,16 @@ mod trade_tests {
         assert_eq!(arrivals.recorded("http://b"), 0);
         assert!(!arrivals.times.contains_key("http://b"));
         assert_eq!(arrivals.first, Some(t0));
-        assert!(close(arrivals.rate_per_s("http://a", at(61.0), 60.0), 2.0 / 60.0));
+        assert!(close(
+            arrivals.rate_per_s("http://a", at(61.0), 60.0),
+            2.0 / 60.0
+        ));
         // The elapsed time counts from the first placement on any P.
         arrivals.record("http://b", at(62.0));
-        assert!(close(arrivals.rate_per_s("http://b", at(62.5), 60.0), 1.0 / 60.0));
+        assert!(close(
+            arrivals.rate_per_s("http://b", at(62.5), 60.0),
+            1.0 / 60.0
+        ));
         // A full window below 1 s: 1 placement in the last 0.5 s is 2/s (a
         // 1 s floor on the window would give 1/s).
         assert!(close(arrivals.rate_per_s("http://b", at(62.4), 0.5), 2.0));

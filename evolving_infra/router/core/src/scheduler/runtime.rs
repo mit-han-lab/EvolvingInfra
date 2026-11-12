@@ -48,14 +48,14 @@ use crate::{
 };
 #[cfg(test)]
 use placement::Capabilities;
+#[cfg(test)]
+use placement::DSelect;
+use placement::PSelect;
 use placement::{
     d_select_name, p_reason_name, TERM_BACKLOG, TERM_DECODE_LOAD, TERM_D_SELECT,
     TERM_EXPECTED_HIT_TOKENS, TERM_HIT_TOKENS, TERM_P_REASON, TERM_REUSE_GAIN, TERM_ROLE_PEN_D,
     TERM_ROLE_PEN_P, TERM_SCORE, TERM_XFER_COST,
 };
-#[cfg(test)]
-use placement::DSelect;
-use placement::PSelect;
 use placement::{
     HitTokens, IndexerHits, Placement, PlacementError, PlacementRequest, RoleWeights, WorkerLoads,
 };
@@ -214,9 +214,9 @@ impl From<SymmetricPdError> for ApiError {
     /// A no-placement or endpoint `ApiError` retaining the formatted scheduler error.
     fn from(e: SymmetricPdError) -> Self {
         match e {
-            SymmetricPdError::NoWorkers | SymmetricPdError::Placement(_) | SymmetricPdError::CostFunction(_) => {
-                ApiError::SymmetricPdNoPlacement(e.to_string())
-            }
+            SymmetricPdError::NoWorkers
+            | SymmetricPdError::Placement(_)
+            | SymmetricPdError::CostFunction(_) => ApiError::SymmetricPdNoPlacement(e.to_string()),
             SymmetricPdError::Endpoints { .. } => ApiError::SymmetricPdEndpoints(e.to_string()),
         }
     }
@@ -566,7 +566,8 @@ impl SymmetricPdRuntime {
         // The CLI checked the path is a file; a malformed table is an
         // operator error worth failing the start for.
         let replay = cfg.decision_replay.as_ref().map(|p| {
-            DecisionReplay::load(p).unwrap_or_else(|e| panic!("--symmetric-pd-decision-replay: {e}"))
+            DecisionReplay::load(p)
+                .unwrap_or_else(|e| panic!("--symmetric-pd-decision-replay: {e}"))
         });
         assert!(
             !cfg.external_role_control || replay.is_none(),
@@ -817,7 +818,10 @@ impl SymmetricPdRuntime {
 
     /// Install prepared work atomically with respect to dynamic role changes.
     pub(crate) fn with_current_role_pair<T>(
-        &self, p: &str, d: &str, install: impl FnOnce() -> Result<T, String>,
+        &self,
+        p: &str,
+        d: &str,
+        install: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
         if self.config().external_role_control {
             self.backend.registry.with_current_pair(p, d, install)
@@ -1090,10 +1094,7 @@ impl SymmetricPdRuntime {
     /// handle; errors for no workers, invalid/impossible placement, or missing KV endpoints.
     /// The caller must retire/hand off the reservation. CoSchedule bypasses HOLD; legacy modes
     /// may wait up to the configured deadline before forced placement.
-    pub async fn admit(
-        &self,
-        input: PlaceInput,
-    ) -> Result<Decision, SymmetricPdError> {
+    pub async fn admit(&self, input: PlaceInput) -> Result<Decision, SymmetricPdError> {
         let arrived = Instant::now();
         let (mut hits, indexer_ms, reply) = self.hits_with_reply(&input).await;
         let deadline = arrived + Duration::from_millis(self.cfg.max_queue_wait_ms);
@@ -1133,12 +1134,15 @@ impl SymmetricPdRuntime {
                 Some(cf) => {
                     let ix = self.indexer.as_ref().ok_or_else(|| {
                         SymmetricPdError::CostFunction(
-                            "--symmetric-pd-p-select cost-function requires --kv-indexer-url".into(),
+                            "--symmetric-pd-p-select cost-function requires --kv-indexer-url"
+                                .into(),
                         )
                     })?;
                     let pool = prefill_pool(&self.cfg, &weights, &index);
                     if pool.is_empty() {
-                        return Err(SymmetricPdError::Placement(PlacementError::NoPrefillCandidate));
+                        return Err(SymmetricPdError::Placement(
+                            PlacementError::NoPrefillCandidate,
+                        ));
                     }
                     // `--symmetric-pd-gwq-auto`: a free request may wait in the
                     // global waiting queue; after the wait the placement
@@ -1977,7 +1981,8 @@ mod tests {
     /// # Outputs
     /// No return value; the test asserts this contract and panics on a mismatch.
     fn decision_replay_advances_per_session_and_names_outcomes() {
-        let dir = std::env::temp_dir().join(format!("symmetric_pd-replay-rt-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("symmetric_pd-replay-rt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("table.json");
         // sha256("s1") keys the session; two recorded pairs.
@@ -2032,7 +2037,8 @@ mod tests {
     /// # Outputs
     /// No return value; the test asserts this contract and panics on a mismatch.
     fn decision_replay_content_keyed_matches_prompt_len_with_tolerance() {
-        let dir = std::env::temp_dir().join(format!("symmetric_pd-replay-len-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("symmetric_pd-replay-len-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("table.json");
         let key = {
@@ -2259,13 +2265,11 @@ mod tests {
         let rt = SymmetricPdRuntime::spawn(cfg, None, reg, model());
         // A large prompt must not consume the newly generated suffix budget.
         let decision = rt
-            .admit(
-                PlaceInput {
-                    prompt_len: 131_072,
-                    rid: Some("stable-request".into()),
-                    ..Default::default()
-                },
-            )
+            .admit(PlaceInput {
+                prompt_len: 131_072,
+                rid: Some("stable-request".into()),
+                ..Default::default()
+            })
             .await
             .unwrap();
         let import = decision.marks.kv_import.as_ref().unwrap();
@@ -2337,12 +2341,10 @@ mod tests {
         };
         let rt = SymmetricPdRuntime::spawn(cfg, None, reg, model());
         let error = rt
-            .admit(
-                PlaceInput {
-                    prompt_len: 4096,
-                    ..Default::default()
-                },
-            )
+            .admit(PlaceInput {
+                prompt_len: 4096,
+                ..Default::default()
+            })
             .await
             .unwrap_err();
         assert!(error
@@ -2375,8 +2377,14 @@ mod tests {
         let p = reg.get(&WorkerId("http://p:30000".into())).unwrap();
         let d = reg.get(&WorkerId("http://d:30000".into())).unwrap();
         for (policy, wire) in [
-            (crate::config::SymmetricPdImportCachePolicy::Auto, "gpu_only"),
-            (crate::config::SymmetricPdImportCachePolicy::GpuOnly, "gpu_only"),
+            (
+                crate::config::SymmetricPdImportCachePolicy::Auto,
+                "gpu_only",
+            ),
+            (
+                crate::config::SymmetricPdImportCachePolicy::GpuOnly,
+                "gpu_only",
+            ),
             (crate::config::SymmetricPdImportCachePolicy::Drop, "drop"),
         ] {
             let cfg = SymmetricPdConfig {
@@ -2496,7 +2504,12 @@ mod tests {
             ),
             ("http://10.0.0.7:30000", WorkerMode::Symmetric, None, None),
         ]);
-        let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), None, Arc::clone(&reg), model());
+        let rt = SymmetricPdRuntime::spawn(
+            SymmetricPdConfig::default(),
+            None,
+            Arc::clone(&reg),
+            model(),
+        );
         let by_url = |u: &str| reg.get(&WorkerId(u.into())).unwrap();
         assert_eq!(
             rt.endpoints(&by_url("http://10.0.0.5:30000")).unwrap(),
@@ -2631,12 +2644,10 @@ mod tests {
         )]);
         let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), None, reg, model());
         let d = rt
-            .admit(
-                PlaceInput {
-                    prompt_len: 100,
-                    ..Default::default()
-                },
-            )
+            .admit(PlaceInput {
+                prompt_len: 100,
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert!(d.is_local());
@@ -2668,12 +2679,10 @@ mod tests {
         ]);
         let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), None, reg, model());
         let err = rt
-            .admit(
-                PlaceInput {
-                    prompt_len: 64,
-                    ..Default::default()
-                },
-            )
+            .admit(PlaceInput {
+                prompt_len: 64,
+                ..Default::default()
+            })
             .await
             .err();
         assert!(
@@ -2707,12 +2716,10 @@ mod tests {
         let _h = rt.account("http://10.0.0.1:30000", 5000);
         let start = Instant::now();
         let d = rt
-            .admit(
-                PlaceInput {
-                    prompt_len: 10,
-                    ..Default::default()
-                },
-            )
+            .admit(PlaceInput {
+                prompt_len: 10,
+                ..Default::default()
+            })
             .await
             .unwrap();
         let waited = start.elapsed();
@@ -2754,12 +2761,10 @@ mod tests {
         });
         let start = Instant::now();
         let d = rt
-            .admit(
-                PlaceInput {
-                    prompt_len: 10,
-                    ..Default::default()
-                },
-            )
+            .admit(PlaceInput {
+                prompt_len: 10,
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert!(!d.forced);
@@ -2817,7 +2822,8 @@ mod tests {
             ("http://a", WorkerMode::Symmetric, Some(1), sym(1.0, 1.0)),
             ("http://b", WorkerMode::Symmetric, Some(1), sym(1.0, 1.0)),
         ]);
-        let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), Some(&kv_cfg()), reg, model());
+        let rt =
+            SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), Some(&kv_cfg()), reg, model());
         let hits = rt.parse_hits(&json!({
             "instances": {"1": {"gpu": 1024, "cpu": 4096}, "2": {"cpu": 0}, "99": {"gpu": 7}}
         }));
@@ -2966,14 +2972,12 @@ mod tests {
         ]);
         let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), None, reg, model());
         let resp = rt
-            .place_http(
-                PlaceHttpRequest {
-                    input_ids: Some(vec![1, 2, 3]),
-                    session_id: Some("s".into()),
-                    turn: Some(2),
-                    ..Default::default()
-                },
-            )
+            .place_http(PlaceHttpRequest {
+                input_ids: Some(vec![1, 2, 3]),
+                session_id: Some("s".into()),
+                turn: Some(2),
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert!(!resp.local);
@@ -3026,13 +3030,11 @@ mod tests {
         ]);
         let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), None, reg, model());
         let resp = rt
-            .place_http(
-                PlaceHttpRequest {
-                    prompt_len: Some(10),
-                    account: Some(false),
-                    ..Default::default()
-                },
-            )
+            .place_http(PlaceHttpRequest {
+                prompt_len: Some(10),
+                account: Some(false),
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert!(resp.local);
@@ -3041,14 +3043,12 @@ mod tests {
         assert_eq!(resp.targets[0].leg, "local");
         assert_eq!(resp.marks, Marks::default());
         let resp = rt
-            .place_http(
-                PlaceHttpRequest {
-                    prompt_len: Some(10),
-                    force_split: Some(true),
-                    route: Some("/v1/completions".into()),
-                    ..Default::default()
-                },
-            )
+            .place_http(PlaceHttpRequest {
+                prompt_len: Some(10),
+                force_split: Some(true),
+                route: Some("/v1/completions".into()),
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert!(!resp.local);
@@ -3118,12 +3118,10 @@ mod tests {
                         let mut decisions = Vec::new();
                         for _ in 0..32 {
                             decisions.push(
-                                rt.admit(
-                                    PlaceInput {
-                                        prompt_len: 1024,
-                                        ..Default::default()
-                                    },
-                                )
+                                rt.admit(PlaceInput {
+                                    prompt_len: 1024,
+                                    ..Default::default()
+                                })
                                 .await
                                 .unwrap(),
                             );
@@ -3268,12 +3266,10 @@ mod tests {
                             let mut decisions = Vec::new();
                             for _ in 0..16 {
                                 decisions.push(
-                                    rt.admit(
-                                        PlaceInput {
-                                            prompt_len: 1024,
-                                            ..Default::default()
-                                        },
-                                    )
+                                    rt.admit(PlaceInput {
+                                        prompt_len: 1024,
+                                        ..Default::default()
+                                    })
                                     .await
                                     .unwrap(),
                                 );
@@ -3304,12 +3300,10 @@ mod tests {
             .build()
             .unwrap();
         let reply = runtime
-            .block_on(rt.place_http(
-                PlaceHttpRequest {
-                    prompt_len: Some(1024),
-                    ..Default::default()
-                },
-            ))
+            .block_on(rt.place_http(PlaceHttpRequest {
+                prompt_len: Some(1024),
+                ..Default::default()
+            }))
             .unwrap();
         assert_eq!(
             reply.p_leg.worker, "http://p1",
@@ -3370,17 +3364,15 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let result = runtime.block_on(rt.admit(
-            PlaceInput {
-                prompt_len: 1024,
-                ..Default::default()
-            },
-        ));
+        let result = runtime.block_on(rt.admit(PlaceInput {
+            prompt_len: 1024,
+            ..Default::default()
+        }));
         assert!(matches!(
             result,
-            Err(SymmetricPdError::Placement(PlacementError::InvalidPolicyOutput(
-                _
-            )))
+            Err(SymmetricPdError::Placement(
+                PlacementError::InvalidPolicyOutput(_)
+            ))
         ));
         assert_eq!(
             rt.loads(["http://p0"]).get("http://p0").active_prefill_reqs,
@@ -3453,21 +3445,17 @@ mod tests {
             .build()
             .unwrap();
         let first = runtime
-            .block_on(rt.admit(
-                PlaceInput {
-                    prompt_len: 1024,
-                    ..Default::default()
-                },
-            ))
+            .block_on(rt.admit(PlaceInput {
+                prompt_len: 1024,
+                ..Default::default()
+            }))
             .unwrap();
         assert_eq!(first.p_worker.url, "http://p1");
         let second = runtime
-            .block_on(rt.admit(
-                PlaceInput {
-                    prompt_len: 1024,
-                    ..Default::default()
-                },
-            ))
+            .block_on(rt.admit(PlaceInput {
+                prompt_len: 1024,
+                ..Default::default()
+            }))
             .unwrap();
         assert_eq!(
             second.p_worker.url, "http://p0",
@@ -3483,11 +3471,36 @@ mod tests {
     /// A 3P + 2D symmetric fleet (pinned roles, bootstrap ports set).
     fn ca_registry() -> Arc<WorkerRegistry> {
         registry_with(vec![
-            ("http://10.0.0.1:30000", WorkerMode::Symmetric, Some(9000), sym(1.0, 0.0)),
-            ("http://10.0.0.2:30000", WorkerMode::Symmetric, Some(9000), sym(1.0, 0.0)),
-            ("http://10.0.0.3:30000", WorkerMode::Symmetric, Some(9000), sym(1.0, 0.0)),
-            ("http://10.0.0.4:30000", WorkerMode::Symmetric, Some(9000), sym(0.0, 1.0)),
-            ("http://10.0.0.5:30000", WorkerMode::Symmetric, Some(9000), sym(0.0, 1.0)),
+            (
+                "http://10.0.0.1:30000",
+                WorkerMode::Symmetric,
+                Some(9000),
+                sym(1.0, 0.0),
+            ),
+            (
+                "http://10.0.0.2:30000",
+                WorkerMode::Symmetric,
+                Some(9000),
+                sym(1.0, 0.0),
+            ),
+            (
+                "http://10.0.0.3:30000",
+                WorkerMode::Symmetric,
+                Some(9000),
+                sym(1.0, 0.0),
+            ),
+            (
+                "http://10.0.0.4:30000",
+                WorkerMode::Symmetric,
+                Some(9000),
+                sym(0.0, 1.0),
+            ),
+            (
+                "http://10.0.0.5:30000",
+                WorkerMode::Symmetric,
+                Some(9000),
+                sym(0.0, 1.0),
+            ),
         ])
     }
 
@@ -3511,22 +3524,21 @@ mod tests {
     async fn gateway_cache_aware_p_select_follows_the_gateway_rule_without_holding() {
         let reg = ca_registry();
         let rt = SymmetricPdRuntime::spawn(ca_config(), None, Arc::clone(&reg), model());
-        let p_urls = ["http://10.0.0.1:30000", "http://10.0.0.2:30000", "http://10.0.0.3:30000"];
-        let _held: Vec<LedgerHandle> = p_urls
-            .iter()
-            .map(|p| rt.account(p, 1_000_000))
-            .collect();
+        let p_urls = [
+            "http://10.0.0.1:30000",
+            "http://10.0.0.2:30000",
+            "http://10.0.0.3:30000",
+        ];
+        let _held: Vec<LedgerHandle> = p_urls.iter().map(|p| rt.account(p, 1_000_000)).collect();
         let tokens: Vec<u32> = (0..200).collect();
         let start = Instant::now();
         let first = rt
-            .admit(
-                PlaceInput {
-                    tokens: Some(tokens.clone()),
-                    prompt_len: 200,
-                    rid: Some("r1".into()),
-                    ..Default::default()
-                },
-            )
+            .admit(PlaceInput {
+                tokens: Some(tokens.clone()),
+                prompt_len: 200,
+                rid: Some("r1".into()),
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert!(start.elapsed() < Duration::from_millis(500), "no hold");
@@ -3556,17 +3568,18 @@ mod tests {
         // A longer prompt with the same prefix: a cache hit in both.
         let longer: Vec<u32> = (0..240).collect();
         let second = rt
-            .admit(
-                PlaceInput {
-                    tokens: Some(longer.clone()),
-                    prompt_len: 240,
-                    rid: Some("r2".into()),
-                    ..Default::default()
-                },
-            )
+            .admit(PlaceInput {
+                tokens: Some(longer.clone()),
+                prompt_len: 240,
+                rid: Some("r2".into()),
+                ..Default::default()
+            })
             .await
             .unwrap();
-        assert_eq!(second.p_worker.url, first.p_worker.url, "cache hit on the tree");
+        assert_eq!(
+            second.p_worker.url, first.p_worker.url,
+            "cache hit on the tree"
+        );
         let (reference_pick, note) =
             reference.select_for_tokens(&pool, Some(longer.as_slice()), None);
         assert_eq!(pool[reference_pick.unwrap()].url, second.p_worker.url);
@@ -3594,12 +3607,10 @@ mod tests {
         .map(|p| rt.account(p, 1_000_000))
         .collect();
         let d = rt
-            .admit(
-                PlaceInput {
-                    prompt_len: 10,
-                    ..Default::default()
-                },
-            )
+            .admit(PlaceInput {
+                prompt_len: 10,
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert!(d.forced);
@@ -3612,7 +3623,12 @@ mod tests {
     #[tokio::test]
     async fn late_d_members_ignore_the_breaker_and_candidates_do_not() {
         let reg = ca_registry();
-        let rt = SymmetricPdRuntime::spawn(SymmetricPdConfig::default(), None, Arc::clone(&reg), model());
+        let rt = SymmetricPdRuntime::spawn(
+            SymmetricPdConfig::default(),
+            None,
+            Arc::clone(&reg),
+            model(),
+        );
         let urls = |ws: Vec<Arc<Worker>>| ws.iter().map(|w| w.url.clone()).collect::<Vec<_>>();
         for url in ["http://10.0.0.1:30000", "http://10.0.0.4:30000"] {
             let w = reg.get(&WorkerId(url.to_string())).unwrap();
@@ -3792,7 +3808,9 @@ mod tests {
         }
         assert_eq!(cost_rids(dir.path(), "reserve"), ["a", "b"]);
         let rows = cost_rows(dir.path());
-        assert!(rows.iter().all(|e| e["policy"] == "symmetric_pd_cost_function"));
+        assert!(rows
+            .iter()
+            .all(|e| e["policy"] == "symmetric_pd_cost_function"));
         let reserve = rows.iter().find(|e| e["event"] == "reserve").unwrap();
         assert_eq!(reserve["selection_policy"], "trade");
         assert_eq!(reserve["entry"]["worker_url"], CF_P1);

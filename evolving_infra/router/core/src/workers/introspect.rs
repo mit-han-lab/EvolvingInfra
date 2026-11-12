@@ -189,7 +189,9 @@ impl WorkerIntrospector {
                     .iter()
                     .filter_map(|state| state.symmetric_pd.as_ref())
                     .filter(|section| section.get("tp_rank").and_then(|v| v.as_u64()) == Some(0))
-                    .find_map(|section| symmetric_pd_endpoints_from_server_info(section, worker_url))
+                    .find_map(|section| {
+                        symmetric_pd_endpoints_from_server_info(section, worker_url)
+                    })
             });
         // Lenient: an absent, zero or non-integer value is "not reported",
         // never a failed parse of the rest of the body.

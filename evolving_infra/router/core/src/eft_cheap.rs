@@ -222,8 +222,7 @@ fn usable_fit(fit: Option<&Value>) -> Option<Fit> {
     let fit = fit?.as_object()?;
     let names = fit.get("features")?.as_array()?;
     let weights = fit.get("coefficients")?.as_array()?;
-    if names.is_empty() || names.len() != weights.len() || names[0].as_str() != Some("intercept")
-    {
+    if names.is_empty() || names.len() != weights.len() || names[0].as_str() != Some("intercept") {
         return None;
     }
     names
@@ -269,9 +268,7 @@ impl EftModel {
             .get("models")
             .and_then(|m| m.get(FAMILY))
             .filter(|k| k.is_object())
-            .ok_or_else(|| {
-                "no pooled augmented launch interval fit: models missing".to_string()
-            })?;
+            .ok_or_else(|| "no pooled augmented launch interval fit: models missing".to_string())?;
         let plain = named_fit(
             kinds.get("launch_interval").and_then(|k| k.get("global")),
             &FEATURES,
@@ -324,7 +321,9 @@ impl EftModel {
             done - interval
         } else {
             match named_fit(
-                kinds.get("last_launch_to_done").and_then(|k| k.get("global")),
+                kinds
+                    .get("last_launch_to_done")
+                    .and_then(|k| k.get("global")),
                 &FEATURES,
             ) {
                 Ok(done) => {
@@ -369,7 +368,11 @@ impl EftModel {
         };
         let idle_delay = match finite(idle_value).filter(|x| *x >= 0.0) {
             Some(idle) => {
-                let source = if in_eft("idle_delay_s") { "eft" } else { "timing" };
+                let source = if in_eft("idle_delay_s") {
+                    "eft"
+                } else {
+                    "timing"
+                };
                 sources.insert("idle_delay".into(), json!(source));
                 idle
             }
@@ -688,7 +691,10 @@ impl EftKnobs {
             ("jit_lead_tokens", self.jit_lead_tokens),
             ("pull_min_tokens", self.pull_min_tokens),
             ("pull_min_incremental", self.pull_min_incremental),
-            ("evict_median_prefix_tokens", self.evict_median_prefix_tokens),
+            (
+                "evict_median_prefix_tokens",
+                self.evict_median_prefix_tokens,
+            ),
         ] {
             if value < 0 {
                 return Err(format!("knob {name} must be a finite number >= 0"));
@@ -1034,13 +1040,16 @@ fn static_unusable_reason(
         Some(Value::Bool(false)) => true,
         _ => false,
     };
-    let epoch_mismatch = expected_epoch
-        .is_some_and(|e| raw.get("epoch").and_then(Value::as_str) != Some(e));
+    let epoch_mismatch =
+        expected_epoch.is_some_and(|e| raw.get("epoch").and_then(Value::as_str) != Some(e));
     [
         (!is_true(raw.get("available")), "unavailable"),
         (is_true(raw.get("stale")), "stale"),
         (is_true(raw.get("truncated")) && !omitted_zero, "truncated"),
-        (!is_true(raw.get("inflight_batches_known")), "inflight_unknown"),
+        (
+            !is_true(raw.get("inflight_batches_known")),
+            "inflight_unknown",
+        ),
         (!fcfs, "policy_not_fcfs"),
         (dp_size != 1, "dp_not_1"),
         (epoch_mismatch, "epoch_mismatch"),
@@ -1240,13 +1249,11 @@ impl<'a> View<'a> {
     /// `since_poll_sent_s`: decision time minus the time the poll was sent.
     pub fn at(snap: &'a SnapshotView, since_poll_sent_s: f64) -> Self {
         let age_s = snap.engine_age_s.map(|engine| since_poll_sent_s + engine);
-        let unusable_reason = snap
-            .static_unusable_reason
-            .or(if age_s.is_none() {
-                Some("age_unknown")
-            } else {
-                None
-            });
+        let unusable_reason = snap.static_unusable_reason.or(if age_s.is_none() {
+            Some("age_unknown")
+        } else {
+            None
+        });
         Self {
             snap,
             age_s,
@@ -1749,7 +1756,11 @@ impl SessionContext {
                 })
                 .unwrap_or_default(),
             host_pool_tokens: map("host_pool_tokens")
-                .map(|m| m.iter().map(|(k, v)| (k.clone(), nonneg_int(Some(v)))).collect())
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| (k.clone(), nonneg_int(Some(v))))
+                        .collect()
+                })
                 .unwrap_or_default(),
         })
     }
@@ -1770,7 +1781,11 @@ fn session_terms(
     };
     let owner = ctx.owner.as_deref();
     let last = ctx.last_len;
-    let added = if owner != Some(url) { n } else { 0.max(n - last) };
+    let added = if owner != Some(url) {
+        n
+    } else {
+        0.max(n - last)
+    };
     let here = ctx.occupancy.get(url).copied().unwrap_or(0);
     let mut overflow = 0;
     if let Some(pool) = ctx.host_pool_tokens.get(url).copied().flatten() {
@@ -2271,17 +2286,15 @@ mod tests {
         let raws = inputs["candidates"].as_array().expect("candidates");
         let snaps: Vec<Option<SnapshotView>> = raws
             .iter()
-            .map(|c| {
-                (!c["raw"].is_null()).then(|| SnapshotView::parse(&c["raw"], 1, None))
-            })
+            .map(|c| (!c["raw"].is_null()).then(|| SnapshotView::parse(&c["raw"], 1, None)))
             .collect();
         let mut views = Map::new();
         let mut candidates = Vec::new();
         for (c, snap) in raws.iter().zip(&snaps) {
             let url = c["worker_url"].as_str().expect("url").to_string();
-            let view = snap.as_ref().map(|s| {
-                View::at(s, d - c["poll_sent_s"].as_f64().expect("poll_sent_s"))
-            });
+            let view = snap
+                .as_ref()
+                .map(|s| View::at(s, d - c["poll_sent_s"].as_f64().expect("poll_sent_s")));
             views.insert(url.clone(), view.map_or(Value::Null, |v| v.record()));
             candidates.push(DecideCandidate {
                 worker_url: url,
@@ -2296,7 +2309,9 @@ mod tests {
             });
         }
         let session = SessionContext::from_json(&inputs["session"]);
-        let n = inputs["target"]["input_tokens"].as_i64().expect("input_tokens");
+        let n = inputs["target"]["input_tokens"]
+            .as_i64()
+            .expect("input_tokens");
         let decision = decide(
             &inputs["target"]["rid"],
             n,
@@ -2319,8 +2334,18 @@ mod tests {
             let name = case["name"].as_str().unwrap_or("?");
             let (model, views, decision) = evaluate(&case["inputs"]);
             let expected = &case["expected"];
-            compare(&format!("{name}.model"), &model, &expected["model"], &mut errors);
-            compare(&format!("{name}.views"), &views, &expected["views"], &mut errors);
+            compare(
+                &format!("{name}.model"),
+                &model,
+                &expected["model"],
+                &mut errors,
+            );
+            compare(
+                &format!("{name}.views"),
+                &views,
+                &expected["views"],
+                &mut errors,
+            );
             compare(
                 &format!("{name}.decision"),
                 &decision,
@@ -2460,13 +2485,29 @@ mod tests {
         let m = plain_model();
         let (local, pulled) = Shape::of(20_000, 18_000, 0, None, 64);
         assert_eq!(pulled, 0);
-        assert_eq!(local, Shape { u: 2_016, q: 17_984, h: 17_984, s: 0 });
+        assert_eq!(
+            local,
+            Shape {
+                u: 2_016,
+                q: 17_984,
+                h: 17_984,
+                s: 0
+            }
+        );
         let svc = service_seconds(&m, local, 64, 8192);
         let expected = 1e-5 * 2_016.0 + 1e-7 * 17_984.0 + 0.004 + 0.05;
         assert!((svc - expected).abs() < 1e-12, "{svc}");
         let (pull, pulled) = Shape::of(20_000, 0, 0, Some(18_000), 64);
         assert_eq!(pulled, 17_984);
-        assert_eq!(pull, Shape { u: 2_016, q: 17_984, h: 0, s: 17_984 });
+        assert_eq!(
+            pull,
+            Shape {
+                u: 2_016,
+                q: 17_984,
+                h: 0,
+                s: 17_984
+            }
+        );
         // The storage prior is 2 x host.
         assert_eq!(m.b_stor, 2e-7);
         let (none, pulled) = Shape::of(20_000, 18_000, 18_000, Some(18_010), 64);
@@ -2493,7 +2534,10 @@ mod tests {
         let snap = SnapshotView::parse(&raw, 1, None);
         let expected: BTreeSet<String> = ["f0", "f1"].iter().map(|s| s.to_string()).collect();
         assert_eq!(snap.pass_rids, expected);
-        assert!(!snap.rids.contains("f0"), "the reference rid set is unchanged");
+        assert!(
+            !snap.rids.contains("f0"),
+            "the reference rid set is unchanged"
+        );
         assert_eq!(View::at(&snap, 0.0).record()["rids"], json!(["cold", "w0"]));
         assert_eq!((snap.cold_rows, snap.cold_tokens), (1, 62_000));
         assert!(snap.degraded.contains("queue_compute_unknown_cold"));
@@ -2503,7 +2547,10 @@ mod tests {
         let snap = SnapshotView::parse(&raw, 1, None);
         assert!(snap.pass_rids.is_empty());
         let m = plain_model();
-        assert_eq!(drain(&View::at(&snap, 0.0), &[], &m, &EftKnobs::default()).r0, 0.0);
+        assert_eq!(
+            drain(&View::at(&snap, 0.0), &[], &m, &EftKnobs::default()).r0,
+            0.0
+        );
     }
 
     /// The empty view prices only the given rows: their work and passes.

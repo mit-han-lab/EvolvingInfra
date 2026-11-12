@@ -1190,7 +1190,9 @@ mod tests {
 
         fn run(golden: &Golden) -> (usize, usize) {
             assert!(
-                golden.source.contains("sgl-model-gateway cache-aware policy"),
+                golden
+                    .source
+                    .contains("sgl-model-gateway cache-aware policy"),
                 "{}",
                 golden.source
             );

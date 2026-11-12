@@ -1144,57 +1144,74 @@ impl CoScheduler {
     /// One slot per worker, including retries and periodic-mode triggers.
     fn refresh_progress(self: &Arc<Self>, force: bool) -> Vec<tokio::task::JoinHandle<()>> {
         let age = Duration::from_millis(self.cfg.load_poll_ms);
-        self.pool().into_iter().filter_map(|worker| {
-            let query = self.progress_refresh.claim(&worker.url, Instant::now(), age, force)?;
-            let sched = Arc::clone(self);
-            Some(tokio::spawn(async move {
-                let result = async {
-                    let routing_wanted = sched.routing_wanted(&worker.url);
-                    let fetched = fetch_prefill_progress(
-                        &sched.poll_client, &worker.url, routing_wanted).await;
-                    let (progress, load, routing) = match fetched {
-                        // An engine without the section (an older
-                        // engine) rejects the include. Poll again without it:
-                        // progress goes on, and this P has no view (fallback
-                        // no_view) until a later probe.
-                        Err(error) if routing_wanted && include_rejected(&error) => {
-                            let fetched = fetch_prefill_progress(
-                                &sched.poll_client, &worker.url, false).await?;
-                            sched.note_routing_rejected(&worker.url, &error);
-                            fetched
-                        }
-                        fetched => {
-                            let fetched = fetched?;
-                            if routing_wanted {
-                                sched.note_routing_accepted(&worker.url);
+        self.pool()
+            .into_iter()
+            .filter_map(|worker| {
+                let query = self
+                    .progress_refresh
+                    .claim(&worker.url, Instant::now(), age, force)?;
+                let sched = Arc::clone(self);
+                Some(tokio::spawn(async move {
+                    let result = async {
+                        let routing_wanted = sched.routing_wanted(&worker.url);
+                        let fetched =
+                            fetch_prefill_progress(&sched.poll_client, &worker.url, routing_wanted)
+                                .await;
+                        let (progress, load, routing) = match fetched {
+                            // An engine without the section (an older
+                            // engine) rejects the include. Poll again without it:
+                            // progress goes on, and this P has no view (fallback
+                            // no_view) until a later probe.
+                            Err(error) if routing_wanted && include_rejected(&error) => {
+                                let fetched =
+                                    fetch_prefill_progress(&sched.poll_client, &worker.url, false)
+                                        .await?;
+                                sched.note_routing_rejected(&worker.url, &error);
+                                fetched
                             }
-                            fetched
+                            fetched => {
+                                let fetched = fetched?;
+                                if routing_wanted {
+                                    sched.note_routing_accepted(&worker.url);
+                                }
+                                fetched
+                            }
+                        };
+                        let received = Instant::now();
+                        query.check(&progress.epoch, progress.sequence)?;
+                        let cursor = (progress.epoch.clone(), progress.sequence);
+                        sched
+                            .cost_book
+                            .as_ref()
+                            .expect("uncached book")
+                            .apply_progress_received(
+                                &worker.url,
+                                progress,
+                                load,
+                                query.sent_at,
+                                received,
+                            )
+                            .map_err(anyhow::Error::msg)?;
+                        if let Some(raw) = routing {
+                            // Parsed here, off the cost-book lock.
+                            let view = crate::eft_cheap::SnapshotView::parse(&raw, 1, None);
+                            let e3 = sched.observe_e3(&worker.url, &raw, query.sent_at, received);
+                            sched.publish_routing(&worker.url, view, query.sent_at, received, e3);
                         }
-                    };
-                    let received = Instant::now();
-                    query.check(&progress.epoch, progress.sequence)?;
-                    let cursor = (progress.epoch.clone(), progress.sequence);
-                    sched.cost_book.as_ref().expect("uncached book")
-                        .apply_progress_received(&worker.url, progress, load, query.sent_at, received)
-                        .map_err(anyhow::Error::msg)?;
-                    if let Some(raw) = routing {
-                        // Parsed here, off the cost-book lock.
-                        let view = crate::eft_cheap::SnapshotView::parse(&raw, 1, None);
-                        let e3 = sched.observe_e3(&worker.url, &raw, query.sent_at, received);
-                        sched.publish_routing(&worker.url, view, query.sent_at, received, e3);
+                        Ok::<_, anyhow::Error>(cursor)
                     }
-                    Ok::<_, anyhow::Error>(cursor)
-                }.await;
-                let elapsed_ms = query.sent_at.elapsed().as_secs_f64() * 1000.0;
-                crate::load_refresh::log_progress_result(&worker.url, &result, elapsed_ms);
-                let applied = result.is_ok();
-                query.finish(result.ok(), Instant::now());
-                if applied && sched.gwq.is_some() {
-                    // New progress: the queued work of this P may have room.
-                    sched.wake(Triggers::POLL);
-                }
-            }))
-        }).collect()
+                    .await;
+                    let elapsed_ms = query.sent_at.elapsed().as_secs_f64() * 1000.0;
+                    crate::load_refresh::log_progress_result(&worker.url, &result, elapsed_ms);
+                    let applied = result.is_ok();
+                    query.finish(result.ok(), Instant::now());
+                    if applied && sched.gwq.is_some() {
+                        // New progress: the queued work of this P may have room.
+                        sched.wake(Triggers::POLL);
+                    }
+                }))
+            })
+            .collect()
     }
 
     /// TRADE `wait = eft` and `wait = e3` ask the engine for its
@@ -1444,7 +1461,10 @@ impl CoScheduler {
 
     /// The EFT inputs of one decision: the model and the newest snapshot of
     /// each pool worker, cloned before the cost-book lock.
-    fn trade_eft_context(&self, pool: &[Arc<Worker>]) -> Option<crate::cost_balance::TradeEftContext> {
+    fn trade_eft_context(
+        &self,
+        pool: &[Arc<Worker>],
+    ) -> Option<crate::cost_balance::TradeEftContext> {
         let model = self.cfg.trade_eft_model.clone()?;
         let store = self.routing.read();
         Some(crate::cost_balance::TradeEftContext {
@@ -1465,7 +1485,11 @@ impl CoScheduler {
             let notified = self.progress_refresh.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.pool().iter().any(|w| self.progress_refresh.initialized(&w.url)) {
+            if self
+                .pool()
+                .iter()
+                .any(|w| self.progress_refresh.initialized(&w.url))
+            {
                 return Ok(());
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
@@ -2981,49 +3005,88 @@ mod tests {
         let calls = Arc::new(AtomicU64::new(0));
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        let app = Router::new().route("/v1/loads", get({
-            let calls = calls.clone(); let started = started.clone(); let release = release.clone();
-            move || {
-                let calls = calls.clone(); let started = started.clone(); let release = release.clone();
-                async move {
-                    let sequence = calls.fetch_add(1, Ordering::SeqCst) + 1;
-                    started.notify_one();
-                    release.notified().await;
-                    Json(json!({"loads":[{"prefill_work":{"epoch":"boot1", "sequence":sequence,
-                                                       "remaining":{},"truncated":false}}]}))
+        let app = Router::new().route(
+            "/v1/loads",
+            get({
+                let calls = calls.clone();
+                let started = started.clone();
+                let release = release.clone();
+                move || {
+                    let calls = calls.clone();
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        let sequence = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                        started.notify_one();
+                        release.notified().await;
+                        Json(
+                            json!({"loads":[{"prefill_work":{"epoch":"boot1", "sequence":sequence,
+                                                       "remaining":{},"truncated":false}}]}),
+                        )
+                    }
                 }
-            }
-        }));
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         let tmp = tempfile::tempdir().unwrap();
-        let sched = CoScheduler::spawn(test_cfg_with(|cfg| {
-            cfg.uncached_balance = true; cfg.on_demand_load_refresh = true;
-            cfg.cost_trace = Some(tmp.path().join("cost.jsonl")); cfg.load_poll_ms = 100;
-        }), &test_kv(), registry_with_prefills(&[&url]), ModelId("m".into()));
+        let sched = CoScheduler::spawn(
+            test_cfg_with(|cfg| {
+                cfg.uncached_balance = true;
+                cfg.on_demand_load_refresh = true;
+                cfg.cost_trace = Some(tmp.path().join("cost.jsonl"));
+                cfg.load_poll_ms = 100;
+            }),
+            &test_kv(),
+            registry_with_prefills(&[&url]),
+            ModelId("m".into()),
+        );
         // No unconditional query even with a ready registered worker.
         tokio::time::sleep(Duration::from_millis(120)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let requests: Vec<_> = (0..16).map(|i| {
-            let sched = sched.clone();
-            tokio::spawn(async move { sched.admit(&sched, None, 64, None, Some(format!("step{i}"))).await })
-        }).collect();
-        tokio::time::timeout(Duration::from_secs(1), started.notified()).await.unwrap();
+        let requests: Vec<_> = (0..16)
+            .map(|i| {
+                let sched = sched.clone();
+                tokio::spawn(async move {
+                    sched
+                        .admit(&sched, None, 64, None, Some(format!("step{i}")))
+                        .await
+                })
+            })
+            .collect();
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         release.notify_one();
-        let first: Vec<_> = futures::future::join_all(requests).await.into_iter()
-            .map(|r| r.unwrap().unwrap()).collect();
+        let first: Vec<_> = futures::future::join_all(requests)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap().unwrap())
+            .collect();
         assert_eq!(first.len(), 16);
         tokio::time::sleep(Duration::from_millis(120)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         // Query 2 is held at the server. Admission still returns using the
         // initialized ledger; it does not wait for that query's response.
-        let next = tokio::time::timeout(Duration::from_millis(100),
-            sched.admit(&sched, None, 64, None, Some("next".into()))).await.unwrap().unwrap();
-        tokio::time::timeout(Duration::from_secs(1), started.notified()).await.unwrap();
+        let next = tokio::time::timeout(
+            Duration::from_millis(100),
+            sched.admit(&sched, None, 64, None, Some("next".into())),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        let another = sched.admit(&sched, None, 64, None, Some("another".into())).await.unwrap();
+        let another = sched
+            .admit(&sched, None, 64, None, Some("another".into()))
+            .await
+            .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         release.notify_one();
         drop((first, next, another));

@@ -50,7 +50,7 @@ use crate::global_queue::{
 };
 use crate::kv_hint::KvHintInjector;
 use crate::scheduler::co_schedule::{TradeParams, TradeWait};
-use crate::scheduler::{SymmetricPdError, PlaceInput};
+use crate::scheduler::{PlaceInput, SymmetricPdError};
 use crate::workers::Worker;
 
 /// The pass period while nothing is held.

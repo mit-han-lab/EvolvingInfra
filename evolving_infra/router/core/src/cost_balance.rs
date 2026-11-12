@@ -2210,7 +2210,10 @@ impl CostBook {
         let view_age_s = view.and_then(|v| v.age_s);
         let view_key = routing.map_or(Value::Null, |r| json!([r.view.epoch, r.view.sequence]));
         let (page, chunk) = routing.map_or(
-            (crate::eft_cheap::DEFAULT_PAGE, crate::eft_cheap::DEFAULT_CHUNK),
+            (
+                crate::eft_cheap::DEFAULT_PAGE,
+                crate::eft_cheap::DEFAULT_CHUNK,
+            ),
             |r| (r.view.page, r.view.chunk),
         );
         let mut ids: Vec<u64> = state.active_by_rid.values().copied().collect();
@@ -2253,8 +2256,8 @@ impl CostBook {
         };
         let drain = crate::eft_cheap::drain(&view, &rows, &ctx.model, &ctx.knobs);
         let n = input_tokens as i64;
-        let pull_hit = (candidate.expected_hit > candidate.local_hit)
-            .then_some(candidate.expected_hit as i64);
+        let pull_hit =
+            (candidate.expected_hit > candidate.local_hit).then_some(candidate.expected_hit as i64);
         let (shape, _) = Shape::of(
             n,
             candidate.local_hit as i64,
@@ -5031,8 +5034,13 @@ mod tests {
             let book = CostBook::new_uncached(None).unwrap();
             let mut busy = uncached(&book, "busy", "a", 60_000);
             busy.mark_dispatched().unwrap();
-            book.apply_progress("a", progress(1, &[("busy", 60_000)]), json!({}), Instant::now())
-                .unwrap();
+            book.apply_progress(
+                "a",
+                progress(1, &[("busy", 60_000)]),
+                json!({}),
+                Instant::now(),
+            )
+            .unwrap();
             let (selected, _r, decision) = book
                 .reserve_trade(
                     110_000,
@@ -5047,7 +5055,10 @@ mod tests {
             assert_eq!(decision["pulled_tokens"], pulled);
             assert_eq!(decision["candidates"].as_array().unwrap().len(), 2);
             // The ledger keeps uncached-token units: the pulled prefix is not charged.
-            assert_eq!(cost(&book, chosen), if chosen == "a" { 70_000 } else { 10_000 });
+            assert_eq!(
+                cost(&book, chosen),
+                if chosen == "a" { 70_000 } else { 10_000 }
+            );
             drop(busy);
         }
     }
@@ -5087,14 +5098,27 @@ mod tests {
         let (worker, decision) = pick(&book, "q2", true);
         assert_eq!(worker, "a");
         assert_eq!(decision["candidates"][0]["backlog_tokens"], "0");
-        assert_eq!(unacknowledged(&book, "a"), 30_000, "rollbacks keep the counter");
+        assert_eq!(
+            unacknowledged(&book, "a"),
+            30_000,
+            "rollbacks keep the counter"
+        );
         // The engine reports the RID unchanged: acknowledged, no work update.
-        book.apply_progress("a", progress(1, &[("routed", 30_000)]), json!({}), Instant::now())
-            .unwrap();
+        book.apply_progress(
+            "a",
+            progress(1, &[("routed", 30_000)]),
+            json!({}),
+            Instant::now(),
+        )
+        .unwrap();
         assert_eq!(unacknowledged(&book, "a"), 0);
         assert_eq!(cost(&book, "a"), 30_000);
         assert_eq!(pick(&book, "q3", false).0, "b");
-        assert_eq!(pick(&book, "q3x", true).0, "b", "acknowledged work always counts");
+        assert_eq!(
+            pick(&book, "q3x", true).0,
+            "b",
+            "acknowledged work always counts"
+        );
         a.finish("http_done").unwrap();
         assert_eq!(unacknowledged(&book, "a"), 0);
         assert_eq!(cost(&book, "a"), 0);
@@ -5112,7 +5136,12 @@ mod tests {
         let path = tmp.path().join("trade.jsonl");
         let book = CostBook::new_uncached(Some(&path)).unwrap();
         let (_, _r, _) = book
-            .reserve_trade(1_000, Some("r".into()), vec![candidate("a", 0)], trade(9.2, false))
+            .reserve_trade(
+                1_000,
+                Some("r".into()),
+                vec![candidate("a", 0)],
+                trade(9.2, false),
+            )
             .unwrap();
         let line = std::fs::read_to_string(&path).unwrap();
         let event: Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
@@ -5126,11 +5155,21 @@ mod tests {
             .is_none());
         let cost_book = CostBook::new(None).unwrap();
         assert!(cost_book
-            .reserve_trade(1_000, Some("r".into()), vec![candidate("a", 0)], trade(9.2, false))
+            .reserve_trade(
+                1_000,
+                Some("r".into()),
+                vec![candidate("a", 0)],
+                trade(9.2, false)
+            )
             .is_err());
         let restore = CostBook::new_restore_aware(None, 8).unwrap();
         assert!(restore
-            .reserve_trade(1_000, Some("r".into()), vec![candidate("a", 0)], trade(9.2, false))
+            .reserve_trade(
+                1_000,
+                Some("r".into()),
+                vec![candidate("a", 0)],
+                trade(9.2, false)
+            )
             .is_err());
         // The non-trade uncached event carries no trade field.
         let path = tmp.path().join("plain.jsonl");
@@ -5172,7 +5211,10 @@ mod tests {
         assert_eq!(selected.worker_url, "a");
         assert_eq!(decision["hol_weight"], 10.0);
         assert_eq!(decision["hol_rate_window_s"], 60.0);
-        assert_eq!(decision["wait"], "ledger", "mu > 0 adds the later-option keys");
+        assert_eq!(
+            decision["wait"], "ledger",
+            "mu > 0 adds the later-option keys"
+        );
         for row in decision["candidates"].as_array().unwrap() {
             assert_eq!(row["arrival_rate_per_s"], 0.0, "{row}");
             assert_eq!(row["hol_tokens"], 0.0, "{row}");
@@ -5183,8 +5225,13 @@ mod tests {
         assert_eq!(selected.worker_url, "a");
         assert!(decision.get("hol_weight").is_none());
         assert!(decision.get("hol_rate_window_s").is_none());
-        assert!(decision.get("wait").is_none(), "mu = 0 keeps the first-version trace");
-        assert!(decision["candidates"][0].get("arrival_rate_per_s").is_none());
+        assert!(
+            decision.get("wait").is_none(),
+            "mu = 0 keeps the first-version trace"
+        );
+        assert!(decision["candidates"][0]
+            .get("arrival_rate_per_s")
+            .is_none());
         assert!(decision["candidates"][0].get("hol_tokens").is_none());
         drop(r);
         assert_eq!((recorded("a"), recorded("b")), (1, 0));
@@ -5197,8 +5244,14 @@ mod tests {
         let rate = a["arrival_rate_per_s"].as_f64().unwrap();
         assert!(rate > 0.0 && rate <= 1.0, "{rate}");
         let hol_a = 10.0 * rate * 10_000.0 * 15_000.0 / 13_500.0;
-        assert!((a["hol_tokens"].as_f64().unwrap() - hol_a).abs() < 1e-6, "{a}");
-        assert!((a["trade_cost"].as_f64().unwrap() - (20_000.0 + hol_a)).abs() < 1e-6, "{a}");
+        assert!(
+            (a["hol_tokens"].as_f64().unwrap() - hol_a).abs() < 1e-6,
+            "{a}"
+        );
+        assert!(
+            (a["trade_cost"].as_f64().unwrap() - (20_000.0 + hol_a)).abs() < 1e-6,
+            "{a}"
+        );
         let b = &decision["candidates"][1];
         assert_eq!(b["arrival_rate_per_s"], 0.0);
         assert_eq!(b["hol_tokens"], 0.0);
@@ -5536,12 +5589,14 @@ mod tests {
 
     fn routing_snapshot(waiting: usize, tokens: u64) -> Value {
         let rows: Vec<Value> = (0..waiting)
-            .map(|i| json!({"rid": format!("w{i}"), "phase": "waiting", "input_tokens": tokens,
+            .map(|i| {
+                json!({"rid": format!("w{i}"), "phase": "waiting", "input_tokens": tokens,
                 "remaining_compute_tokens": tokens, "device_prefix_tokens": 0,
                 "host_prefix_tokens": 0, "storage_prefix_tokens": 0,
                 "state": {"intent_start_ok": true, "bound": false, "launched_unbound": false,
                     "held": false, "parked": false, "pull_pending": false,
-                    "pull_inflight": false, "restore_inflight": false}}))
+                    "pull_inflight": false, "restore_inflight": false}})
+            })
             .collect();
         json!({"epoch": "routing-1", "sequence": 7, "available": true, "age_s": 0.0,
             "stale": false, "truncated": false, "omitted_waiting": 0,
@@ -5576,11 +5631,20 @@ mod tests {
             .reserve_trade(20_000, Some("l0".into()), candidates(), trade(0.0, false))
             .unwrap();
         assert_eq!(selected.worker_url, "a");
-        assert!(decision.get("wait").is_none(), "ledger trace keeps the first-version keys");
+        assert!(
+            decision.get("wait").is_none(),
+            "ledger trace keeps the first-version keys"
+        );
         assert!(decision["candidates"][0].get("wait_s").is_none());
         drop(r0);
         let (selected, r1, decision) = book
-            .reserve_trade_eft(20_000, Some("r1".into()), candidates(), eft_trade(0.0), Some(&ctx))
+            .reserve_trade_eft(
+                20_000,
+                Some("r1".into()),
+                candidates(),
+                eft_trade(0.0),
+                Some(&ctx),
+            )
             .unwrap();
         assert_eq!(selected.worker_url, "b");
         assert_eq!(decision["wait"], "eft");
@@ -5600,14 +5664,23 @@ mod tests {
         assert_eq!(b["eft_shape"]["s"], 17_984);
         // r1 is reserved on b and not in b's snapshot: it is outstanding.
         let (_, r2, decision) = book
-            .reserve_trade_eft(20_000, Some("r2".into()), candidates(), eft_trade(0.0), Some(&ctx))
+            .reserve_trade_eft(
+                20_000,
+                Some("r2".into()),
+                candidates(),
+                eft_trade(0.0),
+                Some(&ctx),
+            )
             .unwrap();
         let b = &decision["candidates"][1];
         assert_eq!(b["eft_outstanding_rows"], 1);
         assert_eq!(b["eft_outstanding_tokens"], 2_000);
         // W(u 2,000, q 18,000, s 18,000 pulled) + one pass.
         let expected = 1e-5 * 2_000.0 + 2e-7 * 18_000.0 + 0.004 + 0.05;
-        assert!((b["wait_s"].as_f64().unwrap() - expected).abs() < 1e-9, "{b}");
+        assert!(
+            (b["wait_s"].as_f64().unwrap() - expected).abs() < 1e-9,
+            "{b}"
+        );
         drop((r1, r2));
     }
 
@@ -5620,7 +5693,11 @@ mod tests {
         stale["stale"] = json!(true);
         let ctx = eft_context(&[
             ("a", stale, std::time::Duration::ZERO),
-            ("b", routing_snapshot(0, 0), std::time::Duration::from_secs(2)),
+            (
+                "b",
+                routing_snapshot(0, 0),
+                std::time::Duration::from_secs(2),
+            ),
         ]);
         let pick = |rid: &str, ctx: Option<&TradeEftContext>| {
             let (_, r, decision) = book
@@ -5639,7 +5716,10 @@ mod tests {
         let reasons: Vec<_> = (0..3)
             .map(|i| d["candidates"][i]["wait_fallback_reason"].clone())
             .collect();
-        assert_eq!(reasons, vec![json!("stale"), json!("view_too_old"), json!("no_view")]);
+        assert_eq!(
+            reasons,
+            vec![json!("stale"), json!("view_too_old"), json!("no_view")]
+        );
         // The fallback keeps the scale of the EFT terms: S_w is the step
         // model's (1,000 tokens, one pass), not u / R.
         let svc = 1e-5 * 1_000.0 + 0.004 + 0.05;
@@ -5647,7 +5727,10 @@ mod tests {
             let row = &d["candidates"][i];
             assert_eq!(row["wait_source"], "ledger_fallback");
             assert_eq!(row["wait_s"], 0.0, "empty ledger");
-            assert!((row["service_s"].as_f64().unwrap() - svc).abs() < 1e-12, "{row}");
+            assert!(
+                (row["service_s"].as_f64().unwrap() - svc).abs() < 1e-12,
+                "{row}"
+            );
             assert!((row["trade_cost"].as_f64().unwrap() - 13_500.0 * svc).abs() < 1e-6);
         }
         assert_eq!(d["wait_fallbacks"], 3);
@@ -5659,7 +5742,10 @@ mod tests {
         assert!((service - 1_000.0 / 13_500.0).abs() < 1e-12);
         assert_eq!(d["candidates"][0]["trade_cost"], 1_000.0);
         assert_eq!(d["wait_fallback_counts"]["no_model"], 3);
-        assert_eq!(d["wait_fallback_counts"]["stale"], 1, "counts are cumulative");
+        assert_eq!(
+            d["wait_fallback_counts"]["stale"], 1,
+            "counts are cumulative"
+        );
         assert!(d["eft_model_sha256"].is_null());
     }
 
@@ -5699,7 +5785,10 @@ mod tests {
         let wait = 1e-5 * 8_192.0 + 0.004 + 1e-5 * 1_000.0 + 0.004 + 0.05 * 2.0;
         assert!((a["wait_s"].as_f64().unwrap() - wait).abs() < 1e-9, "{a}");
         let svc = 1e-5 * 2_000.0 + 0.004 + 0.05;
-        assert!((a["service_s"].as_f64().unwrap() - svc).abs() < 1e-12, "{a}");
+        assert!(
+            (a["service_s"].as_f64().unwrap() - svc).abs() < 1e-12,
+            "{a}"
+        );
         assert!((a["trade_cost"].as_f64().unwrap() - 13_500.0 * (wait + svc)).abs() < 1e-6);
         let b = &decision["candidates"][1];
         assert_eq!(b["wait_source"], "eft");
@@ -5719,10 +5808,9 @@ mod tests {
     /// request in transit at the router's estimate.
     #[test]
     fn trade_eft_leaves_out_requests_in_the_in_flight_pass() {
-        for (launch_age, rows, pass_rows, tokens) in [
-            (json!(0.0), 2, 1, 9_000),
-            (Value::Null, 3, 0, 11_000),
-        ] {
+        for (launch_age, rows, pass_rows, tokens) in
+            [(json!(0.0), 2, 1, 9_000), (Value::Null, 3, 0, 11_000)]
+        {
             let book = CostBook::new_uncached(None).unwrap();
             let reserve = |rid: &str, n: u64, hit: u64| {
                 let (_, mut r) = book
@@ -5777,7 +5865,10 @@ mod tests {
             } else {
                 // R0 = 0.05 + 1e-5 x 2,000 + 0.004 = 0.074 s, less the view age.
                 let expected = 0.074 + w(6_000.0) + w(3_000.0) + 0.05 * 2.0;
-                assert!(wait <= expected + 1e-9 && wait > expected - 0.05, "{wait} {expected}");
+                assert!(
+                    wait <= expected + 1e-9 && wait > expected - 0.05,
+                    "{wait} {expected}"
+                );
             }
             drop((r, fin, race, lost, transit));
         }
@@ -6413,7 +6504,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("labelled.jsonl");
         let book =
-            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", None).unwrap();
+            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", None)
+                .unwrap();
         let (_, mut r, _) = book
             .reserve_trade_session(
                 10_000,
@@ -7946,8 +8038,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("cost.jsonl");
         let expire = Some(secs(60));
-        let book = CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", expire)
-            .unwrap();
+        let book =
+            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", expire)
+                .unwrap();
         let mut other = uncached(&book, "other", "a", 7_000);
         other.mark_dispatched().unwrap();
         let before = ledger(&book, "a");
@@ -8109,7 +8202,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("cost.jsonl");
         let book =
-            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", None).unwrap();
+            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", None)
+                .unwrap();
         let mut r = uncached(&book, "lost", "a", 12_000);
         r.mark_dispatched().unwrap();
         r.mark_unknown("prefill_transport_error: upstream timed out")
@@ -8139,8 +8233,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("cost.jsonl");
         let expire = Some(secs(60));
-        let book = CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", expire)
-            .unwrap();
+        let book =
+            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", expire)
+                .unwrap();
         let lose = |rid: &str, tokens: u64| {
             let mut r = uncached(&book, rid, "a", tokens);
             r.mark_dispatched().unwrap();
@@ -9021,8 +9116,9 @@ mod tests {
             tmp.path().join("sync.jsonl"),
             tmp.path().join("async.jsonl"),
         );
-        let sync = CostBook::new_uncached_with_policy(Some(&p_sync), "symmetric_pd_cost_function", None)
-            .unwrap();
+        let sync =
+            CostBook::new_uncached_with_policy(Some(&p_sync), "symmetric_pd_cost_function", None)
+                .unwrap();
         let book =
             CostBook::new_uncached_with_policy(Some(&p_async), "symmetric_pd_cost_function", None)
                 .unwrap();

@@ -221,13 +221,24 @@ impl AppContext {
         // execution registry owns the reservation and applies the tokenizer's
         // P-leg callbacks (upload = dispatch, terminal P = finish, uncertain
         // failure or cancel = unknown); see backend/execution.rs.
-        let external = symmetric_pd.as_ref().is_some_and(|f| f.config().external_role_control);
-        assert!(!external || prepared_config.is_some(), "external role control requires prepared usage callbacks");
+        let external = symmetric_pd
+            .as_ref()
+            .is_some_and(|f| f.config().external_role_control);
+        assert!(
+            !external || prepared_config.is_some(),
+            "external role control requires prepared usage callbacks"
+        );
         let external_role_key = external.then(|| {
             let path = std::env::var_os("EVOLVING_INFRA_ROLE_CONTROL_TOKEN_FILE")
                 .expect("external role control requires EVOLVING_INFRA_ROLE_CONTROL_TOKEN_FILE");
-            let key = std::fs::read_to_string(path).expect("read role controller credential").trim().to_string();
-            assert!(key.len() >= 32 && !key.chars().any(char::is_whitespace), "invalid role control credential");
+            let key = std::fs::read_to_string(path)
+                .expect("read role controller credential")
+                .trim()
+                .to_string();
+            assert!(
+                key.len() >= 32 && !key.chars().any(char::is_whitespace),
+                "invalid role control credential"
+            );
             key
         });
         let external_workload =

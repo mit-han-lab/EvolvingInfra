@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::discovery::{ModelId, WorkerId, WorkerMode};
-use crate::scheduler::placement::{Capabilities, RoleWeight};
 use crate::health::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+use crate::scheduler::placement::{Capabilities, RoleWeight};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;

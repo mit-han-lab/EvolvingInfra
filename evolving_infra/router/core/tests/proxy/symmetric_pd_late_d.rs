@@ -31,21 +31,21 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sgl_router::config::{
-    ActiveLoadConfig, Config, DiscoveryBackend, SymmetricPdConfig, SymmetricPdCostFunctionConfig,
-    GatewayCacheAwareConfig, LateDecodeConfig, LateDecodeMode, LateDecodeRule, ModelConfig,
-    ObservabilityConfig, PdDecodePolicy, PdDecodeTokensConfig, PolicyKind, ProxyConfig,
-    ServerConfig, StaticUrlsDiscoveryConfig,
+    ActiveLoadConfig, Config, DiscoveryBackend, GatewayCacheAwareConfig, LateDecodeConfig,
+    LateDecodeMode, LateDecodeRule, ModelConfig, ObservabilityConfig, PdDecodePolicy,
+    PdDecodeTokensConfig, PolicyKind, ProxyConfig, ServerConfig, StaticUrlsDiscoveryConfig,
+    SymmetricPdConfig, SymmetricPdCostFunctionConfig,
 };
 use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
-use sgl_router::scheduler::{DSelect, PSelect, RoleWeight};
 use sgl_router::kv_hint::{KvHintConfig, KvWorkerMapEntry};
 use sgl_router::policies::factory::build_registry_with_defaults;
 use sgl_router::proxy::Proxy;
 use sgl_router::scheduler::co_schedule::TradeParams;
+use sgl_router::scheduler::{DSelect, PSelect, RoleWeight};
 use sgl_router::server::app::build_router;
 use sgl_router::server::app_context::AppContext;
 use sgl_router::tokenizer::TokenizerRegistry;
-use sgl_router::workers::{SymmetricPdWorkerInfo, LateDWorkerInfo, WorkerRegistry};
+use sgl_router::workers::{LateDWorkerInfo, SymmetricPdWorkerInfo, WorkerRegistry};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -188,11 +188,13 @@ impl Link {
             s.epoch
         };
         self.out
-            .send(frame(json!({"v": 1, "t": "bind_ready", "router_epoch": epoch,
+            .send(frame(
+                json!({"v": 1, "t": "bind_ready", "router_epoch": epoch,
                 "p_seq": 1, "t_send_ns": 1u64,
                 "items": [{"key": key, "bind_seq": 1, "eligible": eligible,
                            "ready": eligible.count_ones(), "input_len": 4,
-                           "default_idx": default_idx, "local_ok": false, "local_load": 0}]})))
+                           "default_idx": default_idx, "local_ok": false, "local_load": 0}]}),
+            ))
             .await
             .unwrap();
         tokio::time::timeout(CHOICE_TIMEOUT, rx).await.ok()?.ok()
@@ -274,7 +276,11 @@ fn ok_answer() -> Response {
 }
 
 async fn engine_completions(e: Engine, body: Value) -> Response {
-    e.seen.bodies.lock().unwrap().push((e.me.clone(), body.clone()));
+    e.seen
+        .bodies
+        .lock()
+        .unwrap()
+        .push((e.me.clone(), body.clone()));
     let hold = body["rid"] == "busy" && body.get("kv_export").is_some();
     if let Some(cost) = e.cost.as_ref().filter(|_| hold) {
         cost.held.lock().unwrap().insert("busy".into(), 20_000);
@@ -288,7 +294,9 @@ async fn engine_completions(e: Engine, body: Value) -> Response {
         let full = (1u64 << k) - 1;
         let eligible = e
             .transfers
-            .wait_for(id, Duration::from_secs(3), |t| (t.arrived == full).then_some(t.arrived))
+            .wait_for(id, Duration::from_secs(3), |t| {
+                (t.arrived == full).then_some(t.arrived)
+            })
             .await
             .unwrap_or_else(|| e.transfers.get(id).arrived);
         let link = e.link.as_ref().expect("an owner with a link");
@@ -443,7 +451,11 @@ async fn fixture(opts: Opts) -> Fixture {
                 link: link.clone(),
                 transfers: Arc::clone(&transfers),
                 seen: Arc::clone(&seen),
-                capacity: if prefill { None } else { opts.d_capacity[i - opts.n_p] },
+                capacity: if prefill {
+                    None
+                } else {
+                    opts.d_capacity[i - opts.n_p]
+                },
                 cost,
             },
             listener,
@@ -595,7 +607,9 @@ async fn fixture(opts: Opts) -> Fixture {
         if opts.fit_native {
             let want = opts.d_capacity.iter().filter(|c| c.is_some()).count();
             assert!(
-                wait_until(Duration::from_secs(10), || late.capacity_store().len() == want).await,
+                wait_until(Duration::from_secs(10), || late.capacity_store().len()
+                    == want)
+                .await,
                 "the capacity poll never saw every decode"
             );
         }
@@ -658,7 +672,10 @@ impl Fixture {
         }
         self.app
             .clone()
-            .oneshot(req.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap())
+            .oneshot(
+                req.body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
             .await
             .unwrap()
     }
@@ -795,17 +812,26 @@ async fn flex_late_d_generate_takes_the_plain_split() {
         assert_eq!(b["mock_route"], GENERATE);
         assert!(b.get("late_d").is_none());
     }
-    let p = f.seen.of(|b| b["rid"] == "r-gen" && b.get("kv_export").is_some());
+    let p = f
+        .seen
+        .of(|b| b["rid"] == "r-gen" && b.get("kv_export").is_some());
     assert_eq!(p.len(), 1);
     assert!(p[0].1["kv_export"].get("candidates").is_none());
-    assert_eq!(f.seen.of(|b| b["rid"] == "r-gen" && b.get("kv_import").is_some()).len(), 1);
+    assert_eq!(
+        f.seen
+            .of(|b| b["rid"] == "r-gen" && b.get("kv_import").is_some())
+            .len(),
+        1
+    );
     let late = f.ctx.late_bind.as_ref().unwrap();
     assert_eq!(late.stats().legs_winner.load(Ordering::Relaxed), 0);
 
     let res = f.post(request("r-choose", vec![1, 2, 3, 4]), None).await;
     assert_eq!(res.status(), StatusCode::OK);
     body_json(res).await;
-    let p = f.seen.of(|b| b["rid"] == "r-choose" && b.get("kv_export").is_some());
+    let p = f
+        .seen
+        .of(|b| b["rid"] == "r-choose" && b.get("kv_export").is_some());
     assert_eq!(p.len(), 1);
     assert_eq!(p[0].1["late_d"]["mode"], "choose");
     assert_eq!(late.stats().legs_winner.load(Ordering::Relaxed), 1);
@@ -821,7 +847,9 @@ async fn flex_late_d_without_capacity_falls_back_to_d1() {
     })
     .await;
     for i in 0..2 {
-        let res = f.post(request(&format!("r{i}"), vec![1, 2, 3, 4]), None).await;
+        let res = f
+            .post(request(&format!("r{i}"), vec![1, 2, 3, 4]), None)
+            .await;
         assert_eq!(res.status(), StatusCode::OK);
         body_json(res).await;
     }
@@ -884,12 +912,22 @@ async fn flex_split_reads_the_kv_session_context_alias() {
     .await;
     let header = r#"{"agent_id":"c1","subagent_id":0,"request_id":1}"#;
     let res = f
-        .post(request("client-rid", vec![1, 2, 3]), Some(("x-kv-session-context", header)))
+        .post(
+            request("client-rid", vec![1, 2, 3]),
+            Some(("x-kv-session-context", header)),
+        )
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     body_json(res).await;
     assert!(
-        wait_until(Duration::from_secs(5), || f.seen.bodies.lock().unwrap().len() == 2).await
+        wait_until(Duration::from_secs(5), || f
+            .seen
+            .bodies
+            .lock()
+            .unwrap()
+            .len()
+            == 2)
+        .await
     );
     let bodies = f.seen.of(|_| true);
     let tags: Vec<&Value> = bodies.iter().map(|(_, b)| &b["kv_session"]).collect();
@@ -897,7 +935,10 @@ async fn flex_split_reads_the_kv_session_context_alias() {
     assert_eq!(tags[0]["version"], 1);
     assert!(bodies.iter().all(|(_, b)| b["rid"] == "client-rid"));
     let res = f
-        .post(request("bad", vec![1, 2, 3]), Some(("x-kv-session-context", r#"{"agent_id":"c1"}"#)))
+        .post(
+            request("bad", vec![1, 2, 3]),
+            Some(("x-kv-session-context", r#"{"agent_id":"c1"}"#)),
+        )
         .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
@@ -928,15 +969,15 @@ async fn flex_gateway_cache_aware_p_select_follows_its_tree() {
         body_json(res).await;
         assert!(
             wait_until(Duration::from_secs(5), || {
-                f.seen
-                    .of(|b| b.get("kv_export").is_some())
-                    .len()
-                    == 2
+                f.seen.of(|b| b.get("kv_export").is_some()).len() == 2
             })
             .await
         );
         let p = f.seen.of(|b| b.get("kv_export").is_some());
-        assert_eq!(p[0].0, p[1].0, "late={late:?}: the second prompt follows the tree");
+        assert_eq!(
+            p[0].0, p[1].0,
+            "late={late:?}: the second prompt follows the tree"
+        );
         assert!(f.p_urls.contains(&p[0].0));
     }
 }
@@ -1066,7 +1107,9 @@ async fn late_d_choose_with_cost_function_and_session_retention() {
         .unwrap();
     assert_eq!(reserve["trade_decision"]["chosen"], f.p_urls[1]);
     assert_eq!(reserve["trade_decision"]["pulled_tokens"], 18000);
-    assert!(rows.iter().all(|e| e["policy"] == "symmetric_pd_cost_function"));
+    assert!(rows
+        .iter()
+        .all(|e| e["policy"] == "symmetric_pd_cost_function"));
 
     // 4. Release `busy`: its P-leg binds a decode and the client gets 200.
     p1.release.notify_one();

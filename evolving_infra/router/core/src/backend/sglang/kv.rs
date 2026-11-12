@@ -214,7 +214,8 @@ impl SglangBackend {
             SymmetricPdImportCachePolicy::Retain => "retain",
             SymmetricPdImportCachePolicy::GpuOnly => "gpu_only",
             SymmetricPdImportCachePolicy::Drop => "drop",
-            SymmetricPdImportCachePolicy::Auto => match crate::backend::registry::role_of(d_worker) {
+            SymmetricPdImportCachePolicy::Auto => match crate::backend::registry::role_of(d_worker)
+            {
                 // Never a P-leg here: a host copy would only cost write-through
                 // bandwidth and host pool space (upstream PD decode keeps the
                 // prompt on GPU only).

@@ -631,9 +631,13 @@ impl Placement {
 /// Why `place()` produced nothing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlacementError {
-    #[error("symmetric_pd: no worker can run the P-leg (no prefill-capable worker with weight > 0)")]
+    #[error(
+        "symmetric_pd: no worker can run the P-leg (no prefill-capable worker with weight > 0)"
+    )]
     NoPrefillCandidate,
-    #[error("symmetric_pd: no worker can run the D-leg (no decode-capable worker with weight > 0)")]
+    #[error(
+        "symmetric_pd: no worker can run the D-leg (no decode-capable worker with weight > 0)"
+    )]
     NoDecodeCandidate,
     #[error("symmetric_pd: force_split with a single worker leaves no (p, d) pair")]
     NoPairUnderForceSplit,

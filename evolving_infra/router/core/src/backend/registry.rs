@@ -15,7 +15,6 @@ use std::{
     time::Instant,
 };
 
-
 /// Exclusive logical assignment for an external P/D capacity controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -151,23 +150,29 @@ impl BackendRegistry {
     }
 
     fn assignments_of(workers: &[Arc<Worker>]) -> Result<RoleAssignments, String> {
-        workers.iter().map(|w| {
-            if w.mode() != WorkerMode::Symmetric {
-                return Err(format!("external role control requires symmetric worker {}", w.url));
-            }
-            let info = w.symmetric_pd();
-            if !info.capabilities.prefill || !info.capabilities.decode {
-                return Err(format!("worker {} does not support both roles", w.url));
-            }
-            let role = if info.weight == RoleWeight::PREFILL_LEANING {
-                RoleAssignment::Prefill
-            } else if info.weight == RoleWeight::DECODE_LEANING {
-                RoleAssignment::Decode
-            } else {
-                return Err(format!("worker {} has nonexclusive role weights", w.url));
-            };
-            Ok((w.url.clone(), role))
-        }).collect()
+        workers
+            .iter()
+            .map(|w| {
+                if w.mode() != WorkerMode::Symmetric {
+                    return Err(format!(
+                        "external role control requires symmetric worker {}",
+                        w.url
+                    ));
+                }
+                let info = w.symmetric_pd();
+                if !info.capabilities.prefill || !info.capabilities.decode {
+                    return Err(format!("worker {} does not support both roles", w.url));
+                }
+                let role = if info.weight == RoleWeight::PREFILL_LEANING {
+                    RoleAssignment::Prefill
+                } else if info.weight == RoleWeight::DECODE_LEANING {
+                    RoleAssignment::Decode
+                } else {
+                    return Err(format!("worker {} has nonexclusive role weights", w.url));
+                };
+                Ok((w.url.clone(), role))
+            })
+            .collect()
     }
 
     /// Compare-and-replace a complete role map under the placement snapshot lock.
@@ -197,7 +202,9 @@ impl BackendRegistry {
         let workers = self.workers();
         let current = Self::assignments_of(&workers)?;
         if &current != expected {
-            return Err("role assignment or worker membership changed; reread before deciding".into());
+            return Err(
+                "role assignment or worker membership changed; reread before deciding".into(),
+            );
         }
         if desired.keys().ne(current.keys()) {
             return Err("desired roles must include exactly all registered workers".into());
@@ -213,7 +220,8 @@ impl BackendRegistry {
             );
         }
         if !desired.values().any(|r| *r == RoleAssignment::Prefill)
-            || !desired.values().any(|r| *r == RoleAssignment::Decode) {
+            || !desired.values().any(|r| *r == RoleAssignment::Decode)
+        {
             return Err("at least one P and one D must remain".into());
         }
         let started: Vec<String> = desired
@@ -430,21 +438,33 @@ mod tests {
     fn external_assignment_cas_rejects_stale_missing_and_single_role() {
         let r = registry();
         let before = r.assignments().unwrap();
-        let desired = before.roles.iter().map(|(url, role)| (url.clone(), match role {
-            RoleAssignment::Prefill => RoleAssignment::Decode,
-            RoleAssignment::Decode => RoleAssignment::Prefill,
-        })).collect();
-        let cas =
-            |epoch: &str, revision, expected: &RoleAssignments, desired: &RoleAssignments| {
-                r.replace_assignments(epoch, revision, expected, desired, false)
-                    .map(|(snapshot, _)| snapshot)
-            };
+        let desired = before
+            .roles
+            .iter()
+            .map(|(url, role)| {
+                (
+                    url.clone(),
+                    match role {
+                        RoleAssignment::Prefill => RoleAssignment::Decode,
+                        RoleAssignment::Decode => RoleAssignment::Prefill,
+                    },
+                )
+            })
+            .collect();
+        let cas = |epoch: &str, revision, expected: &RoleAssignments, desired: &RoleAssignments| {
+            r.replace_assignments(epoch, revision, expected, desired, false)
+                .map(|(snapshot, _)| snapshot)
+        };
         assert!(cas("old-instance", 0, &before.roles, &desired).is_err());
         let after = cas(&before.epoch, before.revision, &before.roles, &desired).unwrap();
         assert_eq!(after.revision, before.revision + 1);
         assert!(cas(&before.epoch, before.revision, &before.roles, &desired).is_err());
         assert!(cas(&after.epoch, after.revision, &after.roles, &BTreeMap::new()).is_err());
-        let all_p = after.roles.keys().map(|url| (url.clone(), RoleAssignment::Prefill)).collect();
+        let all_p = after
+            .roles
+            .keys()
+            .map(|url| (url.clone(), RoleAssignment::Prefill))
+            .collect();
         assert!(cas(&after.epoch, after.revision, &after.roles, &all_p).is_err());
         assert_eq!(r.assignments().unwrap().roles, after.roles);
         assert_eq!(r.assignments().unwrap().revision, after.revision);
@@ -453,9 +473,16 @@ mod tests {
     #[test]
     fn external_control_refuses_mixed_or_native_workers() {
         let r = registry();
-        let p = r.workers().into_iter().find(|w| w.url == "http://p").unwrap();
+        let p = r
+            .workers()
+            .into_iter()
+            .find(|w| w.url == "http://p")
+            .unwrap();
         let mut info = p.symmetric_pd();
-        info.weight = RoleWeight { prefill: 0.5, decode: 0.5 };
+        info.weight = RoleWeight {
+            prefill: 0.5,
+            decode: 0.5,
+        };
         p.set_symmetric_pd(info);
         assert!(r.assignments().is_err());
     }

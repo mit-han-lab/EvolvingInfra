@@ -9,7 +9,7 @@ pub mod worker;
 pub use introspect::{ServerInfo, WorkerIntrospector};
 pub use registry::WorkerRegistry;
 pub use worker::DecodeTokenCharge;
-pub use worker::SymmetricPdWorkerInfo;
 pub use worker::LateDWorkerInfo;
 pub use worker::LoadGuard;
+pub use worker::SymmetricPdWorkerInfo;
 pub use worker::Worker;

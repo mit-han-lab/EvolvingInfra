@@ -22,12 +22,12 @@
 //! instead of `bootstrap_room`.
 
 use crate::config::PolicyKind;
+use crate::policies::decode_tokens::DecodeTokenLog;
 use crate::scheduler::placement::{
     d_select_name, p_reason_name, TERM_BACKLOG, TERM_DECODE_LOAD, TERM_D_SELECT, TERM_HIT_TOKENS,
     TERM_P_REASON, TERM_REUSE_GAIN, TERM_ROLE_PEN_D, TERM_ROLE_PEN_P, TERM_SCORE, TERM_XFER_COST,
 };
 use crate::scheduler::Decision;
-use crate::policies::decode_tokens::DecodeTokenLog;
 use crate::server::error::ApiError;
 use axum::body::Body;
 use axum::http::Response;

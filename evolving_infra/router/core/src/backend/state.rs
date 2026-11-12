@@ -779,7 +779,11 @@ mod tests {
         let b = s.reserve_decode("d");
         let v = s.view("d");
         assert_eq!(
-            (v.active_decode_reqs, v.active_prefill_reqs, v.reserved_uncached_tokens),
+            (
+                v.active_decode_reqs,
+                v.active_prefill_reqs,
+                v.reserved_uncached_tokens
+            ),
             (2, 0, 0)
         );
         assert_eq!(s.loads(["d"]).get("d").active_decode_reqs, 2);

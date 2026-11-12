@@ -54,10 +54,9 @@ pub fn session_identity(
 ) -> Result<Option<crate::agent_identity::RequestIdentity>, ApiError> {
     match crate::agent_identity::from_headers(headers)? {
         Some(identity) => Ok(Some(identity)),
-        None => crate::agent_identity::from_header(
-            headers,
-            crate::agent_identity::KV_SESSION_HEADER,
-        ),
+        None => {
+            crate::agent_identity::from_header(headers, crate::agent_identity::KV_SESSION_HEADER)
+        }
     }
 }
 
@@ -210,7 +209,9 @@ pub fn build_leg_bodies(
     if !split
         && input_ids.is_none()
         && pull_hint.is_none()
-        && !value.as_ref().is_some_and(|v| v.get("kv_session").is_some())
+        && !value
+            .as_ref()
+            .is_some_and(|v| v.get("kv_session").is_some())
     {
         return Ok((body.clone(), body.clone()));
     }
@@ -423,11 +424,14 @@ mod tests {
         assert!(late_kv_session(None, &headers, "p", Some(&body))
             .unwrap()
             .is_none());
-        assert!(
-            late_kv_session(Some(&sessions), &axum::http::HeaderMap::new(), "p", Some(&body))
-                .unwrap()
-                .is_none()
-        );
+        assert!(late_kv_session(
+            Some(&sessions),
+            &axum::http::HeaderMap::new(),
+            "p",
+            Some(&body)
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[tokio::test]

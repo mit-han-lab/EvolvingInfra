@@ -3571,7 +3571,10 @@ mod tests {
             .await;
         let decision = owner.expect("decision").await;
         assert_eq!(decision.items[0].key, transfer_id);
-        assert_eq!(decision.items[0].winner_idx, 1, "d1: the uncharged candidate");
+        assert_eq!(
+            decision.items[0].winner_idx, 1,
+            "d1: the uncharged candidate"
+        );
         drop(g);
         link.abort();
     }

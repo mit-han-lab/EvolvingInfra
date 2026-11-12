@@ -137,9 +137,11 @@ mod tests {
             kv_session_retention,
             ..Default::default()
         };
-        std::thread::spawn(move || SymmetricPdRuntime::spawn(cfg, None, registry, ModelId("m".into())))
-            .join()
-            .unwrap()
+        std::thread::spawn(move || {
+            SymmetricPdRuntime::spawn(cfg, None, registry, ModelId("m".into()))
+        })
+        .join()
+        .unwrap()
     }
 
     /// Assign "http://d" `role`; returns the new revision.

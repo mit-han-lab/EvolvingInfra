@@ -569,39 +569,82 @@ async fn dynamo_cache_aware_routes_to_owner_without_cross_p_hint() {
     let p0 = crate::common::mock_worker::MockWorker::start(vec![]).await;
     let p1 = crate::common::mock_worker::MockWorker::start(vec![]).await;
     let d = crate::common::mock_worker::MockWorker::start(vec![]).await;
-    let index = MockIndexer::start(json!({"instances":{"1":{"gpu":0},"2":{"cpu":128,"gpu":64}}})).await;
-    let mut cfg = config_with_hint(&index.url, vec![
-        KvWorkerMapEntry{id:1,url:p0.url.clone(),servicer:String::new()},
-        KvWorkerMapEntry{id:2,url:p1.url.clone(),servicer:String::new()},
-    ]);
+    let index =
+        MockIndexer::start(json!({"instances":{"1":{"gpu":0},"2":{"cpu":128,"gpu":64}}})).await;
+    let mut cfg = config_with_hint(
+        &index.url,
+        vec![
+            KvWorkerMapEntry {
+                id: 1,
+                url: p0.url.clone(),
+                servicer: String::new(),
+            },
+            KvWorkerMapEntry {
+                id: 2,
+                url: p1.url.clone(),
+                servicer: String::new(),
+            },
+        ],
+    );
     cfg.model.policy = PolicyKind::CacheAwareZmq;
     cfg.model.cache_aware = Some(sgl_router::config::CacheAwareConfig {
-        dynamo:cfg.model.kv_hint.take(), ..Default::default()
+        dynamo: cfg.model.kv_hint.take(),
+        ..Default::default()
     });
     cfg.model.pd_decode_policy = sgl_router::config::PdDecodePolicy::RoundRobin;
-    let ctx = build_ctx(cfg, vec![
-        WorkerSpec{id:WorkerId("p0".into()),url:p0.url.clone(),mode:WorkerMode::Prefill,
-            model_ids:vec![ModelId("tiny".into())],bootstrap_port:Some(8997)},
-        WorkerSpec{id:WorkerId("p1".into()),url:p1.url.clone(),mode:WorkerMode::Prefill,
-            model_ids:vec![ModelId("tiny".into())],bootstrap_port:Some(8998)},
-        WorkerSpec{id:WorkerId("d".into()),url:d.url.clone(),mode:WorkerMode::Decode,
-            model_ids:vec![ModelId("tiny".into())],bootstrap_port:None},
-    ]);
+    let ctx = build_ctx(
+        cfg,
+        vec![
+            WorkerSpec {
+                id: WorkerId("p0".into()),
+                url: p0.url.clone(),
+                mode: WorkerMode::Prefill,
+                model_ids: vec![ModelId("tiny".into())],
+                bootstrap_port: Some(8997),
+            },
+            WorkerSpec {
+                id: WorkerId("p1".into()),
+                url: p1.url.clone(),
+                mode: WorkerMode::Prefill,
+                model_ids: vec![ModelId("tiny".into())],
+                bootstrap_port: Some(8998),
+            },
+            WorkerSpec {
+                id: WorkerId("d".into()),
+                url: d.url.clone(),
+                mode: WorkerMode::Decode,
+                model_ids: vec![ModelId("tiny".into())],
+                bootstrap_port: None,
+            },
+        ],
+    );
     ctx.block_size_oracle.try_set(64).unwrap();
     ctx.block_size_oracle.set_bigram(true);
     assert!(ctx.kv_hint.is_none() && ctx.co_schedule.is_none() && ctx.symmetric_pd.is_none());
-    let request = Request::builder().method("POST").uri("/v1/completions")
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/completions")
         .header("content-type", "application/json")
-        .header("x-agent-context", r#"{"agent_id":"question/\u4f60\u597d","subagent_id":2,"request_id":7}"#)
-        .body(Body::from(serde_json::to_vec(&json!({"model":"tiny","prompt":vec![11;129],
-            "max_tokens":1,"cache_salt":"shared"})).unwrap())).unwrap();
+        .header(
+            "x-agent-context",
+            r#"{"agent_id":"question/\u4f60\u597d","subagent_id":2,"request_id":7}"#,
+        )
+        .body(Body::from(
+            serde_json::to_vec(&json!({"model":"tiny","prompt":vec![11;129],
+            "max_tokens":1,"cache_salt":"shared"}))
+            .unwrap(),
+        ))
+        .unwrap();
     let response = build_router(ctx).oneshot(request).await.unwrap();
-    assert_eq!(response.status(),StatusCode::OK);
-    for (worker, name) in [(&p1,"owner"),(&d,"decode")] {
-        let body = parse_body(&await_captured_body(worker,Duration::from_secs(2),name).await);
+    assert_eq!(response.status(), StatusCode::OK);
+    for (worker, name) in [(&p1, "owner"), (&d, "decode")] {
+        let body = parse_body(&await_captured_body(worker, Duration::from_secs(2), name).await);
         assert!(body.get("kv_pull_hint").is_none());
-        assert_eq!(body["rid"], "agent_e471509b10f0c301d8c86761c428ff065faf2d6d9ad0e8939059aa277dda0759");
-        assert_eq!(body["cache_salt"],"shared");
+        assert_eq!(
+            body["rid"],
+            "agent_e471509b10f0c301d8c86761c428ff065faf2d6d9ad0e8939059aa277dda0759"
+        );
+        assert_eq!(body["cache_salt"], "shared");
     }
     assert!(p0.captured.lock().unwrap().last_body.is_none());
 }
@@ -609,16 +652,35 @@ async fn dynamo_cache_aware_routes_to_owner_without_cross_p_hint() {
 #[tokio::test]
 async fn header_only_identity_is_forwarded_in_plain_mode() {
     let worker = crate::common::mock_worker::MockWorker::start(vec![]).await;
-    let mut cfg = config_with_hint("http://unused:1",vec![]);
+    let mut cfg = config_with_hint("http://unused:1", vec![]);
     cfg.model.kv_hint = None;
-    let ctx = build_ctx(cfg,vec![WorkerSpec{id:WorkerId("plain".into()),url:worker.url.clone(),
-        mode:WorkerMode::Plain,model_ids:vec![ModelId("tiny".into())],bootstrap_port:None}]);
-    let request = Request::builder().method("POST").uri("/v1/completions")
+    let ctx = build_ctx(
+        cfg,
+        vec![WorkerSpec {
+            id: WorkerId("plain".into()),
+            url: worker.url.clone(),
+            mode: WorkerMode::Plain,
+            model_ids: vec![ModelId("tiny".into())],
+            bootstrap_port: None,
+        }],
+    );
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/completions")
         .header("content-type", "application/json")
-        .header("x-agent-context", r#"{"agent_id":"q","subagent_id":0,"request_id":0}"#)
-        .body(Body::from(r#"{"model":"tiny","prompt":[1,2],"max_tokens":1}"#)).unwrap();
-    assert_eq!(build_router(ctx).oneshot(request).await.unwrap().status(),StatusCode::OK);
-    let body=parse_body(&await_captured_body(&worker,Duration::from_secs(2),"plain").await);
+        .header(
+            "x-agent-context",
+            r#"{"agent_id":"q","subagent_id":0,"request_id":0}"#,
+        )
+        .body(Body::from(
+            r#"{"model":"tiny","prompt":[1,2],"max_tokens":1}"#,
+        ))
+        .unwrap();
+    assert_eq!(
+        build_router(ctx).oneshot(request).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let body = parse_body(&await_captured_body(&worker, Duration::from_secs(2), "plain").await);
     assert!(body["rid"].as_str().unwrap().starts_with("agent_"));
 }
 
@@ -883,7 +945,10 @@ async fn trade_three_p(lambda: f64, gate: u32) {
     send("busy").await;
     let (p, body) = landed_on("busy").await;
     assert_eq!(p, 0);
-    assert!(body.get("kv_pull_hint").is_none(), "the owner never gets a hint (gate {gate})");
+    assert!(
+        body.get("kv_pull_hint").is_none(),
+        "the owner never gets a hint (gate {gate})"
+    );
     let d = decision("busy");
     assert_eq!(d["chosen"], ps[0].url.as_str());
     assert_eq!(d["owner"], ps[0].url.as_str());
@@ -952,7 +1017,10 @@ async fn trade_three_p(lambda: f64, gate: u32) {
         send("small").await;
         let (p, body) = landed_on("small").await;
         assert_eq!(p, 2, "P3 recomputes 2,400 tokens instead of waiting on P1");
-        assert!(body.get("kv_pull_hint").is_none(), "gain 400 < floor 512 (gate {gate})");
+        assert!(
+            body.get("kv_pull_hint").is_none(),
+            "gain 400 < floor 512 (gate {gate})"
+        );
         let d = decision("small");
         assert_eq!(d["detour"], true);
         assert_eq!(d["pulled_tokens"], 0);
@@ -1273,14 +1341,20 @@ async fn trade_wait_eft_prices_the_engine_queue_and_falls_back_on_an_old_snapsho
     // The polls ask for the snapshot; the trace does not store it.
     for p in &ps {
         let includes = p.includes.lock().unwrap().clone();
-        let progress: Vec<_> = includes.iter().filter(|i| i.contains("prefill_work")).collect();
+        let progress: Vec<_> = includes
+            .iter()
+            .filter(|i| i.contains("prefill_work"))
+            .collect();
         assert!(!progress.is_empty());
         assert!(
             progress.iter().all(|i| i.contains("prefill_routing")),
             "every progress poll asks for prefill_routing: {includes:?}"
         );
     }
-    for e in read_events().iter().filter(|e| e["event"] == "prefill_progress") {
+    for e in read_events()
+        .iter()
+        .filter(|e| e["event"] == "prefill_progress")
+    {
         assert!(e["engine_load"].get("prefill_routing").is_none(), "{e}");
         assert!(e["engine_load"].get("num_running_reqs").is_some());
     }
@@ -1288,8 +1362,13 @@ async fn trade_wait_eft_prices_the_engine_queue_and_falls_back_on_an_old_snapsho
     // 1. P1's engine queue is long although its ledger is empty: move with a pull.
     send("eft1").await;
     let (p, body) = landed_on("eft1").await;
-    assert_ne!(p, 0, "an idle peer pulls instead of waiting behind P1's queue");
-    let hint = body.get("kv_pull_hint").expect("the pulling P carries the hint");
+    assert_ne!(
+        p, 0,
+        "an idle peer pulls instead of waiting behind P1's queue"
+    );
+    let hint = body
+        .get("kv_pull_hint")
+        .expect("the pulling P carries the hint");
     assert_eq!(hint["source_worker_id"], ps[0].url.as_str());
     let d = decision("eft1");
     assert_eq!(d["wait"], "eft");
@@ -1330,8 +1409,14 @@ async fn trade_wait_eft_prices_the_engine_queue_and_falls_back_on_an_old_snapsho
     // The step-model S_w of P1 (u 2,016, host restore 17,984, one pass), on
     // the same scale as the peers' terms (not u / R = 2,000 tokens).
     let svc = 1e-5 * 2_016.0 + 1e-7 * 17_984.0 + 0.004 + 0.05;
-    assert!((p1["service_s"].as_f64().unwrap() - svc).abs() < 1e-12, "{p1}");
-    assert!((p1["trade_cost"].as_f64().unwrap() - 13_500.0 * svc).abs() < 1e-6, "{p1}");
+    assert!(
+        (p1["service_s"].as_f64().unwrap() - svc).abs() < 1e-12,
+        "{p1}"
+    );
+    assert!(
+        (p1["trade_cost"].as_f64().unwrap() - 13_500.0 * svc).abs() < 1e-6,
+        "{p1}"
+    );
     assert_eq!(d["wait_fallbacks"], 1);
     assert!(d["wait_fallback_counts"]["view_too_old"].as_u64().unwrap() >= 1);
     assert_eq!(row(&d, 1)["wait_source"], "eft");

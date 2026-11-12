@@ -21,16 +21,16 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sgl_router::config::{
-    ActiveLoadConfig, Config, DiscoveryBackend, SymmetricPdConfig, SymmetricPdCostFunctionConfig,
-    SymmetricPdGwqAutoConfig, ModelConfig, ObservabilityConfig, PdDecodePolicy, PolicyKind, ProxyConfig,
-    ServerConfig, StaticUrlsDiscoveryConfig,
+    ActiveLoadConfig, Config, DiscoveryBackend, ModelConfig, ObservabilityConfig, PdDecodePolicy,
+    PolicyKind, ProxyConfig, ServerConfig, StaticUrlsDiscoveryConfig, SymmetricPdConfig,
+    SymmetricPdCostFunctionConfig, SymmetricPdGwqAutoConfig,
 };
 use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
-use sgl_router::scheduler::{PSelect, RoleWeight};
 use sgl_router::kv_hint::{KvHintConfig, KvWorkerMapEntry};
 use sgl_router::policies::factory::build_registry_with_defaults;
 use sgl_router::proxy::Proxy;
 use sgl_router::scheduler::co_schedule::TradeParams;
+use sgl_router::scheduler::{PSelect, RoleWeight};
 use sgl_router::server::app::build_router;
 use sgl_router::server::app_context::AppContext;
 use sgl_router::tokenizer::TokenizerRegistry;
@@ -208,13 +208,16 @@ fn register(registry: &WorkerRegistry, url: &str, prefill: bool, bootstrap_port:
             bootstrap_port: Some(bootstrap_port),
         })
         .unwrap();
-    registry.get(&id).unwrap().set_symmetric_pd(SymmetricPdWorkerInfo {
-        weight: RoleWeight {
-            prefill: if prefill { 1.0 } else { 0.0 },
-            decode: if prefill { 0.0 } else { 1.0 },
-        },
-        ..Default::default()
-    });
+    registry
+        .get(&id)
+        .unwrap()
+        .set_symmetric_pd(SymmetricPdWorkerInfo {
+            weight: RoleWeight {
+                prefill: if prefill { 1.0 } else { 0.0 },
+                decode: if prefill { 0.0 } else { 1.0 },
+            },
+            ..Default::default()
+        });
 }
 
 struct Fixture {
@@ -608,7 +611,8 @@ async fn flex_trade_three_p(lambda: f64, gate: u32) {
     .await;
     let rows = f.events();
     assert!(
-        rows.iter().all(|e| e["policy"] == "symmetric_pd_cost_function"),
+        rows.iter()
+            .all(|e| e["policy"] == "symmetric_pd_cost_function"),
         "every cost-trace row is labelled"
     );
 }

@@ -208,7 +208,9 @@ pub fn unusable_reason(value: &Value) -> String {
         return format!("page_size {page} (only {PAGE_SIZE})");
     }
     if d.get("allocated_rooms_truncated").and_then(Value::as_bool) != Some(false)
-        || d.get("allocated_room_ids_complete").and_then(Value::as_bool) != Some(true)
+        || d.get("allocated_room_ids_complete")
+            .and_then(Value::as_bool)
+            != Some(true)
     {
         return "allocated rooms truncated or incomplete".to_string();
     }

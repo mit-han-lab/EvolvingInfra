@@ -174,8 +174,9 @@ pub async fn chat_completions(
     if crate::agent_identity::apply(&headers, request_value.as_mut())? {
         // Plain-mode forwarding can keep the original bytes, so synchronize
         // them when a header-only client needed its RID inserted.
-        body = Bytes::from(serde_json::to_vec(&request_value)
-            .map_err(|e| ApiError::Internal(e.into()))?);
+        body = Bytes::from(
+            serde_json::to_vec(&request_value).map_err(|e| ApiError::Internal(e.into()))?,
+        );
     }
     crate::server::routes::completions::ensure_progress_rid(&ctx, request_value.as_mut())?;
 
@@ -188,45 +189,55 @@ pub async fn chat_completions(
         .as_ref()
         .and_then(|v| request_tokens_for(&ctx.tokenizers, &model_id, v));
     let external_prefix = if let Some(index) = &ctx.dynamo_prefix {
-        Some(crate::dynamo_prefix::query(index, request_tokens.as_ref().map(|t| t.ids.as_slice()),
-            request_value.as_ref().and_then(crate::kv_hint::extract_cache_salt), &model_str,
-            ctx.block_size_oracle.get(), ctx.block_size_oracle.is_bigram()).await)
-    } else { match (
-        ctx.prefix_index.as_ref(),
-        request_tokens.as_ref(),
-        ctx.block_size_oracle.get(),
-    ) {
-        (Some(index), Some(tokens), Some(block_size)) => {
-            let hashes = if ctx.block_size_oracle.is_bigram() {
-                compute_block_hashes_bigram(&tokens.ids, block_size as usize)
-            } else {
-                compute_block_hashes(&tokens.ids, block_size as usize)
-            };
-            let query_blocks = hashes.len();
-            let outcome = if hashes.is_empty() {
-                sgl_kv_indexer::PrefixOutcome::Empty
-            } else {
-                resolve_prefix_query(index.match_prefix(hashes).await, &model_str)?
-            };
-            Some(ExternalPrefixSignal {
-                outcome,
-                query_blocks,
-            })
+        Some(
+            crate::dynamo_prefix::query(
+                index,
+                request_tokens.as_ref().map(|t| t.ids.as_slice()),
+                request_value
+                    .as_ref()
+                    .and_then(crate::kv_hint::extract_cache_salt),
+                &model_str,
+                ctx.block_size_oracle.get(),
+                ctx.block_size_oracle.is_bigram(),
+            )
+            .await,
+        )
+    } else {
+        match (
+            ctx.prefix_index.as_ref(),
+            request_tokens.as_ref(),
+            ctx.block_size_oracle.get(),
+        ) {
+            (Some(index), Some(tokens), Some(block_size)) => {
+                let hashes = if ctx.block_size_oracle.is_bigram() {
+                    compute_block_hashes_bigram(&tokens.ids, block_size as usize)
+                } else {
+                    compute_block_hashes(&tokens.ids, block_size as usize)
+                };
+                let query_blocks = hashes.len();
+                let outcome = if hashes.is_empty() {
+                    sgl_kv_indexer::PrefixOutcome::Empty
+                } else {
+                    resolve_prefix_query(index.match_prefix(hashes).await, &model_str)?
+                };
+                Some(ExternalPrefixSignal {
+                    outcome,
+                    query_blocks,
+                })
+            }
+            (Some(_), _, _) => Some(ExternalPrefixSignal {
+                outcome: sgl_kv_indexer::PrefixOutcome::Empty,
+                query_blocks: 0,
+            }),
+            _ => None,
         }
-        (Some(_), _, _) => Some(ExternalPrefixSignal {
-            outcome: sgl_kv_indexer::PrefixOutcome::Empty,
-            query_blocks: 0,
-        }),
-        _ => None,
-    }};
+    };
 
     // Sticky-session routing key. When the sticky policy is configured,
     // read the routing key from the operator-chosen header into the
     // selection context; the policy pins it to a worker. Other policies
     // leave `routing_key` `None` and ignore it.
-    let routing_key = crate::policies::sticky::routing_key(
-        &ctx.config.model, &headers,
-    );
+    let routing_key = crate::policies::sticky::routing_key(&ctx.config.model, &headers);
     // Salted requests publish KV events under a salt-seeded hash chain; the
     // cache-aware policy needs the salt to hash a matching query. Extracted
     // here (whenever the body was parsed) so the policy never re-parses.
@@ -258,37 +269,35 @@ pub async fn chat_completions(
         let (session_id, turn) =
             crate::server::routes::completions::extract_session(request_value.as_ref());
         let d = flex
-            .admit(
-                crate::scheduler::PlaceInput {
-                    tokens: ids.map(<[u32]>::to_vec),
-                    hashes: None,
-                    prompt_len,
-                    cache_salt: route_cache_salt.map(str::to_string),
-                    model_id: Some(model_str.clone()),
-                    session_id,
-                    turn,
-                    rid: crate::server::routes::completions::extract_rid(request_value.as_ref()),
-                    routing_key: crate::server::routes::completions::replay_routing_key(
-                        flex.replay_header(),
-                        &headers,
-                    ),
-                    ingress_ms: start.elapsed().as_secs_f64() * 1e3,
-                    // The cost function's copy price auto (N_active) and the
-                    // session-move trace.
-                    trade_session: if flex.cost_function_wants_session() {
-                        crate::agent_identity::trade_session_key(&headers)
-                    } else {
-                        None
-                    },
-                    // The cost function's wait e3: the session key of the
-                    // target host rule (the header's identity).
-                    e3_session: if flex.cost_function_wants_e3_session() {
-                        crate::trade_e3::session_key(&headers, None)
-                    } else {
-                        None
-                    },
+            .admit(crate::scheduler::PlaceInput {
+                tokens: ids.map(<[u32]>::to_vec),
+                hashes: None,
+                prompt_len,
+                cache_salt: route_cache_salt.map(str::to_string),
+                model_id: Some(model_str.clone()),
+                session_id,
+                turn,
+                rid: crate::server::routes::completions::extract_rid(request_value.as_ref()),
+                routing_key: crate::server::routes::completions::replay_routing_key(
+                    flex.replay_header(),
+                    &headers,
+                ),
+                ingress_ms: start.elapsed().as_secs_f64() * 1e3,
+                // The cost function's copy price auto (N_active) and the
+                // session-move trace.
+                trade_session: if flex.cost_function_wants_session() {
+                    crate::agent_identity::trade_session_key(&headers)
+                } else {
+                    None
                 },
-            )
+                // The cost function's wait e3: the session key of the
+                // target host rule (the header's identity).
+                e3_session: if flex.cost_function_wants_e3_session() {
+                    crate::trade_e3::session_key(&headers, None)
+                } else {
+                    None
+                },
+            })
             .await?;
         let w = Arc::clone(&d.p_worker);
         flex_decision = Some(d);
@@ -329,18 +338,26 @@ pub async fn chat_completions(
                 .map(|v| crate::scheduler::estimate_prompt_len(v, ids))
                 .unwrap_or_else(|| estimate_prefill_tokens(&body) as u64);
             let rid = crate::server::routes::completions::extract_rid(request_value.as_ref());
-            super::pd_replay::pick(&ctx, replay, &headers, prompt_len, &workers, &model_id, rid.as_deref())
+            super::pd_replay::pick(
+                &ctx,
+                replay,
+                &headers,
+                prompt_len,
+                &workers,
+                &model_id,
+                rid.as_deref(),
+            )
         });
         match pinned {
             Some(p) => {
                 pd_replay_decode = Some(p.decode);
                 p.prefill
             }
-            None => policy
-                .select(&workers, &selection_ctx)
-                .ok_or_else(|| ApiError::PolicySelectionFailed {
+            None => policy.select(&workers, &selection_ctx).ok_or_else(|| {
+                ApiError::PolicySelectionFailed {
                     model: model_str.clone(),
-                })?,
+                }
+            })?,
         }
     };
 
@@ -646,14 +663,13 @@ pub async fn chat_completions(
     // symmetric_pd: `executing_body` is the P-leg (`kv_export`), `outgoing_body`
     // the D-leg (`kv_import`); Local leaves only `input_ids` injected.
     let (outgoing_body, executing_body) = if let Some(d) = flex_decision.as_ref() {
-        let (p_body, d_body) =
-            crate::scheduler::build_leg_bodies(
-                &body,
-                request_value,
-                forward_input_ids,
-                &d.marks,
-                d.pull_hint.as_ref(),
-            )?;
+        let (p_body, d_body) = crate::scheduler::build_leg_bodies(
+            &body,
+            request_value,
+            forward_input_ids,
+            &d.marks,
+            d.pull_hint.as_ref(),
+        )?;
         (d_body, p_body)
     } else if let Some(hint) = &kv_pull_hint {
         let clean = build_outgoing_body(

@@ -175,8 +175,9 @@ async fn dispatch(
     if crate::agent_identity::apply(&headers, request_value.as_mut())? {
         // Plain-mode forwarding can keep the original bytes, so synchronize
         // them when a header-only client needed its RID inserted.
-        body = Bytes::from(serde_json::to_vec(&request_value)
-            .map_err(|e| ApiError::Internal(e.into()))?);
+        body = Bytes::from(
+            serde_json::to_vec(&request_value).map_err(|e| ApiError::Internal(e.into()))?,
+        );
     }
     ensure_progress_rid(&ctx, request_value.as_mut())?;
     if ctx.late_bind.is_some() {
@@ -194,7 +195,8 @@ async fn dispatch(
     // is no router-side tokenization and the ids are engine-equivalent by
     // definition (the engine reads the same array). They are NOT re-injected
     // as `input_ids` — the forwarded `prompt` already carries them.
-    let mut prompt_ids: Option<Vec<u32>> = request_value.as_ref().and_then(|v| ingress.token_ids(v));
+    let mut prompt_ids: Option<Vec<u32>> =
+        request_value.as_ref().and_then(|v| ingress.token_ids(v));
     // `--image-layout-config`: a token-id prompt with uploaded screenshots
     // routes on the engine's radix view (placeholders expanded to the
     // images' layout pad values), and the forwarded body carries the
@@ -243,9 +245,7 @@ async fn dispatch(
         }
     }
 
-    let routing_key = crate::policies::sticky::routing_key(
-        &ctx.config.model, &headers,
-    );
+    let routing_key = crate::policies::sticky::routing_key(&ctx.config.model, &headers);
     // Salted requests publish KV events under a salt-seeded hash chain; the
     // cache-aware policy needs the salt to hash a matching query. Extracted
     // here (whenever the body was parsed) so the policy never re-parses.
@@ -253,9 +253,20 @@ async fn dispatch(
         .as_ref()
         .and_then(crate::kv_hint::extract_cache_salt);
     let external_prefix = if let Some(index) = &ctx.dynamo_prefix {
-        Some(crate::dynamo_prefix::query(index, prompt_ids.as_deref(), route_cache_salt,
-            &model_str, ctx.block_size_oracle.get(), ctx.block_size_oracle.is_bigram()).await)
-    } else { None };
+        Some(
+            crate::dynamo_prefix::query(
+                index,
+                prompt_ids.as_deref(),
+                route_cache_salt,
+                &model_str,
+                ctx.block_size_oracle.get(),
+                ctx.block_size_oracle.is_bigram(),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let selection_ctx = SelectionContext::with_routing_key(&model_id, Some(&body), routing_key)
         .with_request_tokens(prompt_ids.as_deref())
         .with_external_prefix(external_prefix.as_ref())
@@ -281,34 +292,32 @@ async fn dispatch(
         );
         let (session_id, turn) = extract_session(request_value.as_ref());
         let d = flex
-            .admit(
-                crate::scheduler::PlaceInput {
-                    tokens: prompt_ids.clone(),
-                    hashes: None,
-                    prompt_len,
-                    cache_salt: route_cache_salt.map(str::to_string),
-                    model_id: Some(model_str.clone()),
-                    session_id,
-                    turn,
-                    rid: extract_rid(request_value.as_ref()),
-                    routing_key: replay_routing_key(flex.replay_header(), &headers),
-                    ingress_ms: start.elapsed().as_secs_f64() * 1e3,
-                    // The cost function's copy price auto (N_active) and
-                    // the session-move trace.
-                    trade_session: if flex.cost_function_wants_session() {
-                        crate::agent_identity::trade_session_key(&headers)
-                    } else {
-                        None
-                    },
-                    // The cost function's wait e3: the session key of the
-                    // target host rule.
-                    e3_session: if flex.cost_function_wants_e3_session() {
-                        crate::trade_e3::session_key(&headers, kv_session_identity.as_ref())
-                    } else {
-                        None
-                    },
+            .admit(crate::scheduler::PlaceInput {
+                tokens: prompt_ids.clone(),
+                hashes: None,
+                prompt_len,
+                cache_salt: route_cache_salt.map(str::to_string),
+                model_id: Some(model_str.clone()),
+                session_id,
+                turn,
+                rid: extract_rid(request_value.as_ref()),
+                routing_key: replay_routing_key(flex.replay_header(), &headers),
+                ingress_ms: start.elapsed().as_secs_f64() * 1e3,
+                // The cost function's copy price auto (N_active) and
+                // the session-move trace.
+                trade_session: if flex.cost_function_wants_session() {
+                    crate::agent_identity::trade_session_key(&headers)
+                } else {
+                    None
                 },
-            )
+                // The cost function's wait e3: the session key of the
+                // target host rule.
+                e3_session: if flex.cost_function_wants_e3_session() {
+                    crate::trade_e3::session_key(&headers, kv_session_identity.as_ref())
+                } else {
+                    None
+                },
+            })
             .await?;
         let w = Arc::clone(&d.p_worker);
         flex_decision = Some(d);
@@ -354,7 +363,15 @@ async fn dispatch(
                 .map(|v| crate::scheduler::estimate_prompt_len(v, prompt_ids.as_deref()))
                 .unwrap_or_else(|| estimate_prefill_tokens(&body) as u64);
             let rid = extract_rid(request_value.as_ref());
-            super::pd_replay::pick(&ctx, replay, &headers, prompt_len, &workers, &model_id, rid.as_deref())
+            super::pd_replay::pick(
+                &ctx,
+                replay,
+                &headers,
+                prompt_len,
+                &workers,
+                &model_id,
+                rid.as_deref(),
+            )
         });
         match pinned {
             Some(p) => {
@@ -728,14 +745,13 @@ async fn dispatch(
         // Late D choose (PD or symmetric_pd): built above.
         (Bytes::new(), Bytes::new())
     } else if let Some(d) = flex_decision.as_ref() {
-        let (p_body, d_body) =
-            crate::scheduler::build_leg_bodies(
-                &body,
-                request_value,
-                None,
-                &d.marks,
-                d.pull_hint.as_ref(),
-            )?;
+        let (p_body, d_body) = crate::scheduler::build_leg_bodies(
+            &body,
+            request_value,
+            None,
+            &d.marks,
+            d.pull_hint.as_ref(),
+        )?;
         (d_body, p_body)
     } else if let Some(hint) = &kv_pull_hint {
         let clean =
@@ -777,8 +793,7 @@ async fn dispatch(
         super::late_d::dispatch(
             &ctx,
             super::late_d::ChooseDispatch {
-                session: flex_late_session
-                    .map(|s| s as Arc<dyn crate::late_bind::LateSessionHook>),
+                session: flex_late_session.map(|s| s as Arc<dyn crate::late_bind::LateSessionHook>),
                 choose,
                 prefill: Arc::clone(&worker),
                 prefill_holds: Box::new((guard, active_guard)),

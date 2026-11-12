@@ -68,9 +68,7 @@ pub fn from_headers(headers: &HeaderMap) -> Result<Option<RequestIdentity>, ApiE
         return Ok(None);
     };
     if context.as_bytes().len() > 4096 {
-        return Err(ApiError::BadRequest(
-            "request identity is too large".into(),
-        ));
+        return Err(ApiError::BadRequest("request identity is too large".into()));
     }
     let identity: RequestIdentity = serde_json::from_slice(context.as_bytes())
         .map_err(|_| ApiError::BadRequest("invalid request identity".into()))?;
@@ -147,9 +145,9 @@ pub fn apply(headers: &HeaderMap, body: Option<&mut Value>) -> Result<bool, ApiE
         return Ok(false);
     };
     let rid = identity.engine_rid()?;
-    let object = body
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| ApiError::BadRequest("requests with an identity header require a JSON object".into()))?;
+    let object = body.and_then(Value::as_object_mut).ok_or_else(|| {
+        ApiError::BadRequest("requests with an identity header require a JSON object".into())
+    })?;
     let inserted = match object.get("rid") {
         None | Some(Value::Null) => {
             object.insert("rid".into(), Value::String(rid.clone()));

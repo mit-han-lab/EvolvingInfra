@@ -10,12 +10,10 @@
 //! `router/frontend/` of the repository; see `docs/api-reference.md`
 //! for the prepared-input protocol.
 
-
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod agent_identity;
 pub mod backend;
-pub mod scheduler;
 pub mod co_schedule;
 pub mod config;
 pub mod cost_balance;
@@ -34,6 +32,7 @@ pub mod load_refresh;
 pub mod olp;
 pub mod policies;
 pub mod proxy;
+pub mod scheduler;
 pub mod server;
 pub mod tokenizer;
 pub mod trade_e3;

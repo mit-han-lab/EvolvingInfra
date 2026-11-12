@@ -174,7 +174,13 @@ async fn main() -> Result<()> {
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .expect("default http client builds");
-    let kv_index = if prefix_index.is_some() || cfg.model.cache_aware.as_ref().is_some_and(|c| c.dynamo.is_some()) {
+    let kv_index = if prefix_index.is_some()
+        || cfg
+            .model
+            .cache_aware
+            .as_ref()
+            .is_some_and(|c| c.dynamo.is_some())
+    {
         sgl_router::policies::kv_events::KvEventIndex::new_metadata_only_with_http_and_oracle(
             kv_event_http,
             Arc::clone(&block_size_oracle),

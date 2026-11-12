@@ -1253,13 +1253,24 @@ impl Executions {
         records.expire_unresolved_decode();
         let mut workers = std::collections::BTreeMap::<String, [u64; 3]>::new();
         for e in records.active.values() {
-            if !e.claimed || e.terminal[1] || e.not_submitted[1] { continue; }
+            if !e.claimed || e.terminal[1] || e.not_submitted[1] {
+                continue;
+            }
             // An unbound late-D request counts on its decided candidate,
             // else on its arrival pick.
             let worker = e.decode_owner().unwrap_or(&e.workers[1]).to_string();
             let counts = workers.entry(worker).or_default();
-            let unknown = e.states.iter().any(|s| matches!(s, LegState::Failed | LegState::Cancelled));
-            let index = if unknown { 2 } else if e.states[0] == LegState::Completed { 0 } else { 1 };
+            let unknown = e
+                .states
+                .iter()
+                .any(|s| matches!(s, LegState::Failed | LegState::Cancelled));
+            let index = if unknown {
+                2
+            } else if e.states[0] == LegState::Completed {
+                0
+            } else {
+                1
+            };
             counts[index] += 1;
         }
         json!({"fields": ["p_completed", "p_pending", "unknown"], "workers": workers})
@@ -1484,14 +1495,23 @@ mod tests {
             let mut r = e.records.lock();
             r.active.get_mut("r").unwrap().claimed = true;
         }
-        assert_eq!(e.decode_population()["workers"]["http://d"], json!([0,1,0]));
+        assert_eq!(
+            e.decode_population()["workers"]["http://d"],
+            json!([0, 1, 0])
+        );
         {
             let mut r = e.records.lock();
             r.active.get_mut("r").unwrap().states[0] = LegState::Completed;
         }
-        assert_eq!(e.decode_population()["workers"]["http://d"], json!([1,0,0]));
+        assert_eq!(
+            e.decode_population()["workers"]["http://d"],
+            json!([1, 0, 0])
+        );
         e.cancel("r", "secret").unwrap();
-        assert_eq!(e.decode_population()["workers"]["http://d"], json!([0,0,1]));
+        assert_eq!(
+            e.decode_population()["workers"]["http://d"],
+            json!([0, 0, 1])
+        );
         e.records.lock().active.get_mut("r").unwrap().terminal[1] = true;
         assert_eq!(e.decode_population()["workers"], json!({}));
     }
@@ -2264,14 +2284,20 @@ mod tests {
             );
         }
         // The rule itself.
-        assert!(is_terminal_engine_abort(Some(503), Some("aborted by client")));
+        assert!(is_terminal_engine_abort(
+            Some(503),
+            Some("aborted by client")
+        ));
         assert!(is_terminal_engine_abort(
             Some(503),
             Some("compute-before-allocation aborted")
         ));
         assert!(!is_terminal_engine_abort(Some(503), None));
         assert!(!is_terminal_engine_abort(None, Some("aborted by client")));
-        assert!(!is_terminal_engine_abort(Some(504), Some("aborted by client")));
+        assert!(!is_terminal_engine_abort(
+            Some(504),
+            Some("aborted by client")
+        ));
     }
 
     // ---- unknown reconciliation of an aborted P-leg ----

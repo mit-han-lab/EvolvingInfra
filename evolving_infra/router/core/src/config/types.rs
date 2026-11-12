@@ -663,13 +663,13 @@ impl SymmetricPdWorkerSpec {
             .filter(|u| !u.is_empty())
             .ok_or_else(|| format!("--symmetric-pd-worker '{spec}': missing URL"))?
             .to_string();
-        let bootstrap_port = match parts.next() {
-            None | Some("") | Some("none") | Some("None") => None,
-            Some(p) => Some(
-                p.parse::<u16>()
-                    .map_err(|e| format!("--symmetric-pd-worker '{spec}': bad bootstrap port: {e}"))?,
-            ),
-        };
+        let bootstrap_port =
+            match parts.next() {
+                None | Some("") | Some("none") | Some("None") => None,
+                Some(p) => Some(p.parse::<u16>().map_err(|e| {
+                    format!("--symmetric-pd-worker '{spec}': bad bootstrap port: {e}")
+                })?),
+            };
         let weight = |s: Option<&str>, name: &str| -> Result<f64, String> {
             match s {
                 None | Some("") => Ok(1.0),

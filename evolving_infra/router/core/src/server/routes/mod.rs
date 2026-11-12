@@ -9,13 +9,13 @@ pub mod cache;
 pub mod chat;
 pub mod completions;
 pub mod decision_log;
-pub mod symmetric_pd;
 pub mod health;
 pub mod kv_session;
 pub(crate) mod late_d;
 pub mod metrics;
 pub mod models;
 pub(crate) mod pd_replay;
+pub mod symmetric_pd;
 pub mod tokenize;
 
 pub mod prepared;

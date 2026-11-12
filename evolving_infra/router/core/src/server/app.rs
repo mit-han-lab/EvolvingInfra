@@ -246,7 +246,9 @@ mod tests {
                 let body = std::str::from_utf8(&body).unwrap();
                 assert_eq!(
                     body.contains("requires /symmetric_pd/prepared lifecycle callbacks"),
-                    external_role_control && kv_session_retention && route != "/symmetric_pd/prepared",
+                    external_role_control
+                        && kv_session_retention
+                        && route != "/symmetric_pd/prepared",
                     "{route}: {body}",
                 );
             }

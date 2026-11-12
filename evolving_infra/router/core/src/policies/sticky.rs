@@ -50,7 +50,11 @@ pub fn routing_key<'a>(
     headers: &'a axum::http::HeaderMap,
 ) -> Option<&'a str> {
     let name = model.sticky.as_ref()?.header_name.as_str();
-    headers.get(name)?.to_str().ok().filter(|key| !key.is_empty())
+    headers
+        .get(name)?
+        .to_str()
+        .ok()
+        .filter(|key| !key.is_empty())
 }
 
 /// One routing-key → worker pin, with the last time it was referenced (used

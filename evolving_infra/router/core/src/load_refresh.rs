@@ -102,10 +102,13 @@ impl Query {
             return Ok(());
         }
         let workers = self.refresh.workers.lock();
-        let unchanged = workers[&self.worker]
-            .cursor
-            .as_ref()
-            .is_some_and(|(old_epoch, old_sequence)| epoch == old_epoch && sequence == *old_sequence);
+        let unchanged =
+            workers[&self.worker]
+                .cursor
+                .as_ref()
+                .is_some_and(|(old_epoch, old_sequence)| {
+                    epoch == old_epoch && sequence == *old_sequence
+                });
         if unchanged {
             Err(UnchangedProgress.into())
         } else {
@@ -201,8 +204,14 @@ mod tests {
         assert!(!query.accepts("boot1", 9));
         assert!(query.accepts("boot2", 0));
         // The same sequence is unchanged, an older one stale.
-        assert!(query.check("boot1", 10).unwrap_err().is::<UnchangedProgress>());
-        assert!(!query.check("boot1", 9).unwrap_err().is::<UnchangedProgress>());
+        assert!(query
+            .check("boot1", 10)
+            .unwrap_err()
+            .is::<UnchangedProgress>());
+        assert!(!query
+            .check("boot1", 9)
+            .unwrap_err()
+            .is::<UnchangedProgress>());
         assert!(query.check("boot1", 11).is_ok());
     }
 
@@ -231,10 +240,8 @@ mod tests {
         let age = Duration::from_millis(100);
         drop(refresh.claim("p", Instant::now(), age, false).unwrap());
         assert!(!refresh.initialized("p"));
-        assert!(
-            refresh
-                .claim("p", Instant::now() + age * 2, age, false)
-                .is_some()
-        );
+        assert!(refresh
+            .claim("p", Instant::now() + age * 2, age, false)
+            .is_some());
     }
 }

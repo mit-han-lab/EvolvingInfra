@@ -9,8 +9,8 @@
 //! [`crate::scheduler::DecisionReplay`]'s.
 
 use crate::discovery::ModelId;
-use crate::scheduler::DecisionReplay;
 use crate::policies::registry::PdPoolResolver;
+use crate::scheduler::DecisionReplay;
 use crate::server::app_context::AppContext;
 use crate::workers::Worker;
 use axum::http::HeaderMap;

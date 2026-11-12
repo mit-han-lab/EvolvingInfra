@@ -21,13 +21,13 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sgl_router::config::{
-    ActiveLoadConfig, Config, DiscoveryBackend, SymmetricPdConfig, ModelConfig, ObservabilityConfig,
-    PolicyKind, ProxyConfig, ServerConfig, StaticUrlsDiscoveryConfig,
+    ActiveLoadConfig, Config, DiscoveryBackend, ModelConfig, ObservabilityConfig, PolicyKind,
+    ProxyConfig, ServerConfig, StaticUrlsDiscoveryConfig, SymmetricPdConfig,
 };
 use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
-use sgl_router::scheduler::RoleWeight;
 use sgl_router::policies::factory::build_registry_with_defaults;
 use sgl_router::proxy::Proxy;
+use sgl_router::scheduler::RoleWeight;
 use sgl_router::server::app::build_router;
 use sgl_router::server::app_context::AppContext;
 use sgl_router::tokenizer::TokenizerRegistry;
@@ -73,7 +73,10 @@ fn config(flex: Option<SymmetricPdConfig>) -> Config {
 }
 
 /// `(url, prefill_weight, decode_weight, bootstrap_port)`.
-fn build_ctx(flex: Option<SymmetricPdConfig>, workers: &[(&str, f64, f64, u16)]) -> Arc<AppContext> {
+fn build_ctx(
+    flex: Option<SymmetricPdConfig>,
+    workers: &[(&str, f64, f64, u16)],
+) -> Arc<AppContext> {
     let cfg = config(flex);
     let tokenizers = Arc::new(TokenizerRegistry::load_from_config(&cfg).unwrap());
     let registry = Arc::new(WorkerRegistry::default());
@@ -88,13 +91,16 @@ fn build_ctx(flex: Option<SymmetricPdConfig>, workers: &[(&str, f64, f64, u16)])
                 bootstrap_port: Some(*port),
             })
             .unwrap();
-        registry.get(&id).unwrap().set_symmetric_pd(SymmetricPdWorkerInfo {
-            weight: RoleWeight {
-                prefill: *p,
-                decode: *d,
-            },
-            ..Default::default()
-        });
+        registry
+            .get(&id)
+            .unwrap()
+            .set_symmetric_pd(SymmetricPdWorkerInfo {
+                weight: RoleWeight {
+                    prefill: *p,
+                    decode: *d,
+                },
+                ..Default::default()
+            });
     }
     let policies = Arc::new(build_registry_with_defaults(&cfg).unwrap());
     let proxy = Arc::new(Proxy::new(Duration::from_secs(5)).unwrap());
