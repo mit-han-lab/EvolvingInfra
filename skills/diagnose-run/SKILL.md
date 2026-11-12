@@ -66,8 +66,8 @@ request returns a reply.
 
 ### 3. Slower than the reference
 
-A run can differ from the reference in more than one way: go through steps 1 to 4 for both
-runs before concluding. `<run>/bench` is the directory with `trie-lifecycle-*.jsonl`; scripts
+A run can differ from the reference in more than one way: go through items 1 to 5 below for
+both runs before concluding. `<run>/bench` is the directory with `trie-lifecycle-*.jsonl`; scripts
 are in `skills/diagnose-run/scripts/` and `skills/run-benchmark/scripts/`.
 
 1. **When the planner switched.** `switch_times.py <planner dir> <run>/bench` for both runs
@@ -93,7 +93,7 @@ are in `skills/diagnose-run/scripts/` and `skills/run-benchmark/scripts/`.
    lengths.
 6. **Noise.** Repeat runs of one configuration differ by about 4 % in requests per second.
 
-**Check**: each of steps 1 to 5 has numbers for both runs on the same window.
+**Check**: each of items 1 to 5 has numbers for both runs on the same window.
 
 ## Returns
 

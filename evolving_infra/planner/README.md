@@ -59,8 +59,9 @@ worker $n$ takes
 $$T^{\mathrm{iter}}_{\mathrm{D},n}(B) = d_{n,0} + d_{n,1}\,\phi(B) + d_{n,2}\, B .$$
 
 The model leaves out the context length: at 8 or more running requests it changes the iteration
-time by at most 7% on the models below. The planner reads $E$ and $k$ from the engine's
-`/model_info` and $t_{\mathrm{fwd}}$ from the traces.
+time by at most 7% on the models below. The planner reads $E$ and $k$ from `config.json` in the
+model directory that the engine's `/model_info` names (`n_routed_experts`, `num_experts_per_tok`)
+and $t_{\mathrm{fwd}}$ from the traces.
 
 ### From iteration time to requests per second
 

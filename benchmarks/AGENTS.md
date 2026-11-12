@@ -28,5 +28,7 @@ changing that workload: [`claude-code/`](claude-code/AGENTS.md), [`putnam/`](put
   point drawn from `seed`; compare systems with the same seed and the same number of client
   processes.
 
-Tests: `PYTHONPATH=$PWD/src python -m pytest -q tests` in `benchmarks/trie`; the replay
-adapters are exercised by a GPU run.
+Tests, all on CPU: `PYTHONPATH=$PWD/src python -m pytest -q tests` in `benchmarks/trie`;
+from the repository root, `python -m pytest -q tests/benchmarks tests/client` for the replay
+adapter's arguments, scoring record and agent identities, and the prepared path through the
+frontend that the adapter uses.
