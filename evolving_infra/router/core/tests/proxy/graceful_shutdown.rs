@@ -134,19 +134,24 @@ async fn shutdown_drains_100_inflight_streaming_chat_completions() {
     }))
     .unwrap();
 
+    // Each client reports once its request has its response headers (or
+    // has failed), so shutdown starts only after all N are attached.
+    let (attached_tx, mut attached_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let mut handles = Vec::with_capacity(N);
     for i in 0..N {
         let c = client.clone();
         let u = url.clone();
         let b = body.clone();
+        let attached = attached_tx.clone();
         handles.push(tokio::spawn(async move {
-            let resp = c
+            let sent = c
                 .post(&u)
                 .header("content-type", "application/json")
                 .body(b)
                 .send()
-                .await
-                .map_err(|e| format!("client {i} send: {e}"))?;
+                .await;
+            let _ = attached.send(());
+            let resp = sent.map_err(|e| format!("client {i} send: {e}"))?;
             if !resp.status().is_success() {
                 return Err(format!("client {i} non-2xx: {}", resp.status()));
             }
@@ -158,10 +163,16 @@ async fn shutdown_drains_100_inflight_streaming_chat_completions() {
         }));
     }
 
-    // 4. Let every request grab a connection and start receiving data.
-    //    100 ms is past the first chunk delay (60 ms) for every stream
-    //    but well before the last chunk fires.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // 4. Wait until every request has its response headers: every stream
+    //    is attached to the router, and the last one to attach has nearly
+    //    all of its ~480 ms of chunks still to come.
+    drop(attached_tx);
+    for _ in 0..N {
+        tokio::time::timeout(Duration::from_secs(10), attached_rx.recv())
+            .await
+            .expect("every client attaches within 10 s")
+            .expect("a client task ended without reporting");
+    }
 
     // 5. Trigger shutdown. axum stops accepting new connections but
     //    MUST drain the 100 already-attached streams.

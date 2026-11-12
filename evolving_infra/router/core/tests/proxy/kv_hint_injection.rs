@@ -526,10 +526,9 @@ async fn plain_mode_hint_lands_on_single_body() {
 #[tokio::test]
 async fn unreachable_indexer_fails_open() {
     let plain = crate::common::mock_worker::MockWorker::start(vec![]).await;
-    // Bind a port, drop it — a refused TCP destination for the indexer.
-    let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let dead_url = format!("http://{}", dead.local_addr().unwrap());
-    drop(dead);
+    // A bound, never-listening port — a refused TCP destination for the indexer.
+    let (_dead, dead_addr) = crate::common::refused_addr();
+    let dead_url = format!("http://{dead_addr}");
     let cfg = config_with_hint(
         &dead_url,
         vec![KvWorkerMapEntry {

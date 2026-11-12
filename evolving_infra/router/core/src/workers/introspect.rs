@@ -698,12 +698,11 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_returns_empty_on_connection_refused() {
-        // Port 1 is reserved; bind a temp listener to reserve a free
-        // port then drop it so the connect fails fast.
-        let temp = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = temp.local_addr().unwrap().port();
-        drop(temp);
-        let url = format!("http://127.0.0.1:{port}");
+        // A bound, never-listening socket refuses the connect; holding it
+        // keeps another listener off the port.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let url = format!("http://{}", socket.local_addr().unwrap());
         let got = fast_introspector().fetch(&url).await;
         assert!(
             got.served_model_name.is_none(),

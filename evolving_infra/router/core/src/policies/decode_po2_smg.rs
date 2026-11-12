@@ -1189,11 +1189,13 @@ mod tests {
         (url, seen)
     }
 
-    async fn refused_url() -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
-        url
+    /// A refused URL: a bound socket that never listens. Keep the socket
+    /// alive for the test; while it is bound, no other listener takes the port.
+    fn refused_url() -> (tokio::net::TcpSocket, String) {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let url = format!("http://{}", socket.local_addr().unwrap());
+        (socket, url)
     }
 
     const GOOD: &str = r#"{"version":"0.5.19","loads":[{"dp_rank":0,"num_total_tokens":1183872},{"dp_rank":1,"num_total_tokens":128}]}"#;
@@ -1204,7 +1206,7 @@ mod tests {
         let (good, seen) = loads_server(200, GOOD).await;
         let (bad_status, _) = loads_server(500, GOOD).await;
         let (bad_body, _) = loads_server(200, NO_TOKENS).await;
-        let dead = refused_url().await;
+        let (_dead_socket, dead) = refused_url();
         let registry = WorkerRegistry::default();
         for (i, url) in [&good, &bad_status, &bad_body, &dead].iter().enumerate() {
             let mut s = spec(url);
@@ -1418,7 +1420,7 @@ mod tests {
         let (not_json, _) = loads_server(200, "not json").await;
         let e = fetch_load(&client, &not_json).await.unwrap_err();
         assert!(e.starts_with("parse"), "{e}");
-        let dead = refused_url().await;
+        let (_dead_socket, dead) = refused_url();
         let e = fetch_load(&client, &dead).await.unwrap_err();
         assert!(e.starts_with("connect"), "{e}");
         let (silent, _) = raw_server(RawMode::Silent).await;
