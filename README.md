@@ -2,11 +2,7 @@
   <img src="docs/assets/logo.png" width="120" alt="Evolving Infra logo">
 </p>
 
-<h1 align="center">Evolving Infra</h1>
-
-<h3 align="center">
-Agent-Adaptive LLM Serving at Scale
-</h3>
+<h1 align="center">Evolving Infra: Agent-Adaptive LLM Serving at Scale</h1>
 
 <p align="center">
   <img src="docs/assets/affiliations.svg" width="860" alt="Georgia Institute of Technology, University of Illinois Urbana-Champaign, University of California, Berkeley, NVIDIA, OpenAI, Massachusetts Institute of Technology">
