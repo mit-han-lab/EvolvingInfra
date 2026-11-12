@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Backend capabilities are distinct from the scheduler's logical role weights.
 //!
 //! Filters the model-specific worker registry into usable placement candidates.

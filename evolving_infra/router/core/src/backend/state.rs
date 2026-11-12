@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Authoritative router reservations plus engine observations.
 //!
 //! An observation is optional: a missing/stale engine is never reported as an

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Cumulative usage of prepared requests whose P and D legs both completed, as
 //! reported to the external role controller (`GET /symmetric_pd/roles`). Only the
 //! running sums are kept, never per-request state.

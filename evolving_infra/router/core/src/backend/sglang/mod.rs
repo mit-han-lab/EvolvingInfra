@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! SGLang-specific wire protocol and engine observations.
 //!
 //! Groups adapters for request bodies and cancellation, per-request KV exchange

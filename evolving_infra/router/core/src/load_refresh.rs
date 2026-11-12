@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-worker single-flight progress queries, shared by periodic and demand triggers.
 use parking_lot::Mutex;
 use serde_json::Value;

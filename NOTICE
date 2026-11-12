@@ -14,9 +14,11 @@ licensed under the Apache License, Version 2.0:
   renamed from the `sglang` package to `decoupled_engine` and modified. Each
   modified upstream file says so in its header ("Adapted from SGLang ...").
 - evolving_infra/router/core/ is derived from sglang/experimental/sgl-router at the same upstream
-  base and modified; parts of its late decode choice and gateway cache-aware policy
-  are ported from sglang/sgl-model-gateway at the same base. Files that carry an
-  "SGLang Authors" header keep it.
+  base and modified. The gateway cache-aware policy (src/policies/gateway_ca_tree.rs,
+  src/policies/gateway_cache_aware.rs) and the power-of-two decode pick
+  (src/policies/decode_po2_smg.rs) are ported from sglang/sgl-model-gateway at the same base.
+  Files that carry an "SGLang Authors" header keep it; files written for evolving-infra carry
+  an "evolving-infra Authors" header and are also under the Apache License, Version 2.0.
 
 Some files under evolving_infra/engine/decoupled_engine/kernels/ come from other projects through
 SGLang and keep their own license terms:
@@ -32,9 +34,15 @@ docker/patches/mooncake-rdma-polling-only.patch modifies Mooncake
 (https://github.com/kvcache-ai/Mooncake, Apache License 2.0), which the runtime
 image downloads and builds; no Mooncake source is included.
 
+The router (evolving_infra/router/core/) links the dynamo-tokenizers crate (lib/tokenizers) of
+NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo, commit 1efdd4dcb901), Copyright 2025-2026
+NVIDIA CORPORATION & AFFILIATES, licensed under the Apache License, Version 2.0. Cargo fetches
+it at build time (Cargo.toml pins the commit); no Dynamo source is included in this repository,
+and router binaries contain it.
+
 The KV indexer integration (evolving_infra/router/indexer/) runs NVIDIA Dynamo's indexer
-(https://github.com/ai-dynamo/dynamo, Apache License 2.0) as an external,
-pinned dependency; no Dynamo source is included.
+from the ai-dynamo Python package (Apache License 2.0) as an external, pinned dependency;
+no Dynamo source is included.
 
 benchmarks/trie/ includes Trie (https://github.com/Applied-Compute/trie), imported
 from the strict-replay branch of the public fork https://github.com/crmsndu/trie,

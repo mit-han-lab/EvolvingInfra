@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Compiled Rust scheduling extensions. Policies receive a borrowed snapshot;
 //! the runtime owns refresh, validation, reservation and execution. Calls run
 //! inside Backend's select-and-reserve lock: no I/O, blocking, fitting or second

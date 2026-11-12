@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! One outstanding load query per worker. Slow responses cannot launch duplicate
 //! polls, and the backend rejects samples older than the latest applied query.
 //!

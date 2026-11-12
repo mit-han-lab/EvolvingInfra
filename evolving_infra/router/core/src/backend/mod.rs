@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Backend owns node state and engine adaptation; scheduler owns placement.
 //!
 //! Constructs the shared registry, synchronized request ledger and SGLang adapter,

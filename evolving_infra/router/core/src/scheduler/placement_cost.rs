@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! The placement cost function of `--symmetric-pd-p-select cost-function`:
 //! each P's predicted time to the request's first token, plus the fetch time
 //! that the P's wait does not hide, plus the copy price of the fetched KV.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Prepared input planning and Backend lifecycle callbacks. Full token arrays
 //! stay at the tokenizer; these endpoints handle only descriptors and events.
 use crate::{

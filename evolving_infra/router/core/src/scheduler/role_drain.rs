@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Finishing a decode->prefill role change made through external role control.
 //!
 //! The registry already offers the worker neither role. A drain waits for the
