@@ -280,3 +280,41 @@ def test_valid_terminal_payload_survives_missing_done_or_socket_reset(reset):
                        for e in events)
             assert not any(e["leg"] == "decode" and e["state"] == "completed" for e in events)
     asyncio.run(scenario())
+
+
+def test_nonstream_caller_disconnect_cancels_both_legs():
+    import socket
+    import uvicorn
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def d(req, value):
+            entered.set()
+            await release.wait()  # The D engine is still generating.
+            return web.json_response({"text": "late", "meta_info": {"finish_reason": {"type": "length"}}})
+
+        async with harness(decode=d) as (service, api, base, seen, events):
+            sock = socket.socket()
+            sock.bind(("127.0.0.1", 0))
+            url = "http://127.0.0.1:%d" % sock.getsockname()[1]
+            server = uvicorn.Server(uvicorn.Config(service.app, lifespan="off", log_level="error"))
+            serving = asyncio.create_task(server.serve(sockets=[sock]))
+            try:
+                await until(lambda: server.started)
+                info = (await api.post("/prepare", json=body())).json()
+                async with aiohttp.ClientSession() as client:
+                    call = asyncio.create_task(client.post(url + "/forward_pd", json=plan(info, base)))
+                    await asyncio.wait_for(entered.wait(), 5)
+                    call.cancel()  # The caller closes its TCP connection.
+                    await asyncio.gather(call, return_exceptions=True)
+                await until(lambda: any(e["leg"] == "decode" and e["state"] == "cancelled" for e in events))
+                assert any(e["leg"] == "prefill" and e["state"] in ("completed", "cancelled") for e in events)
+                release.set()  # The cleanup drains the original D response.
+                await until(lambda: not service.pd_exchanges, seconds=5)
+                assert len(seen) == 2  # Generation is never resubmitted.
+            finally:
+                release.set()
+                server.should_exit = True
+                await asyncio.wait_for(serving, 10)
+    asyncio.run(scenario())

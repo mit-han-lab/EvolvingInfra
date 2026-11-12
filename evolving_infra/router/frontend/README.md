@@ -214,7 +214,9 @@ terminal leg while reconciling other legs whose engine state remains uncertain.
 There is no generation retry, except resuming a D-leg that the Backend migrated
 (below). A consumed `ref` cannot be forwarded again; a 404
 cannot establish that no computation happened. Cancellation/partial submission
-closes both local upload/response resources and reports terminal states. Closing
+closes both local upload/response resources and reports terminal states. A caller
+that disconnects from `/forward_pd`, streaming or not, cancels the exchange: each
+leg without a terminal state is reported `cancelled`. Closing
 HTTP is not proof the GPU stopped or export pages were released: the Backend must
 call engine abort/reconcile as appropriate.
 

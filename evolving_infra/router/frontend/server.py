@@ -656,7 +656,7 @@ class TokenizerService:
             entry = self.store.take(req.ref, req.request_id)
             await exchange.prepare(entry)
             request.state.forward_started = True
-            result = await exchange.response()
+            result = await self.unless_disconnected(request, exchange.response())
             if entry.stream:
                 handed_off = True
             return result
@@ -665,6 +665,41 @@ class TokenizerService:
                 entry.data = b""
             if not handed_off:
                 await exchange.aclose()
+
+    @staticmethod
+    async def unless_disconnected(request, work):
+        """Await a response while watching for the HTTP client to disconnect.
+
+        Starlette does not cancel a handler whose client leaves. A disconnect
+        cancels `work`, as a streaming response's disconnect cancels its iterator.
+
+        Args:
+            request: Incoming request whose body has been read.
+            work: Coroutine producing the response.
+
+        Returns:
+            The result of `work`.
+
+        Raises:
+            ProtocolError: The client disconnected before `work` finished (499).
+        """
+        async def disconnected():
+            # After the body, an ASGI server's next message is the disconnect.
+            return (await request.receive())["type"] == "http.disconnect"
+
+        task = asyncio.ensure_future(work)
+        watcher = asyncio.ensure_future(disconnected())
+        try:
+            await asyncio.wait((task, watcher), return_when=asyncio.FIRST_COMPLETED)
+            if not task.done() and watcher.exception() is None and watcher.result():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise ProtocolError(499, "CLIENT_DISCONNECTED", "The client disconnected.")
+            return await task
+        finally:
+            for pending in (task, watcher):
+                pending.cancel()
+            await asyncio.gather(task, watcher, return_exceptions=True)
 
     def validate_pd(self, req):
         """Check a split P/D plan's targets and callback before consuming its input.
