@@ -35,24 +35,6 @@ const PAPER_PRESET_KV_HINT_INDEXER_TIMEOUT_MS: u64 = 200;
 /// Minimum expected hit (one page) when `--kv-pull-hint-min-tokens` is unset.
 const DEFAULT_KV_PULL_HINT_MIN_TOKENS: u32 = 256;
 
-/// The new name of a `--co-schedule-*` flag of earlier versions, when `arg`
-/// is one: the cost function's flags are `--trade-*` now.
-pub fn renamed_flag(arg: &str) -> Option<String> {
-    let name = arg.split('=').next()?;
-    let rest = name.strip_prefix("--co-schedule-")?;
-    Some(match rest {
-        "trade" | "uncached-balance" => {
-            "no longer needed: --symmetric-pd-p-select cost-function includes it".into()
-        }
-        "trade-eft-max-view-age-ms" => "now --trade-e3-max-view-age-ms".into(),
-        "cost-trace" | "load-poll-ms" => format!("now --trade-{rest}"),
-        _ => match rest.strip_prefix("trade-") {
-            Some(tail) => format!("now --trade-{tail}"),
-            None => "removed with the co_schedule policy".into(),
-        },
-    })
-}
-
 /// Trimmed decision-replay routing-key header named by `flag`, or the default
 /// header when the flag is unset. An empty value is an error.
 fn resolve_decision_replay_header(header: Option<&str>, flag: &str) -> Result<String> {
@@ -521,12 +503,6 @@ pub struct Cli {
     /// hit and every pull source is a P-role worker.
     #[arg(long)]
     pub symmetric_pd_pull_from_any_holder: bool,
-    /// Co-schedule: preserve cache owners below this existing uncached workload (default 12288).
-    #[arg(long)]
-    pub symmetric_pd_owner_threshold_tokens: Option<u64>,
-    /// Co-schedule: a detour must save more work than this margin (default 0).
-    #[arg(long)]
-    pub symmetric_pd_detour_margin_tokens: Option<u64>,
     /// D-leg selection once P is fixed: `score` (default) or `round-robin`
     /// (the `--pd-decode-policy round-robin` equivalent).
     #[arg(long, value_enum)]
@@ -1368,8 +1344,6 @@ impl Cli {
                 },
                 copy_lambda_mode: if lambda_auto {
                     crate::scheduler::trade::TradeLambdaMode::Auto {
-                        q: crate::scheduler::trade::TradeAutoQ::Sat,
-                        mu: crate::scheduler::trade::DEFAULT_TRADE_AUTO_MU,
                         min: auto.0,
                         max: auto.1,
                     }
@@ -1491,7 +1465,6 @@ impl Cli {
                 unknown_expire_secs: self
                     .symmetric_pd_unknown_expire_secs
                     .unwrap_or_else(crate::config::types::default_symmetric_pd_unknown_expire_secs),
-                loads_host_room: false,
                 gwq_auto: self.symmetric_pd_gwq_auto.then(|| {
                     crate::config::SymmetricPdGwqAutoConfig {
                         room: if self.symmetric_pd_gwq_room.as_deref() == Some("predicted") {
@@ -1505,7 +1478,6 @@ impl Cli {
                 trace_session_moves: self.symmetric_pd_trace_session_moves,
                 trade_e3: trade_e3.clone().map(crate::config::SymmetricPdTradeE3),
                 pull_from_any_holder: self.symmetric_pd_pull_from_any_holder,
-                trace_async: false,
             });
         }
 
@@ -1775,8 +1747,6 @@ impl Cli {
             || self.symmetric_pd_w_role.is_some()
             || self.symmetric_pd_w_xfer.is_some()
             || self.symmetric_pd_w_dload.is_some()
-            || self.symmetric_pd_owner_threshold_tokens.is_some()
-            || self.symmetric_pd_detour_margin_tokens.is_some()
             || self.symmetric_pd_p_select.is_some()
             || self.symmetric_pd_d_select.is_some()
             || self.symmetric_pd_cache_threshold.is_some()
@@ -1894,18 +1864,6 @@ impl Cli {
                     "{flag} requires --symmetric-pd-p-select cost-function"
                 ));
             }
-        }
-        if (self.symmetric_pd_owner_threshold_tokens.is_some()
-            || self.symmetric_pd_detour_margin_tokens.is_some())
-            && placement.p_select != crate::scheduler::placement::PSelect::CoSchedule
-        {
-            return Err(anyhow!("--symmetric-pd-owner-threshold-tokens / --symmetric-pd-detour-margin-tokens require --symmetric-pd-p-select co-schedule"));
-        }
-        if let Some(v) = self.symmetric_pd_owner_threshold_tokens {
-            placement.co_schedule.owner_threshold_tokens = v;
-        }
-        if let Some(v) = self.symmetric_pd_detour_margin_tokens {
-            placement.co_schedule.detour_margin_tokens = v;
         }
         if let Some(v) = self.symmetric_pd_d_select {
             placement.d_select = v.into();
@@ -2535,25 +2493,6 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("--pd-decode-tokens-*"), "{err}");
-    }
-
-    #[test]
-    fn earlier_co_schedule_flags_name_their_replacement() {
-        assert_eq!(
-            renamed_flag("--co-schedule-trade-copy-lambda=4.6").unwrap(),
-            "now --trade-copy-lambda"
-        );
-        assert_eq!(
-            renamed_flag("--co-schedule-cost-trace").unwrap(),
-            "now --trade-cost-trace"
-        );
-        assert!(renamed_flag("--co-schedule-trade")
-            .unwrap()
-            .contains("no longer needed"));
-        assert!(renamed_flag("--co-schedule-tick-ms")
-            .unwrap()
-            .contains("removed"));
-        assert_eq!(renamed_flag("--trade-copy-lambda"), None);
     }
 
     #[test]
@@ -4397,49 +4336,6 @@ mod tests {
     }
 
     #[test]
-    fn symmetric_pd_co_schedule_is_explicit_and_keeps_native_defaults() {
-        let base = [
-            "--policy",
-            "symmetric_pd",
-            "--symmetric-pd-worker",
-            "http://10.0.0.1:30000,8998,1,0",
-            "--symmetric-pd-worker",
-            "http://10.0.0.5:30000,8998,0,1",
-        ];
-        let mut args = base.to_vec();
-        args.extend([
-            "--symmetric-pd-p-select",
-            "co-schedule",
-            "--symmetric-pd-d-select",
-            "round-robin",
-            "--symmetric-pd-owner-threshold-tokens",
-            "8192",
-            "--symmetric-pd-detour-margin-tokens",
-            "1024",
-        ]);
-        let config = into_config_owned(with_model(&args)).unwrap();
-        let flex = config.model.symmetric_pd.unwrap();
-        assert_eq!(
-            flex.placement.p_select,
-            crate::scheduler::placement::PSelect::CoSchedule
-        );
-        assert_eq!(
-            flex.placement.d_select,
-            crate::scheduler::placement::DSelect::RoundRobin
-        );
-        assert_eq!(flex.placement.co_schedule.owner_threshold_tokens, 8192);
-        assert_eq!(flex.placement.co_schedule.detour_margin_tokens, 1024);
-        let default = into_config_owned(with_model(&base)).unwrap();
-        assert_eq!(
-            default.model.symmetric_pd.unwrap().placement.p_select,
-            crate::scheduler::placement::PSelect::CacheFirst
-        );
-        let mut invalid = base.to_vec();
-        invalid.extend(["--symmetric-pd-owner-threshold-tokens", "8192"]);
-        assert!(into_config_owned(with_model(&invalid)).is_err());
-    }
-
-    #[test]
     fn symmetric_pd_selection_flags_map_into_placement_config() {
         use crate::scheduler::placement::{DSelect, PSelect};
         let c = into_config_owned(with_model(&[
@@ -4710,7 +4606,7 @@ mod tests {
     fn symmetric_pd_cost_function_accepts_the_startup_argv() {
         use crate::config::{LateDecodeMode, LateDecodeRule};
         use crate::scheduler::placement::{DSelect, PSelect};
-        use crate::scheduler::trade::{TradeAutoQ, TradeLambdaMode, TradeRateMode};
+        use crate::scheduler::trade::{TradeLambdaMode, TradeRateMode};
         let cfg = cost_function_config(&[], &[]).unwrap();
         let kv = cfg.model.kv_hint.as_ref().unwrap();
         assert_eq!((kv.min_tokens, kv.min_incremental_tokens), (256, 512));
@@ -4723,10 +4619,6 @@ mod tests {
         let cost = flex.cost_function.as_ref().unwrap();
         assert_eq!(cost.load_poll_ms, 100);
         assert_eq!(cost.unknown_expire_secs, 60, "the default unknown expiry");
-        assert!(
-            !cost.loads_host_room,
-            "the host_room poll is off by default"
-        );
         assert_eq!(
             cost.cost_trace.as_deref().and_then(|p| p.to_str()),
             Some("/tmp/flex-cost.jsonl")
@@ -4735,8 +4627,6 @@ mod tests {
         assert_eq!(
             trade.copy_lambda_mode,
             TradeLambdaMode::Auto {
-                q: TradeAutoQ::Sat,
-                mu: 1.0,
                 min: 4.6,
                 max: 1000.0,
             }
@@ -4746,7 +4636,7 @@ mod tests {
             (trade.rate_mode, trade.rate_tokens_per_s),
             (TradeRateMode::Fixed, 13_500.0)
         );
-        assert!(trade.is_auto() && !trade.exclude_unlaunched);
+        assert!(trade.is_auto());
         let late = &cfg.proxy.late_decode;
         assert_eq!(late.mode, LateDecodeMode::Choose);
         assert_eq!(late.rule, Some(LateDecodeRule::FitReq));
@@ -4784,7 +4674,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(e3.trade.wait, TradeWait::E3);
-        assert_eq!((e3.trade.gate_m, e3.trade.gate_gmin_s), (0.0, 0.0));
+        assert_eq!(e3.trade.gate_m, 0.0);
         let state = e3.trade_e3.as_ref().unwrap();
         assert_eq!(state.0.push.as_ref().map(|p| p.port), Some(26648));
         assert_eq!(state.0.bound_sha256.len(), 64);
@@ -5116,8 +5006,7 @@ mod tests {
 
     /// `--symmetric-pd-gwq-auto` and `--symmetric-pd-trace-session-moves` (default
     /// off): only with `--symmetric-pd-p-select cost-function`; the queue has the
-    /// 300-s guard; the co_schedule queue flag is refused with the cost
-    /// function (its queue is --symmetric-pd-gwq-auto).
+    /// 300-s guard.
     #[test]
     fn symmetric_pd_gwq_auto_flags() {
         let cost = |cfg: Config| cfg.model.symmetric_pd.unwrap().cost_function.unwrap();
@@ -5282,12 +5171,6 @@ mod tests {
                  --symmetric-pd-kv-session-retention",
             ),
             (
-                "E11",
-                &[],
-                &["--symmetric-pd-owner-threshold-tokens", "1"],
-                "require --symmetric-pd-p-select co-schedule",
-            ),
-            (
                 "N15",
                 &["--symmetric-pd-p-select"],
                 &["--symmetric-pd-unknown-expire-secs", "60"],
@@ -5300,7 +5183,7 @@ mod tests {
         }
     }
 
-    /// The co-schedule gate keeps its message for the other policies.
+    /// The cost-function flags are refused under the other policies.
     #[test]
     fn trade_flags_need_the_cost_function() {
         let err = into_config_owned(with_model(&[

@@ -409,7 +409,7 @@ mod tests {
     use crate::{
         config::SymmetricPdConfig,
         discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec},
-        scheduler::{DSelect, PSelect, PlaceHttpRequest, RoleWeight, SymmetricPdRuntime},
+        scheduler::{DSelect, PlaceHttpRequest, RoleWeight, SymmetricPdRuntime},
         workers::SymmetricPdWorkerInfo,
     };
     use axum::{
@@ -474,7 +474,6 @@ mod tests {
         let flex = std::thread::spawn(move || {
             let mut cfg = SymmetricPdConfig::default();
             cfg.placement.force_split = true;
-            cfg.placement.p_select = PSelect::CoSchedule;
             cfg.placement.d_select = DSelect::RoundRobin;
             SymmetricPdRuntime::spawn(cfg, None, registry, ModelId("stub-model".into()))
         })
@@ -510,7 +509,7 @@ mod tests {
             assert_eq!(p["reserved_uncached_tokens"], 8192);
             assert_eq!(p["active_prefill_reqs"], 1);
             assert_eq!(p["unknown_prefill_reqs"], 1);
-            assert_eq!(p["workload_mode"], "rid_remaining");
+            assert_eq!(p["workload_mode"], "aggregate_estimate");
             assert_eq!(p["status"], "missing");
             assert!(p["observation"].is_null());
             assert!(p["sample_age_ms"].is_null());

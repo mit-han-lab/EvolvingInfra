@@ -5,16 +5,16 @@
 //!
 //! Placement belongs to `scheduler::placement`; backend state and SGLang wire
 //! operations live in `backend`. Indexer queries run before the short atomic
-//! snapshot/select/reserve section. CoSchedule uses cached-owner protection
-//! and post-dispatch uncached-work spread, with no router HOLD queue. Existing
-//! CacheFirst/Score modes retain their configured HOLD behavior.
+//! snapshot/select/reserve section. The cost function and the gateway
+//! cache-aware P selection never hold; the CacheFirst and Score modes hold
+//! up to their configured deadline.
 //!
-//! CoSchedule merges per-RID engine progress into the initial request estimates.
-//! Missing RIDs retain their latest estimates; aggregate waiting tokens never
-//! replace running work. Legacy modes retain a labelled aggregate estimate.
-//! Managed reservations live until explicit completion. The legacy `/symmetric_pd/place` API alone uses an expiring
-//! lease because it has no completion callback. New prepared execution owns
-//! its reservation until the execution manager receives a terminal callback.
+//! The load view is an aggregate estimate: engine-reported load plus the
+//! router's reservations that no poll covers yet. Managed reservations live
+//! until explicit completion. The `/symmetric_pd/place` API alone uses an
+//! expiring lease because it has no completion callback. Prepared execution
+//! owns its reservation until the execution manager receives a terminal
+//! callback.
 
 use super::{
     placement,
@@ -592,7 +592,6 @@ impl SymmetricPdRuntime {
                 model.clone(),
                 cfg.import_cache_policy,
                 cfg.load_poll_ms,
-                cfg.placement.p_select == PSelect::CoSchedule,
                 cfg.kv_session_retention,
                 cfg.kv_session_key_file.as_deref(),
                 // Unknown P reservations (a P-leg that ended in a transport
@@ -908,18 +907,15 @@ impl SymmetricPdRuntime {
     /// tokens; `hits`: directory hits plus validated peer-pull estimates.
     ///
     /// # Outputs
-    /// Local usable hit, or the larger validated expected pull hit in CoSchedule mode (and with
-    /// the cost function: its TRADE expected hit), bounded by prompt length on normal nonempty
+    /// Local usable hit, or with the cost function the larger validated expected pull hit,
+    /// bounded by prompt length on normal nonempty
     /// requests. Policy score fields are never trusted for accounting.
     fn accounted_hit(&self, worker: &str, prompt_len: u64, hits: &IndexerHits) -> u64 {
         let hit = hits.get(worker);
         let local = (hit.gpu as f64)
             .max(hit.host as f64 * self.cfg.placement.host_hit_factor)
             .min(prompt_len.max(1) as f64) as u64;
-        if matches!(
-            self.cfg.placement.p_select,
-            PSelect::CoSchedule | PSelect::CostFunction
-        ) {
+        if self.cfg.placement.p_select == PSelect::CostFunction {
             hits.expected_after_pull
                 .get(worker)
                 .copied()
@@ -1093,8 +1089,9 @@ impl SymmetricPdRuntime {
     /// # Outputs
     /// `Ok(Decision)` with selected workers, marks, pull hint, timing and an owned ledger
     /// handle; errors for no workers, invalid/impossible placement, or missing KV endpoints.
-    /// The caller must retire/hand off the reservation. CoSchedule bypasses HOLD; legacy modes
-    /// may wait up to the configured deadline before forced placement.
+    /// The caller must retire/hand off the reservation. The cost function and the gateway
+    /// cache-aware selection bypass HOLD; the other modes may wait up to the configured
+    /// deadline before forced placement.
     pub async fn admit(&self, input: PlaceInput) -> Result<Decision, SymmetricPdError> {
         let arrived = Instant::now();
         let (mut hits, indexer_ms, reply) = self.hits_with_reply(&input).await;
@@ -1237,10 +1234,9 @@ impl SymmetricPdRuntime {
                 let mut state = self.backend.state.lock();
                 let loads = state.loads(weights.workers.keys());
                 let now = Instant::now();
-                // CoSchedule, the gateway cache-aware P selection and the
-                // cost function never hold (no hold queue).
-                let has_capacity = self.cfg.placement.p_select == PSelect::CoSchedule
-                    || self.gateway_ca.is_some()
+                // The gateway cache-aware P selection and the cost function
+                // never hold (no hold queue).
+                let has_capacity = self.gateway_ca.is_some()
                     || self.cost_function.is_some()
                     || self.has_prefill_capacity(&weights, &loads);
                 if !has_capacity && now < deadline {
@@ -3065,7 +3061,7 @@ mod tests {
     ///
     /// # Outputs
     /// No return value; the test asserts this contract and panics on a mismatch.
-    fn concurrent_co_schedule_arrivals_reserve_before_next_selection() {
+    fn concurrent_arrivals_reserve_before_next_selection() {
         let reg = registry_with(vec![
             (
                 "http://p0",
@@ -3099,10 +3095,10 @@ mod tests {
             ),
         ]);
         let mut cfg = SymmetricPdConfig::default();
-        cfg.placement.p_select = PSelect::CoSchedule;
+        cfg.placement.p_select = PSelect::CacheFirst;
         cfg.placement.d_select = DSelect::RoundRobin;
         cfg.placement.force_split = true;
-        cfg.max_uncached_tokens = 1; // new policy must never use the old HOLD gate
+        cfg.max_uncached_tokens = u64::MAX; // never holds
         let rt = SymmetricPdRuntime::spawn(cfg, None, reg, model());
         let barrier = Arc::new(std::sync::Barrier::new(8));
         let threads: Vec<_> = (0..8)
@@ -3222,18 +3218,19 @@ mod tests {
             ),
         ])
     }
-    /// Configure extension tests for co-schedule P and round-robin D.
+    /// Configure extension tests for round-robin D without the hold queue.
     ///
     /// # Inputs
     /// None.
     ///
     /// # Outputs
-    /// A default-derived force-split `SymmetricPdConfig` with CoSchedule and D RoundRobin selected.
+    /// A default-derived force-split `SymmetricPdConfig` with D RoundRobin selected and no
+    /// hold.
     fn extension_config() -> SymmetricPdConfig {
         let mut cfg = SymmetricPdConfig::default();
-        cfg.placement.p_select = PSelect::CoSchedule;
         cfg.placement.d_select = DSelect::RoundRobin;
         cfg.placement.force_split = true;
+        cfg.max_uncached_tokens = u64::MAX;
         cfg
     }
     #[test]
@@ -3383,90 +3380,6 @@ mod tests {
             rt.loads(["http://p1"]).get("http://p1").active_prefill_reqs,
             0
         );
-    }
-
-    #[derive(Debug)]
-    struct PreferIdleP1Cost;
-    impl super::super::policy::CostModel for PreferIdleP1Cost {
-        /// Add a p0-specific overhead in the runtime cost-extension fixture.
-        ///
-        /// # Inputs
-        /// `i`: candidate URL, outstanding backlog, prompt length and expected hit; `self` is
-        /// stateless.
-        ///
-        /// # Outputs
-        /// Before/after costs with a 1,000-unit overhead on p0; raw Backend reservations must
-        /// still use uncached tokens only.
-        fn prefill_cost(
-            &self,
-            i: super::super::policy::PrefillCostInput<'_>,
-        ) -> super::super::policy::PrefillCost {
-            // Fixed 1000-unit overhead on p0; every request still reserves raw
-            // uncached tokens. A second arrival must see the first reservation.
-            let before = u128::from(i.load.backlog_uncached_tokens)
-                + if i.worker == "http://p0" { 1000 } else { 0 };
-            super::super::policy::PrefillCost {
-                before,
-                after: before + u128::from(i.request.prompt_len.saturating_sub(i.expected_hit)),
-            }
-        }
-        /// Keep the runtime test model's detour margin in token-scale units.
-        ///
-        /// # Inputs
-        /// `tokens`: configured token margin; `self` is stateless.
-        ///
-        /// # Outputs
-        /// The same value widened to `u128`.
-        fn detour_margin(&self, tokens: u64) -> u128 {
-            u128::from(tokens)
-        }
-    }
-    #[test]
-    /// Check custom costs affect P choice while each arrival observes prior reservations and
-    /// reserves only raw tokens.
-    ///
-    /// # Inputs
-    /// No arguments; admits two 1,024-token requests through a runtime using the p0-overhead
-    /// cost model.
-    ///
-    /// # Outputs
-    /// No return value; the test asserts this contract and panics on a mismatch.
-    fn injected_cost_uses_actual_runtime_and_keeps_raw_token_reservations() {
-        let rt = SymmetricPdRuntime::spawn_with_policy(
-            extension_config(),
-            None,
-            extension_registry(),
-            model(),
-            Arc::new(DefaultPlacementPolicy {
-                cost: PreferIdleP1Cost,
-            }),
-        );
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let first = runtime
-            .block_on(rt.admit(PlaceInput {
-                prompt_len: 1024,
-                ..Default::default()
-            }))
-            .unwrap();
-        assert_eq!(first.p_worker.url, "http://p1");
-        let second = runtime
-            .block_on(rt.admit(PlaceInput {
-                prompt_len: 1024,
-                ..Default::default()
-            }))
-            .unwrap();
-        assert_eq!(
-            second.p_worker.url, "http://p0",
-            "second choice sees first reservation through the shared ledger"
-        );
-        for p in ["http://p0", "http://p1"] {
-            assert_eq!(rt.loads([p]).get(p).backlog_uncached_tokens, 1024);
-        }
-        first.ledger.retire();
-        second.ledger.retire();
     }
 
     /// A 3P + 2D symmetric fleet (pinned roles, bootstrap ports set).
@@ -3702,12 +3615,10 @@ mod tests {
             cost_trace: Some(dir.join("cost.jsonl")),
             load_poll_ms: 100,
             unknown_expire_secs: 60,
-            loads_host_room: false,
             gwq_auto: None,
             trace_session_moves: false,
             trade_e3: None,
             pull_from_any_holder: false,
-            trace_async: false,
         });
         tune(&mut cfg);
         SymmetricPdRuntime::spawn(cfg, Some(&kv), reg, model())
@@ -3954,7 +3865,6 @@ mod tests {
             cost_trace: Some(dir.join("cost.jsonl")),
             load_poll_ms: 100,
             unknown_expire_secs: 60,
-            loads_host_room: false,
             gwq_auto: Some(crate::config::SymmetricPdGwqAutoConfig {
                 max_wait_ms: 300_000,
                 ..Default::default()
@@ -3962,7 +3872,6 @@ mod tests {
             trace_session_moves: false,
             trade_e3: None,
             pull_from_any_holder: false,
-            trace_async: false,
         });
         SymmetricPdRuntime::spawn(cfg, Some(&kv), reg, model())
     }
@@ -4023,12 +3932,10 @@ mod tests {
             cost_trace: Some(dir.join("cost.jsonl")),
             load_poll_ms: 100,
             unknown_expire_secs: 60,
-            loads_host_room: false,
             gwq_auto: None,
             trace_session_moves: false,
             trade_e3: Some(crate::config::SymmetricPdTradeE3(Arc::new(e3))),
             pull_from_any_holder: false,
-            trace_async: false,
         });
         SymmetricPdRuntime::spawn(cfg, Some(&kv), reg, model())
     }
@@ -4147,8 +4054,13 @@ mod tests {
             expected_hit: 0,
             hint: None,
         };
-        let (_, mut reservation) = book
-            .reserve_uncached(100_000, Some(rid.into()), vec![candidate], 12288)
+        let (_, mut reservation, _) = book
+            .reserve_trade(
+                100_000,
+                Some(rid.into()),
+                vec![candidate],
+                Default::default(),
+            )
             .unwrap();
         reservation.mark_dispatched().unwrap();
         reservation

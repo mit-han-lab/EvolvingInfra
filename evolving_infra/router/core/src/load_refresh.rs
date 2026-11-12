@@ -168,8 +168,7 @@ pub(crate) fn log_progress_result<T>(worker: &str, result: &anyhow::Result<T>, e
 /// A `/v1/loads` poll that the engine answered with HTTP 4xx or 500. An
 /// engine without the `prefill_routing` section (an older
 /// engine) answers `include=...,prefill_routing` this way: its load-snapshot
-/// section check raises ValueError (400 or 500). The same holds for an
-/// engine without the `host_room` section.
+/// section check raises ValueError (400 or 500).
 pub(crate) fn include_rejected(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<reqwest::Error>()
@@ -181,31 +180,22 @@ pub(crate) fn include_rejected(error: &anyhow::Error) -> bool {
 
 /// The fields of one `/v1/loads` progress poll ([`fetch_progress_poll`]):
 /// the prefill-work progress, the rest of the load row (the trace's
-/// `engine_load`), the raw `prefill_routing` snapshot and the raw `host_room`
-/// section.
-pub(crate) type ProgressPoll = (
-    crate::cost_balance::PrefillProgress,
-    Value,
-    Option<Value>,
-    Option<Value>,
-);
+/// `engine_load`) and the raw `prefill_routing` snapshot.
+pub(crate) type ProgressPoll = (crate::cost_balance::PrefillProgress, Value, Option<Value>);
 
 /// One `/v1/loads` poll: the prefill-work progress, the rest of the load row
-/// for the trace, with `routing` the raw `prefill_routing` snapshot and with
-/// `host_room` the engine's `host_room` section (its host pool by retention
-/// class). Both sections are removed from the load row, so the trace's
-/// `engine_load` keeps its size.
+/// for the trace, and with `routing` the raw `prefill_routing` snapshot. The
+/// snapshot is removed from the load row, so the trace's `engine_load` keeps
+/// its size.
 pub(crate) async fn fetch_progress_poll(
     client: &reqwest::Client,
     base: &str,
     routing: bool,
-    host_room: bool,
 ) -> anyhow::Result<ProgressPoll> {
-    let include = match (routing, host_room) {
-        (false, false) => "core,queues,prefill_work",
-        (true, false) => "core,queues,prefill_work,prefill_routing",
-        (false, true) => "core,queues,prefill_work,host_room",
-        (true, true) => "core,queues,prefill_work,prefill_routing,host_room",
+    let include = if routing {
+        "core,queues,prefill_work,prefill_routing"
+    } else {
+        "core,queues,prefill_work"
     };
     let mut value: Value = client
         .get(format!("{}/v1/loads", base.trim_end_matches('/')))
@@ -234,12 +224,7 @@ pub(crate) async fn fetch_progress_poll(
         .as_object_mut()
         .and_then(|row| row.remove("prefill_routing"))
         .filter(|_| routing);
-    let room = if host_room {
-        load.as_object_mut().and_then(|row| row.remove("host_room"))
-    } else {
-        None
-    };
-    Ok((serde_json::from_value(progress)?, load, snapshot, room))
+    Ok((serde_json::from_value(progress)?, load, snapshot))
 }
 
 #[cfg(test)]

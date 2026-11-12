@@ -57,25 +57,6 @@ impl<C: CostModel> PlacementPolicy for DefaultPlacementPolicy<C> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct PrefillCostInput<'a> {
-    pub worker: &'a str,
-    pub request: &'a PlacementRequest,
-    pub load: WorkerLoad,
-    pub local_hit: u64,
-    pub gpu_hit: u64,
-    /// Only includes remote hit after a valid pull hint has been constructed.
-    pub expected_hit: u64,
-}
-
-/// Comparable costs on a single shared scale (e.g. tokens or integer us).
-/// This is an estimate used to select a node, never the accounting ledger.
-#[derive(Debug, Clone, Copy)]
-pub struct PrefillCost {
-    pub before: u128,
-    pub after: u128,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct PairCostInput<'a> {
     pub request: &'a PlacementRequest,
     pub prefill: &'a str,
@@ -89,33 +70,7 @@ pub struct PairCostInput<'a> {
 }
 
 pub trait CostModel: std::fmt::Debug + Send + Sync {
-    /// Estimate comparable prefill work before and after admitting this request.
-    ///
-    /// # Inputs
-    /// `self`: immutable cost parameters; `input`: candidate, request, current load, local/GPU
-    /// hit and validated expected hit.
-    ///
-    /// # Outputs
-    /// `PrefillCost` with before/after work on one shared scale across candidates.
-    /// Called by CoSchedule when no valid replay placement pins the request, once
-    /// per eligible P that has a compatible D. CacheFirst and Score do not use
-    /// this method; values guide selection, not raw-token accounting.
-    fn prefill_cost(&self, input: PrefillCostInput<'_>) -> PrefillCost;
-
-    /// Convert the configured token margin to the SAME units as prefill_cost.
-    /// Required even for a model in time units: never compare tokens to us.
-    /// The separate owner_threshold_tokens guard always uses raw uncached tokens.
-    /// Convert the configured token margin to the model's work units.
-    ///
-    /// # Inputs
-    /// `self`: cost model; `tokens`: configured uncached-token detour margin.
-    ///
-    /// # Outputs
-    /// A nonnegative margin on the same scale as `prefill_cost`; the separate cached-owner
-    /// threshold remains in raw tokens.
-    fn detour_margin(&self, tokens: u64) -> u128;
-
-    /// Higher wins in Score mode; CacheFirst/CoSchedule still pin their P.
+    /// Higher wins in Score mode; CacheFirst still pins its P.
     /// Override for custom pair scoring; prefill-only models retain this score.
     /// Provide the default additive ranking for an eligible P/D pair.
     ///
@@ -134,32 +89,6 @@ pub trait CostModel: std::fmt::Debug + Send + Sync {
 #[derive(Debug, Default)]
 pub struct DefaultCostModel;
 impl CostModel for DefaultCostModel {
-    /// Use outstanding uncached tokens as the default prefill cost.
-    ///
-    /// # Inputs
-    /// `input`: worker load, prompt length and expected usable prefix hit; `self` has no
-    /// parameters.
-    ///
-    /// # Outputs
-    /// Before = outstanding uncached tokens; after = before plus
-    /// `prompt_len.saturating_sub(expected_hit)`, both widened to `u128`.
-    fn prefill_cost(&self, input: PrefillCostInput<'_>) -> PrefillCost {
-        let before = u128::from(input.load.backlog_uncached_tokens);
-        PrefillCost {
-            before,
-            after: before + u128::from(input.request.prompt_len.saturating_sub(input.expected_hit)),
-        }
-    }
-    /// Keep detour margins in the default raw-token cost units.
-    ///
-    /// # Inputs
-    /// `tokens`: detour margin in uncached tokens; `self` is stateless.
-    ///
-    /// # Outputs
-    /// The same numeric margin widened to `u128`.
-    fn detour_margin(&self, tokens: u64) -> u128 {
-        u128::from(tokens)
-    }
     /// Combine normalized cache benefit and load/transfer penalties.
     ///
     /// # Inputs
@@ -224,42 +153,7 @@ pub fn validate_placement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[derive(Debug, Default)]
-    struct TimeCost {
-        calls: AtomicUsize,
-    }
-    impl CostModel for TimeCost {
-        /// Simulate a slower p0 in the custom-cost test model.
-        ///
-        /// # Inputs
-        /// `self.calls`: test evaluation counter; `i`: candidate and default token-cost inputs.
-        ///
-        /// # Outputs
-        /// Default before/after costs multiplied by ten for p0 and one elsewhere; increments
-        /// the evaluation counter once.
-        fn prefill_cost(&self, i: PrefillCostInput<'_>) -> PrefillCost {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            let scale = if i.worker == "p0" { 10 } else { 1 };
-            let raw = DefaultCostModel.prefill_cost(i);
-            PrefillCost {
-                before: raw.before * scale,
-                after: raw.after * scale,
-            }
-        }
-        /// Convert the test model's detour margin to its chosen time scale.
-        ///
-        /// # Inputs
-        /// `tokens`: configured raw-token margin; `self` supplies the test-model
-        /// implementation.
-        ///
-        /// # Outputs
-        /// Ten times `tokens` as `u128`, matching the test's margin conversion contract.
-        fn detour_margin(&self, tokens: u64) -> u128 {
-            u128::from(tokens) * 10
-        }
-    }
     /// Build a deterministic extension-policy test setup.
     ///
     /// # Inputs
@@ -267,7 +161,7 @@ mod tests {
     ///
     /// # Outputs
     /// A 20-token request, empty hits, two unequal P backlogs, a D worker, and force-split
-    /// co-schedule/D-RR settings.
+    /// cache-first/D-RR settings.
     fn fixture() -> (
         PlacementRequest,
         IndexerHits,
@@ -301,118 +195,16 @@ mod tests {
             },
         );
         let cfg = PlacementConfig {
-            p_select: PSelect::CoSchedule,
+            p_select: PSelect::CacheFirst,
             d_select: DSelect::RoundRobin,
             force_split: true,
             ..Default::default()
         };
         (req, IndexerHits::new(), loads, roles, cfg)
     }
-    #[test]
-    /// Check changing cost alone can change P while preserving D round robin and transfer
-    /// identity.
-    ///
-    /// # Inputs
-    /// No arguments; compares default costs with the p0-slow test model on the same fixture.
-    ///
-    /// # Outputs
-    /// No return value; the test asserts this contract and panics on a mismatch.
-    fn replacing_only_cost_changes_prefill_not_rr_or_transfer_identity() {
-        let (req, hits, loads, roles, cfg) = fixture();
-        let default = place(&req, &hits, &loads, &roles, &cfg).unwrap();
-        let policy = DefaultPlacementPolicy {
-            cost: TimeCost::default(),
-        };
-        let custom = policy.place(&req, &hits, &loads, &roles, &cfg).unwrap();
-        assert_eq!(default.p_leg, "p0");
-        assert_eq!(custom.p_leg, "p1");
-        assert_eq!(custom.d_leg, default.d_leg);
-        assert_eq!(custom.transfer_id, default.transfer_id);
-        assert_eq!(
-            policy.cost.calls.load(Ordering::Relaxed),
-            2,
-            "model evaluated once per eligible P"
-        );
-    }
-    #[test]
-    /// Check cached-owner protection compares raw backlog tokens rather than scaled model
-    /// costs.
-    ///
-    /// # Inputs
-    /// No arguments; adds an owner hit and a 150-token owner threshold while p0 costs use a
-    /// tenfold scale.
-    ///
-    /// # Outputs
-    /// No return value; the test asserts this contract and panics on a mismatch.
-    fn custom_time_units_preserve_raw_token_owner_guard() {
-        let (req, mut hits, loads, roles, mut cfg) = fixture();
-        hits.insert("p0", HitTokens { gpu: 10, host: 0 });
-        cfg.co_schedule.owner_threshold_tokens = 150;
-        let result = DefaultPlacementPolicy {
-            cost: TimeCost::default(),
-        }
-        .place(&req, &hits, &loads, &roles, &cfg)
-        .unwrap();
-        // p0 has 100 raw tokens (<=150), but its estimated cost is 1000 us.
-        assert_eq!(result.p_leg, "p0");
-    }
-    #[test]
-    /// Check detour protection converts the configured token margin into the cost model's
-    /// units.
-    ///
-    /// # Inputs
-    /// No arguments; sets a 100-token margin against an 880-unit saving in the test model.
-    ///
-    /// # Outputs
-    /// No return value; the test asserts this contract and panics on a mismatch.
-    fn custom_cost_explicitly_converts_detour_margin_to_its_units() {
-        let (req, mut hits, loads, roles, mut cfg) = fixture();
-        hits.insert("p0", HitTokens { gpu: 10, host: 0 });
-        cfg.co_schedule.owner_threshold_tokens = 0;
-        let policy = DefaultPlacementPolicy {
-            cost: TimeCost::default(),
-        };
-        assert_eq!(
-            policy
-                .place(&req, &hits, &loads, &roles, &cfg)
-                .unwrap()
-                .p_leg,
-            "p1"
-        );
-        // Saved cost 880 us: 100 tokens -> 1000 us protects the owner;
-        // comparing it to an unconverted 100 would incorrectly migrate.
-        cfg.co_schedule.detour_margin_tokens = 100;
-        assert_eq!(
-            policy
-                .place(&req, &hits, &loads, &roles, &cfg)
-                .unwrap()
-                .p_leg,
-            "p0"
-        );
-    }
     #[derive(Debug)]
     struct PreferP1;
     impl CostModel for PreferP1 {
-        /// Retain default token costs in a pair-score-only test model.
-        ///
-        /// # Inputs
-        /// `i`: candidate/request/load snapshot; `self` is the stateless PreferP1 fixture.
-        ///
-        /// # Outputs
-        /// The unchanged default before/after uncached-token costs.
-        fn prefill_cost(&self, i: PrefillCostInput<'_>) -> PrefillCost {
-            DefaultCostModel.prefill_cost(i)
-        }
-        /// Retain token units in the pair-score-only fixture.
-        ///
-        /// # Inputs
-        /// `t`: configured token margin; `self` is stateless.
-        ///
-        /// # Outputs
-        /// The same margin widened to `u128`.
-        fn detour_margin(&self, t: u64) -> u128 {
-            u128::from(t)
-        }
         /// Override pair ranking to prefer p1 in extension tests.
         ///
         /// # Inputs
@@ -484,26 +276,6 @@ mod tests {
     #[derive(Debug)]
     struct NonFiniteScore;
     impl CostModel for NonFiniteScore {
-        /// Retain normal prefill costs while testing invalid pair scores.
-        ///
-        /// # Inputs
-        /// `i`: candidate/request/load snapshot; `self` is the NonFiniteScore fixture.
-        ///
-        /// # Outputs
-        /// Default before/after token costs.
-        fn prefill_cost(&self, i: PrefillCostInput<'_>) -> PrefillCost {
-            DefaultCostModel.prefill_cost(i)
-        }
-        /// Retain the default token margin in the non-finite-score fixture.
-        ///
-        /// # Inputs
-        /// `t`: configured token margin; `self` is stateless.
-        ///
-        /// # Outputs
-        /// The same token margin widened to `u128`.
-        fn detour_margin(&self, t: u64) -> u128 {
-            u128::from(t)
-        }
         /// Produce an intentionally invalid score for validation tests.
         ///
         /// # Inputs

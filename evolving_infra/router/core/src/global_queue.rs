@@ -53,21 +53,6 @@ const STALE_AFTER_POLLS: u64 = 10;
 /// ... and never before this time.
 const STALE_AFTER_MIN: Duration = Duration::from_secs(1);
 
-/// Release order of the queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GlobalQueueMode {
-    /// Highest response ratio (wait + S) / S first (no knob for starvation).
-    Hrrn,
-}
-
-impl GlobalQueueMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Hrrn => "hrrn",
-        }
-    }
-}
-
 /// `--co-schedule-global-queue-room`: how the queue decides that a P has
 /// room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -172,11 +157,6 @@ pub struct GwqRow {
     pub depth: u64,
     /// A progress snapshot of P was applied and is not stale.
     pub fresh: bool,
-    /// a_w of the HOL term (0 while it is off).
-    pub arrival_rate_per_s: f64,
-    /// The copy price of a pull to this P (`--trade-pull-price
-    /// phi`: lambda_q x phi_P); None = the copy price of the parameters.
-    pub copy_lambda: Option<f64>,
     /// `room = predicted`: the P's predicted drain time (s) from a usable
     /// forecast; None for the token rule alone (room `tokens`, or a P without
     /// a usable forecast: fail-open to the token rule).
@@ -295,8 +275,6 @@ fn trade_inputs<'a>(
             uncached: t.uncached,
             pulled: t.pulled,
             wait: None,
-            arrival_rate_per_s: row.arrival_rate_per_s,
-            copy_lambda: row.copy_lambda,
             bound_s: None,
         })
         .collect()
@@ -438,7 +416,6 @@ mod tests {
 
     /// [`walk_with`] without the tie break of `--symmetric-pd-gwq-auto`.
     fn walk(
-        _mode: GlobalQueueMode,
         params: &TradeParams,
         urls: &[String],
         rows: &[GwqRow],
@@ -466,8 +443,6 @@ mod tests {
             queued,
             depth,
             fresh: true,
-            arrival_rate_per_s: 0.0,
-            copy_lambda: None,
             drain_s: None,
             lead_s: 0.0,
         }
@@ -522,13 +497,7 @@ mod tests {
         let urls = urls(2);
         let rows = [row(20_000, 20_000, 9542), row(15_000, 9542, 9542)];
         let a = cold(4000, 2);
-        let w = walk(
-            GlobalQueueMode::Hrrn,
-            &params(9.2),
-            &urls,
-            &rows,
-            &[held(&a, 1.0)],
-        );
+        let w = walk(&params(9.2), &urls, &rows, &[held(&a, 1.0)]);
         assert!(w.pick.is_none());
         // The plain choice is still computed: the lower backlog.
         assert_eq!(w.plain, vec![1]);
@@ -544,7 +513,6 @@ mod tests {
         let s_small = 2000.0 / R;
         // Big waited 30 s: (30 + 3.7) / 3.7 = 9.1 > small (0.1 + 0.15) / 0.15 = 1.7.
         let w = walk(
-            GlobalQueueMode::Hrrn,
             &params(9.2),
             &urls,
             &rows,
@@ -555,7 +523,6 @@ mod tests {
         assert!((pick.key - (30.0 + s_big) / s_big).abs() < 1e-9);
         // Big waited 1 s: 1.27 < 1.67, the small request goes first.
         let w = walk(
-            GlobalQueueMode::Hrrn,
             &params(9.2),
             &urls,
             &rows,
@@ -570,7 +537,6 @@ mod tests {
         let k = key(0.5, 0.0, 1.0 / R);
         assert!((k - (0.5 * R + 1.0)).abs() < 1e-6, "{k}");
         let w = walk(
-            GlobalQueueMode::Hrrn,
             &params(9.2),
             &urls,
             &rows,
@@ -584,13 +550,7 @@ mod tests {
         let urls = urls(1);
         let rows = [row(0, 0, 9542)];
         let a = cold(3000, 1);
-        let w = walk(
-            GlobalQueueMode::Hrrn,
-            &params(9.2),
-            &urls,
-            &rows,
-            &[held(&a, 2.0), held(&a, 1.0)],
-        );
+        let w = walk(&params(9.2), &urls, &rows, &[held(&a, 2.0), held(&a, 1.0)]);
         assert_eq!(w.pick.unwrap().index, 0);
     }
 
@@ -603,23 +563,11 @@ mod tests {
         let a = cold(5000, 2);
         // P1 runs a big launched request: backlog 40k, nothing queued.
         let rows = [row(30_000, 30_000, 9542), row(40_000, 0, 9542)];
-        let w = walk(
-            GlobalQueueMode::Hrrn,
-            &params(9.2),
-            &urls,
-            &rows,
-            &[held(&a, 0.0)],
-        );
+        let w = walk(&params(9.2), &urls, &rows, &[held(&a, 0.0)]);
         assert_eq!(w.plain, vec![0]);
         assert!(w.pick.is_none(), "P0 (35k) beats P1 (45k) but has no room");
         let rows = [row(30_000, 30_000, 9542), row(20_000, 0, 9542)];
-        let w = walk(
-            GlobalQueueMode::Hrrn,
-            &params(9.2),
-            &urls,
-            &rows,
-            &[held(&a, 0.8)],
-        );
+        let w = walk(&params(9.2), &urls, &rows, &[held(&a, 0.8)]);
         let pick = w.pick.unwrap();
         assert_eq!((pick.worker, pick.plain_worker), (1, 1));
         assert_eq!(pick.release, GwqRelease::Room);
@@ -636,26 +584,14 @@ mod tests {
             terms_of(0, 60_000, 62_000),
         ];
         let rows = [row(20_000, 20_000, 9542), row(0, 0, 9542)];
-        let w = walk(
-            GlobalQueueMode::Hrrn,
-            &params(18.4),
-            &urls,
-            &rows,
-            &[held(&x, 1.0)],
-        );
+        let w = walk(&params(18.4), &urls, &rows, &[held(&x, 1.0)]);
         assert_eq!(w.plain, vec![0]);
         assert!(
             w.pick.is_none(),
             "P1 has room, but the pull and copy cost more"
         );
         // Without a copy price, TRADE itself moves the request with a pull.
-        let w = walk(
-            GlobalQueueMode::Hrrn,
-            &params(0.0),
-            &urls,
-            &rows,
-            &[held(&x, 1.0)],
-        );
+        let w = walk(&params(0.0), &urls, &rows, &[held(&x, 1.0)]);
         assert_eq!(w.pick.unwrap().worker, 1);
     }
 
@@ -667,13 +603,7 @@ mod tests {
         let urls = urls(2);
         let a = cold(8000, 2);
         let rows = [row(10_000, 10_000, 9542), row(12_000, 0, 9542)];
-        let w = walk(
-            GlobalQueueMode::Hrrn,
-            &params(9.2),
-            &urls,
-            &rows,
-            &[held(&a, 1.0), held(&a, 0.5)],
-        );
+        let w = walk(&params(9.2), &urls, &rows, &[held(&a, 1.0), held(&a, 0.5)]);
         assert_eq!(w.plain, vec![0, 0]);
         let pick = w.pick.unwrap();
         assert_eq!((pick.index, pick.worker, pick.rank), (1, 1, 1));
@@ -692,7 +622,6 @@ mod tests {
             starved: true,
         };
         let w = walk(
-            GlobalQueueMode::Hrrn,
             &params(9.2),
             &urls,
             &no_room,
@@ -704,13 +633,7 @@ mod tests {
         assert!(pick.starved);
         // With room it still goes first, released for the room.
         let room = [row(0, 0, 9542)];
-        let w = walk(
-            GlobalQueueMode::Hrrn,
-            &params(9.2),
-            &urls,
-            &room,
-            &[held(&small, 0.1), starved],
-        );
+        let w = walk(&params(9.2), &urls, &room, &[held(&small, 0.1), starved]);
         let pick = w.pick.unwrap();
         assert_eq!(
             (pick.index, pick.release, pick.starved),
@@ -724,13 +647,7 @@ mod tests {
         let a = cold(5000, 1);
         let mut stale = row(90_000, 90_000, 9542);
         stale.fresh = false;
-        let w = walk(
-            GlobalQueueMode::Hrrn,
-            &params(9.2),
-            &urls,
-            &[stale],
-            &[held(&a, 0.0)],
-        );
+        let w = walk(&params(9.2), &urls, &[stale], &[held(&a, 0.0)]);
         assert_eq!(w.pick.unwrap().release, GwqRelease::StaleView);
         assert_eq!(row(0, 9541, 9542).room(), Some(GwqRelease::Room));
         assert_eq!(row(0, 9542, 9542).room(), None);
@@ -746,13 +663,7 @@ mod tests {
         let urls = urls(4);
         let idle = vec![row(0, 0, 16_293); 4];
         let a = cold(5000, 4);
-        let plain = walk(
-            GlobalQueueMode::Hrrn,
-            &params(4.6),
-            &urls,
-            &idle,
-            &[held(&a, 0.0)],
-        );
+        let plain = walk(&params(4.6), &urls, &idle, &[held(&a, 0.0)]);
         assert_eq!(
             plain.pick.unwrap().worker,
             0,
@@ -903,25 +814,13 @@ mod tests {
         };
         let rows = vec![mk(2.0), mk(0.4), mk(1.0)];
         let terms = cold(20_000, 3);
-        let w = walk(
-            GlobalQueueMode::Hrrn,
-            &params(18.4),
-            &urls(3),
-            &rows,
-            &[held(&terms, 0.5)],
-        );
+        let w = walk(&params(18.4), &urls(3), &rows, &[held(&terms, 0.5)]);
         let pick = w.pick.expect("P1 has room");
         assert_eq!(pick.worker, 1);
         assert_eq!(pick.release, GwqRelease::Predicted);
         // Every drain above the lead: nothing is released.
         let rows = vec![mk(2.0), mk(1.3), mk(1.5)];
-        let w = walk(
-            GlobalQueueMode::Hrrn,
-            &params(18.4),
-            &urls(3),
-            &rows,
-            &[held(&terms, 0.5)],
-        );
+        let w = walk(&params(18.4), &urls(3), &rows, &[held(&terms, 0.5)]);
         assert!(w.pick.is_none());
     }
 }

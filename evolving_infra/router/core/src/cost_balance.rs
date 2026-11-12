@@ -1,102 +1,65 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fixed per-request prefill work, held until the owning P request terminates.
-//! The original policy balances N×U cost; the optional locality policy retains
-//! a cache owner until a detour saves enough pending uncached-token work.
+//! The ledger of the placement cost function: the uncached prefill work of
+//! each request reserved on its P, held until the P request terminates.
 //!
-//! The uncached mode replaces estimates with per-RID remaining work reported
-//! after engine chunk completion. Missing RIDs never imply completed work.
-//! D first byte and timers never retire an entry, with one exception below.
-//! A complete P HTTP response (including an error response) is terminal. A
-//! transport error is not proof of engine termination: the caller must mark it
-//! unknown, which retains its cost and stops further admission. The reservation
-//! must move into the detached P task, independently of the client/D lifetime.
+//! Each entry starts with the request's uncached tokens on its P and takes
+//! the per-RID remaining work that the P's progress poll reports after each
+//! chunk. Missing RIDs never imply completed work. A complete P HTTP response
+//! (including an error response) is terminal. A transport error is not proof
+//! of engine termination: the caller marks the entry unknown, which keeps its
+//! work. The reservation moves into the detached P task, independently of the
+//! client/D lifetime. An ended entry leaves the ledger [`RETIRE_AFTER_S`]
+//! seconds after it ended; the snapshot keeps its status count.
 //!
-//! The exception: a book made with an unknown expiry
-//! ([`CostBook::new_uncached_with_policy`], `--symmetric-pd-unknown-expire-secs`)
-//! moves an unknown entry to `expired` when its P has answered without its
-//! RID for that time: an applied progress reply of its P was sent at least
-//! the expiry after the entry's last evidence (the later of the moment it
-//! became unknown and the send time of the last poll whose reply listed it).
-//! A P without applied replies (dead, partitioned, polls timing out) keeps
-//! its unknown entries. Expiry is terminal and releases the entry's work once,
-//! as a finish does (trace event `expired`, reason
-//! `unknown_expired_no_engine_progress`). An SGLang P aborts a prefill when
-//! the router's connection closes, and its progress lists only RIDs whose
-//! first chunk has launched; a request still in its queue and a dropped one
-//! look alike, and the expiry bounds that error. A reply that lists the RID
-//! of an expired entry again measures the error: the first such reply per
-//! entry writes the event `expired_rid_listed_again` (the snapshot counts
-//! these entries); the ledger does not take the work back. The check runs
-//! when a progress reply of the entry's P is applied and at each
-//! [`CostBook::snapshot`], only while unknown entries exist.
+//! The unknown expiry (`--symmetric-pd-unknown-expire-secs`) moves an unknown
+//! entry to `expired` when its P has answered without its RID for that time:
+//! an applied progress reply of its P was sent at least the expiry after the
+//! entry's last evidence (the later of the moment it became unknown and the
+//! send time of the last poll whose reply listed it). A P without applied
+//! replies (dead, partitioned, polls timing out) keeps its unknown entries.
+//! Expiry is terminal and releases the entry's work once, as a finish does
+//! (trace event `expired`, reason `unknown_expired_no_engine_progress`). An
+//! SGLang P aborts a prefill when the router's connection closes, and its
+//! progress lists only RIDs whose first chunk has launched; a request still
+//! in its queue and a dropped one look alike, and the expiry bounds that
+//! error. A reply that lists the RID of an expired entry again measures the
+//! error: the first such reply per entry writes the event
+//! `expired_rid_listed_again` (the snapshot counts these entries); the ledger
+//! does not take the work back. The check runs when a progress reply of the
+//! entry's P is applied and at each [`CostBook::snapshot`], only while unknown
+//! entries exist.
 //!
-//! The TRADE placement (`--co-schedule-trade`) uses the same uncached ledger
-//! but selects argmin of backlog + own uncached + unhidden pull time + copy
-//! price (see [`crate::scheduler::trade::trade_cost`]). Its backlog is
-//! the full ledger by default; `--trade-exclude-unlaunched` leaves
-//! out work the engine has not yet acknowledged in a progress snapshot. The
-//! engine lists a RID only after its first prefill chunk launches, so
-//! "unacknowledged" covers transit, the bootstrap queue and the waiting queue.
+//! The placement selects argmin of backlog + own uncached + unhidden pull
+//! time + copy price (see [`crate::scheduler::trade::trade_cost`]). The
+//! backlog is the P's pending uncached work on this ledger.
 //!
-//! With `--trade-hol-weight` above 0 the TRADE cost also has the
-//! head-of-line (HOL) term ([`crate::scheduler::trade::trade_hol_tokens`]).
-//! Its arrival rate a_w comes from this book: each TRADE decision prunes the
-//! placement record ([`crate::scheduler::trade::TradeArrivals`]) to the
-//! rate window, reads a_w of every candidate, and records its own placement
-//! when it commits the reservation. All of this is under the same lock, so
-//! concurrent decisions see each other. A later rollback or failure does not
-//! remove a record.
+//! With `--trade-copy-lambda auto` or `--trade-rate-tokens-per-s auto` this
+//! book also keeps the measurements of
+//! [`crate::scheduler::trade::TradeAutoState`], created at the first auto
+//! decision. Only the entries that an auto decision reserved feed it. The P of
+//! such an entry has one more in-flight request from its dispatch until its
+//! prefill ends: the first progress snapshot that shows 0 remaining work for
+//! its RID (credited with its computed tokens), the P response
+//! (`prefill_response_success` credits too; any other reason does not), a
+//! transport error or a drop after dispatch (unknown, no credit). A rollback
+//! before dispatch releases only its session. Each end is applied once, so no
+//! path leaks an in-flight request. The computed tokens are the larger of the
+//! reserved uncached estimate and the largest remaining work that a snapshot
+//! showed. Each decision resolves lambda and R from these measurements
+//! ([`crate::scheduler::trade::TradeParams::resolved`]) and then prices the
+//! candidates with them; the trace event `trade_auto_p_empty` records each
+//! busy period that ends, and the one-second snapshot has `trade_auto`.
 //!
-//! With `--trade-copy-lambda auto` or
-//! `--trade-rate-tokens-per-s auto` this book also keeps the
-//! measurements of [`crate::scheduler::trade::TradeAutoState`], created
-//! at the first auto decision. Only the entries that an auto decision
-//! reserved feed it. The P of such an entry has one more in-flight request
-//! from its dispatch until its prefill ends: the first progress snapshot
-//! that shows 0 remaining work for its RID (credited with its computed
-//! tokens), the P response (`prefill_response_success` credits too; any
-//! other reason does not), a transport error or a drop after dispatch
-//! (unknown, no credit). A rollback before dispatch releases only its
-//! session. Each end is applied once, so no path leaks an in-flight request.
-//! The computed tokens are the larger of the reserved uncached estimate and
-//! the largest remaining work that a snapshot showed. Each decision resolves
-//! lambda and R from these measurements
-//! ([`crate::scheduler::trade::TradeParams::resolved`]) and then
-//! prices the candidates with them; the trace event `trade_auto_p_empty`
-//! records each busy period that ends, and the one-second snapshot has
-//! `trade_auto`.
-//!
-//! `--trade-cost-trace-async` moves the trace write and
-//! flush to a background thread ([`CostBook::enable_async_trace`]).
-
-//!
-//! With `--symmetric-pd-loads-host-room` ([`CostBook::enable_host_room`]) the book
-//! keeps the latest `host_room` section of each P's progress reply (the
-//! engine's host pool by retention class; [`CostBook::note_host_room`]) and
-//! writes it, with its age, into the one-second snapshot and every TRADE
-//! decision (`host_room_by_p`). No decision reads it. Without the flag
-//! neither key is written.
-//!
-//! With `--trade-pull-price phi` ([`CostBook::enable_host_room_phi`])
-//! the book also keeps phi of each P from the evicted counters of its
-//! host_room sections ([`crate::scheduler::trade::TradePhiState`]), and
-//! each TRADE decision prices the pull of candidate P at
-//! max(min, lambda_q x phi_P) (lambda_q = the copy price auto before the
-//! clamp; min = the auto clamp minimum; a P without host_room data uses
-//! phi_P = 1). Only pulled tokens are priced: a pull discount, not a price of
-//! every landing. The decision rows, the decision and the snapshot then carry
-//! the phi keys; with `lambda` (the default) nothing changes.
-//!
-//! With `--trade-wait e3` each candidate's wait and service come
-//! from the E3 forecast ([`crate::trade_e3`]). The fits, the target tokens
-//! and the parsed snapshot are prepared before this lock
-//! ([`crate::trade_e3::TradeE3Context`]); the forecast runs under it,
-//! because its queue holds the router's own rows of that P that the
-//! snapshot does not show (active entries, and entries that finished after
-//! the snapshot time, decided after it). The selection is the prediction
-//! gate ([`crate::scheduler::trade::select_trade_e3`]).
+//! With `--trade-wait e3` each candidate's wait and service come from the E3
+//! forecast ([`crate::trade_e3`]). The fits, the target tokens and the parsed
+//! snapshot are prepared before this lock
+//! ([`crate::trade_e3::TradeE3Context`]); the forecast runs under it, because
+//! its queue holds the router's own rows of that P that the snapshot does not
+//! show (active entries, and entries that finished after the snapshot time,
+//! decided after it). The selection is the prediction gate
+//! ([`crate::scheduler::trade::select_trade_e3`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -255,7 +218,6 @@ fn e3_row_value(q: &E3Probe, cost: &crate::scheduler::trade::TradeCost) -> Value
         "wait_fallback_reason": q.fallback,
         "wait_s": cost.wait_s,
         "service_s": cost.service_s,
-        "dup_tokens": cost.dup_tokens,
         "view_age_s": q.view_age_s,
         "view_key": q.view_key,
         "e3_pred_s": out.and_then(|o| o.pred_s),
@@ -352,7 +314,6 @@ fn e3_decision_value<'a>(
         .collect();
     json!({
         "e3_gate_m": params.gate_m,
-        "e3_gate_gmin_s": params.gate_gmin_s,
         "e3_bound_level": cfg.map(|c| c.level.as_str()),
         "e3_bound_mode": cfg.map(|c| c.mode.as_str()),
         "e3_bound_sha256": cfg.map(|c| c.bound_sha256.as_str()),
@@ -378,25 +339,6 @@ fn e3_decision_value<'a>(
             "session_gap_s": prep.and_then(|p| p.session_gap_s),
         },
     })
-}
-
-#[derive(Clone, Copy)]
-enum Placement {
-    CostSpread,
-    LocalityMargin(u64),
-    UncachedThreshold(u64, u64),
-    Trade(crate::scheduler::trade::TradeParams),
-}
-
-impl Placement {
-    fn label(self) -> &'static str {
-        match self {
-            Self::CostSpread => "cost_spread",
-            Self::LocalityMargin(_) => "locality_margin",
-            Self::UncachedThreshold(..) => "uncached_threshold",
-            Self::Trade(_) => "trade",
-        }
-    }
 }
 
 /// The caller applies the actual pull-hint gate before constructing a candidate.
@@ -453,7 +395,6 @@ struct Entry {
     gpu_hit: Option<u64>,
     expected_hit: u64,
     uncached_tokens: u64,
-    restore_tokens: u64,
     seen_engine_progress: bool,
     /// Its RID appeared in an engine progress snapshot of its worker after
     /// dispatch, that is, its first prefill chunk has launched. Until then
@@ -519,7 +460,6 @@ impl Entry {
             "gpu_hit": self.gpu_hit,
             "expected_hit": self.expected_hit,
             "uncached_tokens": self.uncached_tokens,
-            "restore_tokens": self.restore_tokens,
             "seen_engine_progress": self.seen_engine_progress,
             "initial_uncached_tokens": self.input_tokens - self.expected_hit,
             "cost": self.cost.to_string(),
@@ -538,7 +478,6 @@ impl Entry {
 struct WorkerCost {
     cost: u128,
     pending_uncached_tokens: u128,
-    pending_restore_tokens: u128,
     /// The part of `pending_uncached_tokens` held by active entries that no
     /// engine progress snapshot has reported yet (routed, first prefill chunk
     /// not launched: transit, bootstrap queue or engine waiting queue).
@@ -556,9 +495,6 @@ struct State {
     /// TRADE `wait = e3`: decisions per fallback reason where a P used the
     /// ledger terms (cumulative; P x decision counts).
     trade_wait_fallbacks: BTreeMap<String, u64>,
-    /// TRADE HOL term (`hol_weight > 0` only): the placement times per P
-    /// that give the arrival rate a_w.
-    trade_arrivals: crate::scheduler::trade::TradeArrivals,
     /// TRADE auto (copy price or rate `auto` only): the router's
     /// measurements, created at the first auto decision.
     trade_auto: Option<crate::scheduler::trade::TradeAutoState>,
@@ -574,9 +510,6 @@ struct State {
     expired_by_rid: BTreeMap<String, (u64, u64, String)>,
     /// The unknown expiry: expired entries whose RID a reply listed again.
     expired_listed_again: u64,
-    /// `--symmetric-pd-loads-host-room` only (None: off): the latest `host_room`
-    /// section per P.
-    host_room: Option<HostRoomBook>,
     /// `--symmetric-pd-gwq-auto` only (None: off): T_react per P.
     gwq_lead: Option<GwqLeadBook>,
     /// `--symmetric-pd-trace-session-moves` only (None: off).
@@ -592,7 +525,8 @@ struct State {
     workers: BTreeMap<String, WorkerCost>,
     // Last admission's health snapshot; not a claim of continuous health.
     healthy_candidates: Vec<String>,
-    trace: Option<TraceSink>,
+    /// The JSONL trace, written and flushed under the cost-book lock.
+    trace: Option<BufWriter<File>>,
     io_failure: Option<String>,
     /// Ended entries in the order they ended (end time, ID); each leaves
     /// `entries` [`RETIRE_AFTER_S`] after it ended ([`CostBook::retire_ended`]).
@@ -601,229 +535,6 @@ struct State {
     retired_counts: BTreeMap<String, BTreeMap<&'static str, u64>>,
     /// Entries that left `entries`.
     retired_entries: u64,
-}
-
-/// Where the cost trace rows go: written and flushed under the cost-book
-/// lock (default), or handed in order to a background writer thread
-/// (`--trade-cost-trace-async`, [`CostBook::enable_async_trace`]).
-enum TraceSink {
-    Sync(BufWriter<File>),
-    Async(AsyncTrace),
-}
-
-/// A message to the background trace writer.
-enum TraceMsg {
-    /// One event, complete (sequence, schema and times set under the lock).
-    Row(Value),
-    /// Write and flush every row sent before, then answer.
-    Sync(std::sync::mpsc::SyncSender<()>),
-}
-
-/// At most this many rows wait for the background writer; a full queue
-/// blocks the next event (under the lock), as a slow synchronous write
-/// would, so no row is dropped.
-const ASYNC_TRACE_QUEUE: usize = 16_384;
-/// The background writer flushes at least once per this many rows.
-const ASYNC_TRACE_BATCH: usize = 4_096;
-
-/// The background trace writer (`--trade-cost-trace-async`). The
-/// cost book sets each event's fields under its lock and sends it over a
-/// bounded channel (FIFO, so the file keeps the sequence order); the thread
-/// serializes the rows, writes every row waiting in the channel and flushes
-/// once per batch, off the decision path. The bytes of each row are those
-/// of the synchronous writer. A write error is kept in `failure`: the next
-/// event or admission check sees it and admission stops, as with a
-/// synchronous error, but a row emitted before that is acknowledged
-/// although it may be lost (for example the dispatch row of a request that
-/// is then sent). Dropping the cost book drains and flushes the queue.
-struct AsyncTrace {
-    tx: Option<std::sync::mpsc::SyncSender<TraceMsg>>,
-    failure: Arc<Mutex<Option<String>>>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl AsyncTrace {
-    fn start(file: File) -> io::Result<Self> {
-        let (tx, rx) = std::sync::mpsc::sync_channel(ASYNC_TRACE_QUEUE);
-        let failure = Arc::new(Mutex::new(None));
-        let slot = Arc::clone(&failure);
-        let handle = std::thread::Builder::new()
-            .name("cost-trace-writer".into())
-            .spawn(move || trace_writer(file, rx, slot))?;
-        Ok(Self {
-            tx: Some(tx),
-            failure,
-            handle: Some(handle),
-        })
-    }
-
-    /// The writer's error, if it stopped.
-    fn failed(&self) -> Option<String> {
-        self.failure.lock().clone()
-    }
-
-    fn send(&self, message: TraceMsg) -> io::Result<()> {
-        if let Some(reason) = self.failed() {
-            return Err(io::Error::other(reason));
-        }
-        let tx = self
-            .tx
-            .as_ref()
-            .ok_or_else(|| io::Error::other("cost trace writer closed"))?;
-        tx.send(message).map_err(|_| {
-            io::Error::other(
-                self.failed()
-                    .unwrap_or_else(|| "cost trace writer stopped".into()),
-            )
-        })
-    }
-
-    /// Drain, flush and stop the writer.
-    fn close(&mut self) {
-        drop(self.tx.take());
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-/// The background writer loop: block for a row, write it and every row
-/// already waiting (up to [`ASYNC_TRACE_BATCH`]), flush, answer the sync
-/// requests of that batch. Ends when the cost book drops the sender (after
-/// writing everything received) or at the first write error.
-fn trace_writer(
-    file: File,
-    rx: std::sync::mpsc::Receiver<TraceMsg>,
-    failure: Arc<Mutex<Option<String>>>,
-) {
-    let mut out = BufWriter::with_capacity(1 << 20, file);
-    let mut acks = Vec::new();
-    while let Ok(first) = rx.recv() {
-        let mut next = Some(first);
-        let mut written = 0;
-        let mut result = Ok(());
-        while let Some(message) = next.take() {
-            match message {
-                TraceMsg::Row(event) => {
-                    result = serde_json::to_writer(&mut out, &event)
-                        .map_err(io::Error::other)
-                        .and_then(|()| out.write_all(b"\n"));
-                }
-                TraceMsg::Sync(ack) => acks.push(ack),
-            }
-            if result.is_err() {
-                break;
-            }
-            written += 1;
-            if written < ASYNC_TRACE_BATCH {
-                next = rx.try_recv().ok();
-            }
-        }
-        if let Err(error) = result.and_then(|()| out.flush()) {
-            let reason = error.to_string();
-            tracing::error!(target: "cost_balance", error = %reason,
-                "async cost trace writer failed; further admission is disabled");
-            // The waiting sync requests see the closed answer channel.
-            *failure.lock() = Some(reason);
-            return;
-        }
-        for ack in acks.drain(..) {
-            let _ = ack.send(());
-        }
-    }
-}
-
-/// The latest engine `host_room` section of each P (`--symmetric-pd-loads-host-room`).
-#[derive(Debug, Default)]
-struct HostRoomBook {
-    /// P URL -> (the section, the send time of the poll that returned it).
-    latest: BTreeMap<String, (serde_json::Map<String, Value>, Instant)>,
-    /// P URLs whose engine rejected `include=...,host_room` (an engine
-    /// without the section); polled without it until a later probe.
-    rejected: BTreeSet<String>,
-    /// Replies whose `host_room` was not a JSON object (ignored).
-    invalid: u64,
-    /// P URL -> progress replies that accepted the include but had no
-    /// section (an engine without session retention or without a host
-    /// pool).
-    missing: BTreeMap<String, u64>,
-    /// `--trade-pull-price phi` only: phi of each P.
-    phi: Option<PhiBook>,
-}
-
-/// phi of each P (`--trade-pull-price phi`), from the evicted
-/// counters of its host_room sections.
-#[derive(Debug)]
-struct PhiBook {
-    /// tau (s) of the EWMA: the copy price auto tau.
-    tau_s: f64,
-    states: BTreeMap<String, crate::scheduler::trade::TradePhiState>,
-    /// Sections without the two evicted counters (not observed).
-    invalid: u64,
-    /// The priced candidate rows of the decisions (cumulative), those whose
-    /// price the floor raised (lambda_q x phi_P < min), those with price 0,
-    /// and the decisions whose chosen P had a floored price.
-    rows: u64,
-    rows_floored: u64,
-    rows_zero: u64,
-    decisions: u64,
-    chosen_floored: u64,
-}
-
-impl PhiBook {
-    /// The snapshot row of one P: phi now, its source and the EWMA state.
-    fn row(&self, url: &str, now: Instant) -> Value {
-        let state = self.states.get(url);
-        let view = state.and_then(|s| s.view(now, self.tau_s));
-        json!({
-            "phi_hat": view.map(|v| v.phi),
-            "source": view.map_or("no_host_room", |v| v.source),
-            "rate_class0": view.map(|v| v.rate_class0),
-            "rate_class1": view.map(|v| v.rate_class1),
-            "last_evict_age_s": view.and_then(|v| v.last_evict_age_s),
-            "sample_age_s": view.map(|v| v.sample_age_s),
-            "samples": state.map_or(0, |s| s.samples),
-            "resets": state.map_or(0, |s| s.resets),
-        })
-    }
-}
-
-impl HostRoomBook {
-    /// `{url: section + age_s}` for `urls` (null for a P without a section),
-    /// the ages at `now`.
-    fn by_p<'a>(&self, urls: impl IntoIterator<Item = &'a String>, now: Instant) -> Value {
-        let rows: serde_json::Map<String, Value> = urls
-            .into_iter()
-            .map(|url| {
-                let row = self.latest.get(url).map_or(Value::Null, |(room, at)| {
-                    let mut row = room.clone();
-                    row.insert(
-                        "age_s".into(),
-                        json!(now.saturating_duration_since(*at).as_secs_f64()),
-                    );
-                    Value::Object(row)
-                });
-                (url.clone(), row)
-            })
-            .collect();
-        Value::Object(rows)
-    }
-}
-
-/// The copy price lambda_P of one candidate under the pull price phi and
-/// whether the floor raised it: max(floor, lambda_q x phi_P); a P without
-/// host_room data (`view` None) pays max(floor, lambda_q).
-fn phi_price(
-    base: f64,
-    floor: f64,
-    view: Option<crate::scheduler::trade::TradePhiView>,
-) -> (f64, bool) {
-    let raw = view.map_or(base, |v| base * v.phi);
-    if raw < floor {
-        (floor, true)
-    } else {
-        (raw, false)
-    }
 }
 
 /// `--symmetric-pd-gwq-auto`: T_react of each P, the time from a release of the
@@ -1042,11 +753,8 @@ impl GwqLeadRow {
 
 pub struct CostBook {
     started: Instant,
-    remaining_work: bool,
-    restore_cost_divisor: Option<u64>,
-    // Written as `policy` on every trace event when set; the co-schedule
-    // policy leaves it unset, so its trace keeps the old fields.
-    trace_policy: Option<&'static str>,
+    /// Written as `policy` on every trace event.
+    trace_policy: &'static str,
     /// The unknown expiry (see the module docs); None = never.
     unknown_expire: Option<std::time::Duration>,
     state: Mutex<State>,
@@ -1061,16 +769,6 @@ impl std::fmt::Debug for CostBook {
     }
 }
 
-impl Drop for CostBook {
-    /// An async trace: write and flush every queued row, then stop the
-    /// writer (a synchronous trace is flushed at each row already).
-    fn drop(&mut self) {
-        if let Some(TraceSink::Async(trace)) = self.state.get_mut().trace.as_mut() {
-            trace.close();
-        }
-    }
-}
-
 struct Evaluation {
     candidate: Candidate,
     cost: u128,
@@ -1080,8 +778,6 @@ struct Evaluation {
     active_requests: u64,
     pending_uncached_before: u128,
     pending_uncached_after: u128,
-    restore_tokens: u64,
-    pending_restore_before: u128,
 }
 
 impl Evaluation {
@@ -1099,8 +795,6 @@ impl Evaluation {
             "active_requests_before": self.active_requests,
             "pending_uncached_before": self.pending_uncached_before.to_string(),
             "pending_uncached_after": self.pending_uncached_after.to_string(),
-            "request_restore_tokens": self.restore_tokens,
-            "pending_restore_before": self.pending_restore_before.to_string(),
         })
     }
 }
@@ -1119,22 +813,10 @@ type TradeAutoParts = (
     )>,
 );
 
-/// Pull price phi of one decision ([`CostBook::phi_prices`]): the base
-/// lambda_q, its source, tau, the floor min, and phi of each P (pool order).
-type PhiPrices = (
-    f64,
-    &'static str,
-    f64,
-    f64,
-    Vec<Option<crate::scheduler::trade::TradePhiView>>,
-);
-
 /// The request-independent part of one TRADE decision
 /// ([`CostBook::trade_ctx`]).
 struct TradeDecisionCtx {
     decided_at: Instant,
-    /// The HOL term is on (its record is pruned to the window).
-    hol: bool,
     /// The parameters of this decision (copy price and rate resolved).
     params: crate::scheduler::trade::TradeParams,
     /// Copy price or rate `auto` only.
@@ -1193,7 +875,6 @@ pub struct GwqHeld<'a> {
 /// The pool and the settings of one global-waiting-queue step.
 #[derive(Debug, Clone, Copy)]
 pub struct GwqStepArgs<'a> {
-    pub mode: crate::global_queue::GlobalQueueMode,
     /// The P workers (pool order).
     pub urls: &'a [String],
     /// The depth of each P in tokens (same order; with `auto` the lead rule
@@ -1307,56 +988,23 @@ pub struct GwqRowStat {
 }
 
 impl CostBook {
-    /// Creates a fresh trace; existing paths are never appended or truncated.
-    pub fn new(trace_path: Option<&Path>) -> io::Result<Arc<Self>> {
-        Self::create(trace_path, false, None, None, None)
-    }
-
-    pub fn new_uncached(trace_path: Option<&Path>) -> io::Result<Arc<Self>> {
-        Self::create(trace_path, true, None, None, None)
-    }
-
-    /// Same ledger as [`Self::new_uncached`]; every trace event also carries
-    /// `"policy": policy`, so a reader can tell which router policy wrote it.
-    /// `unknown_expire`: an unknown entry expires after this long without
-    /// engine progress (see the module docs); None keeps it until a terminal
-    /// result, as the other constructors do.
-    pub fn new_uncached_with_policy(
+    /// A new ledger. `trace_path`: a new JSONL trace (an existing path is
+    /// never appended or truncated); every trace event carries
+    /// `"policy": policy`. `unknown_expire`: an unknown entry expires after
+    /// this long without engine progress (see the module docs); None keeps it
+    /// until a terminal result.
+    pub fn new(
         trace_path: Option<&Path>,
         policy: &'static str,
-        unknown_expire: Option<std::time::Duration>,
-    ) -> io::Result<Arc<Self>> {
-        Self::create(trace_path, true, None, Some(policy), unknown_expire)
-    }
-
-    /// Charge D * remaining uncached tokens + outstanding restore tokens.
-    /// D is a measured relative cost, not a dispatch threshold or admission cap.
-    pub fn new_restore_aware(trace_path: Option<&Path>, divisor: u64) -> io::Result<Arc<Self>> {
-        if divisor == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "restore divisor must be positive",
-            ));
-        }
-        Self::create(trace_path, true, Some(divisor), None, None)
-    }
-
-    fn create(
-        trace_path: Option<&Path>,
-        remaining_work: bool,
-        restore_cost_divisor: Option<u64>,
-        trace_policy: Option<&'static str>,
         unknown_expire: Option<std::time::Duration>,
     ) -> io::Result<Arc<Self>> {
         let trace = trace_path
             .map(|path| OpenOptions::new().write(true).create_new(true).open(path))
             .transpose()?
-            .map(|file| TraceSink::Sync(BufWriter::new(file)));
+            .map(BufWriter::new);
         Ok(Arc::new(Self {
             started: Instant::now(),
-            remaining_work,
-            restore_cost_divisor,
-            trace_policy,
+            trace_policy: policy,
             unknown_expire,
             on_terminal: std::sync::OnceLock::new(),
             state: Mutex::new(State {
@@ -1367,13 +1015,11 @@ impl CostBook {
                 used_rids: BTreeSet::new(),
                 progress: BTreeMap::new(),
                 trade_wait_fallbacks: BTreeMap::new(),
-                trade_arrivals: Default::default(),
                 trade_auto: None,
                 unknown: BTreeSet::new(),
                 prefill_reader_gone: 0,
                 expired_by_rid: BTreeMap::new(),
                 expired_listed_again: 0,
-                host_room: None,
                 gwq_lead: None,
                 session_moves: None,
                 recent_finished: VecDeque::new(),
@@ -1388,78 +1034,6 @@ impl CostBook {
                 retired_entries: 0,
             }),
         }))
-    }
-
-    fn remaining_cost(&self, uncached: u64, restore: u64) -> u128 {
-        u128::from(uncached) * u128::from(self.restore_cost_divisor.unwrap_or(1))
-            + u128::from(restore)
-    }
-
-    fn cost_unit(&self) -> &'static str {
-        if self.restore_cost_divisor.is_some() {
-            "weighted_uncached_and_restore_tokens"
-        } else if self.remaining_work {
-            "uncached_tokens"
-        } else {
-            "token_squared"
-        }
-    }
-
-    /// Select and reserve atomically against the currently routable candidates.
-    pub fn reserve(
-        self: &Arc<Self>,
-        input_tokens: u64,
-        rid: Option<String>,
-        candidates: Vec<Candidate>,
-    ) -> Result<(Candidate, Reservation), String> {
-        self.reserve_placement(input_tokens, rid, candidates, Placement::CostSpread)
-    }
-
-    /// Keep the highest-hit owner (GPU residency breaks total-hit ties),
-    /// unless another worker saves more pending uncached tokens than margin.
-    /// This shares the atomic, P-owned lifecycle with the original cost mode.
-    /// Tokens measure outstanding work, not predicted service milliseconds.
-    pub fn reserve_locality(
-        self: &Arc<Self>,
-        input_tokens: u64,
-        rid: Option<String>,
-        candidates: Vec<Candidate>,
-        margin_tokens: u64,
-    ) -> Result<(Candidate, Reservation), String> {
-        self.reserve_placement(
-            input_tokens,
-            rid,
-            candidates,
-            Placement::LocalityMargin(margin_tokens),
-        )
-    }
-
-    /// The threshold applies to existing owner work, excluding this arrival.
-    /// It never limits admission: even an entirely busy pool dispatches now.
-    pub fn reserve_uncached(
-        self: &Arc<Self>,
-        input_tokens: u64,
-        rid: Option<String>,
-        candidates: Vec<Candidate>,
-        owner_threshold: u64,
-    ) -> Result<(Candidate, Reservation), String> {
-        self.reserve_uncached_with_margin(input_tokens, rid, candidates, owner_threshold, 0)
-    }
-
-    pub fn reserve_uncached_with_margin(
-        self: &Arc<Self>,
-        input_tokens: u64,
-        rid: Option<String>,
-        candidates: Vec<Candidate>,
-        owner_threshold: u64,
-        detour_margin: u64,
-    ) -> Result<(Candidate, Reservation), String> {
-        self.reserve_placement(
-            input_tokens,
-            rid,
-            candidates,
-            Placement::UncachedThreshold(owner_threshold, detour_margin),
-        )
     }
 
     /// TRADE placement on the uncached ledger: argmin over candidates of
@@ -1508,7 +1082,7 @@ impl CostBook {
             input_tokens,
             rid,
             candidates,
-            Placement::Trade(params),
+            params,
             session.map(crate::scheduler::trade::trade_session_hash),
             ReserveExtras {
                 gwq_note,
@@ -1575,100 +1149,6 @@ impl CostBook {
         }
     }
 
-    /// `--symmetric-pd-loads-host-room`: keep each P's latest `host_room` section
-    /// and trace it (snapshot and TRADE decisions, key `host_room_by_p`).
-    pub fn enable_host_room(&self) {
-        let mut state = self.state.lock();
-        if state.host_room.is_none() {
-            state.host_room = Some(HostRoomBook::default());
-        }
-    }
-
-    /// `--trade-pull-price phi`: also keep phi of each P from
-    /// the evicted counters of its host_room sections, with the EWMA time
-    /// constant `tau_s` (the copy price auto tau). Enables the host_room
-    /// book; the TRADE decisions of a `phi` placement read it.
-    pub fn enable_host_room_phi(&self, tau_s: f64) {
-        let mut state = self.state.lock();
-        let book = state.host_room.get_or_insert_with(HostRoomBook::default);
-        if book.phi.is_none() {
-            book.phi = Some(PhiBook {
-                tau_s,
-                states: BTreeMap::new(),
-                invalid: 0,
-                rows: 0,
-                rows_floored: 0,
-                rows_zero: 0,
-                decisions: 0,
-                chosen_floored: 0,
-            });
-        }
-    }
-
-    /// The `host_room` section of `worker_url`'s progress reply to the poll
-    /// sent at `sent_at`. An older reply than the kept one, a value that is
-    /// not a JSON object, or a book without [`Self::enable_host_room`]
-    /// changes nothing (the invalid value is counted). A section clears the
-    /// P's rejected mark.
-    pub fn note_host_room(&self, worker_url: &str, room: Value, sent_at: Instant) {
-        let mut state = self.state.lock();
-        let Some(book) = state.host_room.as_mut() else {
-            return;
-        };
-        let Value::Object(room) = room else {
-            book.invalid += 1;
-            return;
-        };
-        book.rejected.remove(worker_url);
-        if book
-            .latest
-            .get(worker_url)
-            .is_some_and(|(_, at)| *at >= sent_at)
-        {
-            return;
-        }
-        if let Some(phi) = book.phi.as_mut() {
-            // The cumulative evicted tokens per class (engine counters).
-            let counter = |key: &str| room.get(key).and_then(Value::as_u64);
-            let class0 = counter("evicted_class0_tokens");
-            let class1 = counter("evicted_class1_tokens");
-            match (class0, class1) {
-                (Some(class0), Some(class1)) => {
-                    let tau_s = phi.tau_s;
-                    phi.states
-                        .entry(worker_url.to_string())
-                        .or_default()
-                        .observe(sent_at, class0, class1, tau_s);
-                }
-                _ => phi.invalid += 1,
-            }
-        }
-        book.latest.insert(worker_url.to_string(), (room, sent_at));
-    }
-
-    /// The engine of `worker_url` accepted `include=...,host_room` but sent
-    /// no section (no session retention or no host pool). Returns true for
-    /// the first such reply of that P (the caller logs it).
-    pub fn note_host_room_missing(&self, worker_url: &str) -> bool {
-        let mut state = self.state.lock();
-        let Some(book) = state.host_room.as_mut() else {
-            return false;
-        };
-        let count = book.missing.entry(worker_url.to_string()).or_default();
-        *count += 1;
-        *count == 1
-    }
-
-    /// The engine of `worker_url` rejected `include=...,host_room`. Returns
-    /// true for the first rejection of that P (the caller logs it).
-    pub fn note_host_room_rejected(&self, worker_url: &str) -> bool {
-        self.state
-            .lock()
-            .host_room
-            .as_mut()
-            .is_some_and(|book| book.rejected.insert(worker_url.to_string()))
-    }
-
     /// The client ended `session` (`POST /kv_sessions/end`): it leaves
     /// N_active of the copy price `auto` at once. Returns whether the auto
     /// state counted it (false without auto decisions).
@@ -1681,53 +1161,12 @@ impl CostBook {
             .is_some_and(|auto| auto.session_end(key))
     }
 
-    /// `--trade-cost-trace-async`: from now on the trace rows go to a
-    /// background writer thread (see [`AsyncTrace`]): the events keep their
-    /// order and bytes, but the write and flush leave the cost-book lock.
-    /// Called before serving (the cost function does it at construction).
-    /// Nothing changes without a trace or when it is already async.
-    pub fn enable_async_trace(&self) -> io::Result<()> {
-        let mut state = self.state.lock();
-        if !matches!(state.trace, Some(TraceSink::Sync(_))) {
-            return Ok(());
-        }
-        let Some(TraceSink::Sync(writer)) = state.trace.take() else {
-            unreachable!("checked above");
-        };
-        let started = writer
-            .into_inner()
-            .map_err(|e| e.into_error())
-            .and_then(AsyncTrace::start);
-        match started {
-            Ok(trace) => {
-                state.trace = Some(TraceSink::Async(trace));
-                Ok(())
-            }
-            Err(error) => {
-                state.io_failure = Some(error.to_string());
-                Err(error)
-            }
-        }
-    }
-
-    /// Every trace row emitted so far is written and flushed (an async
-    /// trace waits for its writer; tests and the offline replay).
+    /// Every trace row emitted so far is written and flushed.
     pub fn sync_trace(&self) -> io::Result<()> {
-        let answer = {
-            let mut state = self.state.lock();
-            match state.trace.as_mut() {
-                None => return Ok(()),
-                Some(TraceSink::Sync(writer)) => return writer.flush(),
-                Some(TraceSink::Async(trace)) => {
-                    let (ack, answer) = std::sync::mpsc::sync_channel(1);
-                    trace.send(TraceMsg::Sync(ack))?;
-                    answer
-                }
-            }
-        };
-        answer
-            .recv()
-            .map_err(|_| io::Error::other("cost trace writer failed before the sync"))
+        match self.state.lock().trace.as_mut() {
+            None => Ok(()),
+            Some(writer) => writer.flush(),
+        }
     }
 
     /// [`Self::reserve_trade`] with the inputs of `--trade-wait
@@ -1787,7 +1226,7 @@ impl CostBook {
             input_tokens,
             rid,
             candidates,
-            Placement::Trade(params),
+            params,
             session.map(crate::scheduler::trade::trade_session_hash),
             ReserveExtras {
                 gwq_note,
@@ -1980,25 +1419,6 @@ impl CostBook {
         probe
     }
 
-    fn reserve_placement(
-        self: &Arc<Self>,
-        input_tokens: u64,
-        rid: Option<String>,
-        candidates: Vec<Candidate>,
-        placement: Placement,
-    ) -> Result<(Candidate, Reservation), String> {
-        self.reserve_placement_with_decision(
-            input_tokens,
-            rid,
-            candidates,
-            placement,
-            None,
-            ReserveExtras::default(),
-            None,
-        )
-        .map(|(candidate, reservation, _)| (candidate, reservation))
-    }
-
     /// `session`: the request's session key; used only by an auto TRADE
     /// decision (N_active) and the session-move record.
     #[allow(clippy::too_many_arguments)]
@@ -2007,12 +1427,12 @@ impl CostBook {
         input_tokens: u64,
         rid: Option<String>,
         candidates: Vec<Candidate>,
-        placement: Placement,
+        params: crate::scheduler::trade::TradeParams,
         session: Option<u64>,
         extras: ReserveExtras<'_>,
         e3: Option<&crate::trade_e3::TradeE3Context>,
     ) -> Result<(Candidate, Reservation, Option<Value>), String> {
-        let urls = self.validate_placement(input_tokens, &candidates, placement)?;
+        let urls = self.validate_placement(input_tokens, &candidates)?;
         let mut state = self.state.lock();
         self.reserve_locked(
             &mut state,
@@ -2020,7 +1440,7 @@ impl CostBook {
             rid,
             candidates,
             urls,
-            placement,
+            params,
             session,
             e3,
             None,
@@ -2033,19 +1453,7 @@ impl CostBook {
         &self,
         input_tokens: u64,
         candidates: &[Candidate],
-        placement: Placement,
     ) -> Result<BTreeSet<String>, String> {
-        if self.remaining_work
-            != matches!(
-                placement,
-                Placement::UncachedThreshold(..) | Placement::Trade(_)
-            )
-        {
-            return Err("cost_balance: cannot mix cost units in one ledger".into());
-        }
-        if matches!(placement, Placement::Trade(_)) && self.restore_cost_divisor.is_some() {
-            return Err("cost_balance: trade placement does not use a restore divisor".into());
-        }
         if candidates.is_empty() {
             return Err("cost_balance: no healthy candidates".into());
         }
@@ -2081,14 +1489,14 @@ impl CostBook {
         rid: Option<String>,
         candidates: Vec<Candidate>,
         urls: BTreeSet<String>,
-        placement: Placement,
+        configured: crate::scheduler::trade::TradeParams,
         session: Option<u64>,
         e3: Option<&crate::trade_e3::TradeE3Context>,
         gwq: Option<GwqReserve>,
         extras: ReserveExtras<'_>,
     ) -> Result<(Candidate, Reservation, Option<Value>), String> {
         self.check_admission(state)?;
-        if self.remaining_work {
+        {
             let rid = rid
                 .as_deref()
                 .filter(|r| !r.is_empty())
@@ -2112,20 +1520,8 @@ impl CostBook {
             candidate.local_hit = candidate.local_hit.min(input_tokens);
             candidate.gpu_hit = candidate.gpu_hit.map(|hit| hit.min(candidate.local_hit));
             candidate.expected_hit = candidate.expected_hit.min(input_tokens);
-            // Unknown GPU residency is conservatively charged as restore work.
-            let restore_tokens = if self.restore_cost_divisor.is_some() {
-                candidate
-                    .expected_hit
-                    .saturating_sub(candidate.gpu_hit.unwrap_or(0))
-            } else {
-                0
-            };
             let uncached = input_tokens - candidate.expected_hit;
-            let cost = if self.remaining_work {
-                self.remaining_cost(uncached, restore_tokens)
-            } else {
-                u128::from(input_tokens) * u128::from(uncached)
-            };
+            let cost = u128::from(uncached);
             let worker = &state.workers[&candidate.worker_url];
             let after = worker.cost.checked_add(cost).ok_or_else(|| {
                 format!("cost_balance: cost overflow on {}", candidate.worker_url)
@@ -2160,33 +1556,29 @@ impl CostBook {
                 active_requests: worker.active_requests,
                 pending_uncached_before: worker.pending_uncached_tokens,
                 pending_uncached_after,
-                restore_tokens,
-                pending_restore_before: worker.pending_restore_tokens,
             });
         }
-        let mut trade_decision = None;
+        let trade_decision: Option<Value>;
         let mut trade_fallback_counts = None;
-        // HOL on: the time of this TRADE placement, recorded at the commit.
-        let mut trade_arrival_at: Option<Instant> = None;
         // Copy price or rate auto: the time of this decision; the entry then
         // feeds the auto state and its session starts at the commit.
         let mut trade_auto_at: Option<Instant> = None;
         // Global waiting queue release: the `gwq` object of the event.
-        let mut gwq_record: Option<Value> = None;
+        let gwq_record: Option<Value>;
         // --symmetric-pd-gwq-auto: the P of a tie-broken release, the next
         // rotation start once the reservation is recorded.
         let mut gwq_tie_commit: Option<String> = None;
         // The decision time of a TRADE placement (the entry's decided_at).
-        let mut trade_decided_at: Option<Instant> = None;
+        let trade_decided_at: Option<Instant>;
         // wait = e3: the chosen P's (prefix, host) estimate, for the entry.
         let mut trade_e3_estimate: Option<(i64, i64)> = None;
         // wait = e3 with the state push: the new cumulative source and
         // fallback counts, committed with the decision.
         let mut e3_push_counts: Option<(BTreeMap<String, u64>, BTreeMap<String, u64>)> = None;
-        let locality_decision = if let Placement::Trade(configured) = placement {
-            use crate::scheduler::trade::{TradeLambdaMode, TradePullPrice, TradeWait};
-            // The request-independent part of the decision (HOL prune, copy
-            // price and rate auto; [`Self::trade_ctx`]). A GWQ release brings
+        {
+            use crate::scheduler::trade::{TradeLambdaMode, TradeWait};
+            // The request-independent part of the decision (copy price and
+            // rate auto; [`Self::trade_ctx`]). A GWQ release brings
             // the context of its step, which ran under this same lock.
             let (ctx, mut gwq, tie_break) = match gwq {
                 Some(GwqReserve {
@@ -2209,30 +1601,13 @@ impl CostBook {
             };
             let TradeDecisionCtx {
                 decided_at,
-                hol,
                 params,
                 auto,
             } = ctx;
             trade_decided_at = Some(decided_at);
-            if hol {
-                // Each candidate's a_w is read below, and this placement is
-                // recorded at the commit.
-                trade_arrival_at = Some(decided_at);
-            }
             if auto.is_some() {
                 trade_auto_at = Some(decided_at);
             }
-            // Pull price phi: the base lambda_q (the auto price before the
-            // clamp; the fallback price while it falls back) and phi of each
-            // candidate (None: no host_room data, the P pays max(min, lambda_q)).
-            let phi = {
-                let urls: Vec<&str> = evaluations
-                    .iter()
-                    .map(|e| e.candidate.worker_url.as_str())
-                    .collect();
-                Self::phi_prices(state, configured, auto.as_ref(), &params, &urls, decided_at)
-            };
-            let select_params = params;
             let e3_on = params.wait == TradeWait::E3;
             let mut e3_ids: Vec<u64> = Vec::new();
             if e3_on {
@@ -2262,10 +1637,7 @@ impl CostBook {
             let inputs: Vec<_> = evaluations
                 .iter()
                 .zip(&e3_probes)
-                .enumerate()
-                .map(|(i, (e, e3_probe))| {
-                    let unacknowledged =
-                        state.workers[&e.candidate.worker_url].pending_unacknowledged_tokens;
+                .map(|(e, e3_probe)| {
                     // A GWQ release adds the held work ahead of it (0 otherwise).
                     let note = gwq
                         .as_ref()
@@ -2273,46 +1645,22 @@ impl CostBook {
                     let virtual_tokens = note.map_or(0, |note| note.virtual_tokens);
                     // `room = predicted`: the walk priced this P's wait as
                     // R x drain; the reservation uses the same term.
-                    let ledger = if params.exclude_unlaunched {
-                        e.pending_uncached_before.saturating_sub(unacknowledged)
-                    } else {
-                        e.pending_uncached_before
-                    };
                     crate::scheduler::trade::TradeInput {
                         worker: &e.candidate.worker_url,
                         backlog: note
                             .and_then(|note| note.backlog_override)
-                            .unwrap_or(ledger)
+                            .unwrap_or(e.pending_uncached_before)
                             .saturating_add(virtual_tokens),
                         local_hit: e.candidate.local_hit,
                         uncached: input_tokens - e.candidate.expected_hit,
                         pulled: e.candidate.expected_hit - e.candidate.local_hit,
                         // The terms of the E3 forecast (None for the ledger).
                         wait: e3_probe.as_ref().and_then(|q| q.terms()),
-                        // wait = e3: the E3 arrival-rate fit of the P when
-                        // it exists, else the placement rate.
-                        arrival_rate_per_s: if hol {
-                            e3_probe
-                                .as_ref()
-                                .and_then(E3Probe::arrival_rate)
-                                .unwrap_or_else(|| {
-                                    state.trade_arrivals.rate_per_s(
-                                        &e.candidate.worker_url,
-                                        decided_at,
-                                        params.hol_rate_window_s,
-                                    )
-                                })
-                        } else {
-                            0.0
-                        },
-                        copy_lambda: phi
-                            .as_ref()
-                            .map(|(base, _, _, floor, views)| phi_price(*base, *floor, views[i]).0),
                         bound_s: e3_probe.as_ref().and_then(E3Probe::usable_bound),
                     }
                 })
                 .collect();
-            let mut selected = crate::scheduler::trade::select_trade(&select_params, &inputs);
+            let mut selected = crate::scheduler::trade::select_trade(&params, &inputs);
             if let (true, Some((notes, record))) = (tie_break, gwq.as_mut()) {
                 // --symmetric-pd-gwq-auto: the walk's tie-break, with the same
                 // room, outstanding requests and rotation of this step.
@@ -2354,7 +1702,7 @@ impl CostBook {
                     record["p_release"] = json!(chosen);
                 }
             }
-            let mut rows: Vec<Value> = inputs
+            let rows: Vec<Value> = inputs
                 .iter()
                 .zip(&selected.costs)
                 .zip(&evaluations)
@@ -2382,27 +1730,15 @@ impl CostBook {
                         {
                             row.extend(extra);
                         }
-                        if hol {
-                            row["arrival_rate_source"] = json!(if q.arrival_rate().is_some() {
-                                "e3"
-                            } else {
-                                "placements"
-                            });
-                        }
                     } else if !params.is_original() {
                         let extra = json!({
                             "wait_source": "ledger",
                             "wait_s": cost.wait_s,
                             "service_s": cost.service_s,
-                            "dup_tokens": cost.dup_tokens,
                         });
                         if let (Value::Object(row), Value::Object(extra)) = (&mut row, extra) {
                             row.extend(extra);
                         }
-                    }
-                    if hol {
-                        row["arrival_rate_per_s"] = json!(cost.arrival_rate_per_s);
-                        row["hol_tokens"] = json!(cost.hol_tokens);
                     }
                     if let Some(note) = gwq.as_ref().and_then(|(notes, _)| notes.get(input.worker))
                     {
@@ -2429,19 +1765,6 @@ impl CostBook {
                     row
                 })
                 .collect();
-            if let Some((base, _, _, floor, views)) = &phi {
-                // Pull price phi: each candidate's own copy price and phi.
-                for ((row, input), view) in rows.iter_mut().zip(&inputs).zip(views) {
-                    let (_, floored) = phi_price(*base, *floor, *view);
-                    row["copy_lambda"] = json!(input.copy_lambda);
-                    row["phi_floored"] = json!(floored);
-                    row["phi_hat"] = json!(view.map(|v| v.phi));
-                    row["phi_source"] = json!(view.map_or("no_host_room", |v| v.source));
-                    row["phi_rate_class0"] = json!(view.map(|v| v.rate_class0));
-                    row["phi_rate_class1"] = json!(view.map(|v| v.rate_class1));
-                    row["phi_last_evict_age_s"] = json!(view.and_then(|v| v.last_evict_age_s));
-                }
-            }
             let mut decision = json!({
                 "owner": evaluations[selected.owner].candidate.worker_url,
                 "has_cached_owner": selected.has_owner,
@@ -2453,9 +1776,6 @@ impl CostBook {
                 "pull_fixed_ms": params.pull_fixed_ms,
                 "pull_ms_per_100k": params.pull_ms_per_100k,
                 "copy_lambda": params.copy_lambda,
-                "exclude_unlaunched": params.exclude_unlaunched,
-                // Old key, kept for analysis scripts: true = full ledger.
-                "count_inflight": !params.exclude_unlaunched,
                 "candidates": rows,
             });
             if !params.is_original() {
@@ -2468,8 +1788,6 @@ impl CostBook {
                 }
                 let extra = json!({
                     "wait": params.wait.as_str(),
-                    "dup_charge": params.dup_charge.as_str(),
-                    "margin_noise_k": params.margin_noise_k,
                     "eft_max_view_age_s": params.eft_max_view_age_s,
                     "best": evaluations[selected.best].candidate.worker_url,
                     "margin_s": selected.margin_s,
@@ -2477,7 +1795,6 @@ impl CostBook {
                     "margin_protected": selected.margin_protected,
                     "wait_s": selected.costs[selected.chosen].wait_s,
                     "service_s": selected.costs[selected.chosen].service_s,
-                    "dup_tokens": selected.costs[selected.chosen].dup_tokens,
                     "wait_fallbacks": fallbacks,
                     "wait_fallback_counts": counts,
                 });
@@ -2486,29 +1803,22 @@ impl CostBook {
                 }
                 trade_fallback_counts = Some(counts);
             }
-            if hol {
-                decision["hol_weight"] = json!(params.hol_weight);
-                decision["hol_rate_window_s"] = json!(params.hol_rate_window_s);
-            }
             // Copy price or rate auto: the measurements and how lambda and R
             // were set. `copy_lambda` and `rate_tokens_per_s` above are the
-            // values this decision used (with the pull price phi, the price of
-            // the chosen P; see below).
+            // values this decision used.
             if let Some((_, resolution, measured, _)) = &auto {
-                let (mu, lambda_min, lambda_max) = match configured.copy_lambda_mode {
-                    TradeLambdaMode::Auto { mu, min, max, .. } => (Some(mu), Some(min), Some(max)),
-                    TradeLambdaMode::Fixed => (None, None, None),
+                let (lambda_min, lambda_max) = match configured.copy_lambda_mode {
+                    TradeLambdaMode::Auto { min, max } => (Some(min), Some(max)),
+                    TradeLambdaMode::Fixed => (None, None),
                 };
                 let extra = json!({
                     "lambda_mode": resolution.lambda_mode,
                     "copy_lambda_used": resolution.copy_lambda_used,
                     "copy_lambda_fallback": configured.copy_lambda,
                     "lambda_raw": resolution.lambda_raw,
-                    "lambda_mu": mu,
                     "lambda_min": lambda_min,
                     "lambda_max": lambda_max,
                     "q": resolution.q,
-                    "q_mode": resolution.q_mode,
                     "busy": measured.busy,
                     "inflight_mean": measured.inflight,
                     "n_active": measured.n_active,
@@ -2527,39 +1837,6 @@ impl CostBook {
                 if let (Value::Object(decision), Value::Object(extra)) = (&mut decision, extra) {
                     decision.extend(extra);
                 }
-            }
-            if let Some((base, base_source, tau_s, floor, views)) = &phi {
-                // Pull price phi: the rows carry each candidate's copy price;
-                // copy_lambda and copy_lambda_used are the price of the chosen
-                // P, copy_lambda_auto the clamped auto lambda.
-                let chosen = phi_price(*base, *floor, views[selected.chosen]);
-                decision["copy_lambda"] = json!(chosen.0);
-                decision["copy_lambda_auto"] = json!(params.copy_lambda);
-                if decision.get("copy_lambda_used").is_some() {
-                    decision["copy_lambda_used"] = json!(chosen.0);
-                }
-                decision["pull_price"] = json!(TradePullPrice::Phi.as_str());
-                decision["phi_lambda_base"] = json!(base);
-                decision["phi_base_source"] = json!(base_source);
-                decision["phi_tau_s"] = json!(tau_s);
-                decision["phi_lambda_min"] = json!(floor);
-                decision["phi_floored"] = json!(chosen.1);
-                // S3: count floored and zero prices from the row prices.
-                if let Some(book) = state.host_room.as_mut().and_then(|b| b.phi.as_mut()) {
-                    book.decisions += 1;
-                    book.chosen_floored += u64::from(chosen.1);
-                    for (input, view) in inputs.iter().zip(views) {
-                        book.rows += 1;
-                        book.rows_floored += u64::from(phi_price(*base, *floor, *view).1);
-                        book.rows_zero += u64::from(input.copy_lambda == Some(0.0));
-                    }
-                }
-            }
-            if let Some(book) = &state.host_room {
-                // --symmetric-pd-loads-host-room: the latest engine host_room of
-                // every candidate (not a decision input).
-                let urls = evaluations.iter().map(|e| &e.candidate.worker_url);
-                decision["host_room_by_p"] = book.by_p(urls, decided_at);
             }
             if e3_on {
                 let chosen = e3_probes[selected.chosen].as_ref();
@@ -2618,114 +1895,7 @@ impl CostBook {
             evaluations.swap(0, selected.chosen);
             trade_decision = Some(decision);
             gwq_record = gwq.map(|(_, record)| record);
-            None
-        } else if let Placement::UncachedThreshold(threshold, margin) = placement {
-            let views: Vec<_> = evaluations
-                .iter()
-                .map(|e| crate::scheduler::trade::Evaluation {
-                    worker: &e.candidate.worker_url,
-                    local_hit: e.candidate.local_hit,
-                    gpu_hit: e.candidate.gpu_hit.unwrap_or(0),
-                    before: e.before,
-                    after: e.after,
-                    spread: e.spread,
-                    active_requests: e.active_requests,
-                    pending_uncached_before: e.pending_uncached_before,
-                })
-                .collect();
-            let selected = crate::scheduler::trade::select(
-                &views,
-                threshold,
-                self.remaining_cost(margin, 0),
-                self.restore_cost_divisor.is_some(),
-            );
-            let crate::scheduler::trade::Selection {
-                owner,
-                chosen,
-                has_owner,
-                keep_owner,
-                margin_protected,
-                saved_work,
-            } = selected;
-            let decision = json!({
-                "owner": evaluations[owner].candidate.worker_url,
-                "has_cached_owner": has_owner,
-                "owner_existing_uncached_tokens": evaluations[owner].pending_uncached_before.to_string(),
-                "owner_threshold_tokens": threshold,
-                "owner_below_threshold": keep_owner,
-                "detour_margin_tokens": margin,
-                "margin_protected": margin_protected,
-                "candidate_saved_work": saved_work.to_string(),
-                "detour": chosen != owner,
-            });
-            evaluations.swap(0, chosen);
-            Some(decision)
-        } else if let Placement::LocalityMargin(margin) = placement {
-            // min_by ordering: better cache first, then lower pending work.
-            let owner = evaluations
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| {
-                    b.candidate
-                        .local_hit
-                        .cmp(&a.candidate.local_hit)
-                        .then_with(|| {
-                            b.candidate
-                                .gpu_hit
-                                .unwrap_or(0)
-                                .cmp(&a.candidate.gpu_hit.unwrap_or(0))
-                        })
-                        .then_with(|| a.pending_uncached_before.cmp(&b.pending_uncached_before))
-                        .then_with(|| a.active_requests.cmp(&b.active_requests))
-                        .then_with(|| a.candidate.worker_url.cmp(&b.candidate.worker_url))
-                })
-                .expect("nonempty candidates")
-                .0;
-            let least_work = evaluations
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| {
-                    a.pending_uncached_after
-                        .cmp(&b.pending_uncached_after)
-                        .then_with(|| {
-                            b.candidate
-                                .gpu_hit
-                                .unwrap_or(0)
-                                .cmp(&a.candidate.gpu_hit.unwrap_or(0))
-                        })
-                        .then_with(|| b.candidate.local_hit.cmp(&a.candidate.local_hit))
-                        .then_with(|| a.active_requests.cmp(&b.active_requests))
-                        .then_with(|| a.candidate.worker_url.cmp(&b.candidate.worker_url))
-                })
-                .expect("nonempty candidates")
-                .0;
-            let saved = evaluations[owner]
-                .pending_uncached_after
-                .saturating_sub(evaluations[least_work].pending_uncached_after);
-            let detour = saved > u128::from(margin);
-            let decision = json!({
-                "owner": evaluations[owner].candidate.worker_url,
-                "least_work_worker": evaluations[least_work].candidate.worker_url,
-                "owner_score_tokens": evaluations[owner].pending_uncached_after.to_string(),
-                "least_work_score_tokens": evaluations[least_work].pending_uncached_after.to_string(),
-                "saved_work_tokens": saved.to_string(),
-                "margin_tokens": margin,
-                "detour": detour,
-            });
-            evaluations.swap(0, if detour { least_work } else { owner });
-            Some(decision)
-        } else {
-            evaluations.sort_by(|a, b| {
-                a.spread
-                    .cmp(&b.spread)
-                    .then_with(|| b.candidate.expected_hit.cmp(&a.candidate.expected_hit))
-                    .then_with(|| a.before.cmp(&b.before))
-                    .then_with(|| a.active_requests.cmp(&b.active_requests))
-                    .then_with(|| b.candidate.local_hit.cmp(&a.candidate.local_hit))
-                    .then_with(|| a.candidate.worker_url.cmp(&b.candidate.worker_url))
-            });
-            None
-        };
+        }
         // --symmetric-pd-trace-session-moves: the P of the session's last TRADE
         // decision and the hits of this one (the chosen P is first now).
         let session_move = match (&trade_decision, session, state.session_moves.as_ref()) {
@@ -2781,7 +1951,6 @@ impl CostBook {
             gpu_hit: winner.candidate.gpu_hit,
             expected_hit: winner.candidate.expected_hit,
             uncached_tokens: input_tokens - winner.candidate.expected_hit,
-            restore_tokens: winner.restore_tokens,
             seen_engine_progress: false,
             acknowledged: false,
             cost: winner.cost,
@@ -2815,8 +1984,7 @@ impl CostBook {
             "entry": entry.value(),
             "healthy_candidates": state.healthy_candidates,
             "candidate_scores": candidate_scores,
-            "selection_policy": if self.restore_cost_divisor.is_some() { "restore_aware_finish" } else { placement.label() },
-            "locality_decision": locality_decision,
+            "selection_policy": "trade",
         });
         if let Some(decision) = &trade_decision {
             event["trade_decision"] = decision.clone();
@@ -2847,23 +2015,17 @@ impl CostBook {
             .expect("candidate registered");
         worker.cost = winner.after;
         worker.pending_uncached_tokens = winner.pending_uncached_after;
-        worker.pending_restore_tokens += u128::from(winner.restore_tokens);
         worker.pending_unacknowledged_tokens += u128::from(entry.uncached_tokens);
         worker.active_requests += 1;
         state.next_id = next_id;
-        if let Some(at) = trade_arrival_at {
-            state.trade_arrivals.record(&entry.worker_url, at);
-        }
         if let (Some(at), Some(key)) = (trade_auto_at, entry.auto.session) {
             if let Some(auto) = state.trade_auto.as_mut() {
                 auto.session_started(key, at);
             }
         }
-        if self.remaining_work {
-            let rid = entry.rid.as_ref().expect("validated rid");
-            state.active_by_rid.insert(rid.clone(), id);
-            state.used_rids.insert(rid.clone());
-        }
+        let rid = entry.rid.as_ref().expect("validated rid");
+        state.active_by_rid.insert(rid.clone(), id);
+        state.used_rids.insert(rid.clone());
         if let (Some(changed), Some(key), Some(book)) =
             (p_changed, session, state.session_moves.as_mut())
         {
@@ -2889,19 +2051,6 @@ impl CostBook {
                 "cost_balance: trace failed; admission stopped: {reason}"
             ));
         }
-        if let Some(TraceSink::Async(trace)) = &state.trace {
-            if let Some(reason) = trace.failed() {
-                return Err(format!(
-                    "cost_balance: trace failed; admission stopped: {reason}"
-                ));
-            }
-        }
-        if !state.unknown.is_empty() && !self.remaining_work {
-            return Err(format!(
-                "cost_balance: {} unresolved reservations; admission stopped",
-                state.unknown.len()
-            ));
-        }
         Ok(())
     }
 
@@ -2916,22 +2065,16 @@ impl CostBook {
         event["sequence"] = json!(sequence);
         let timestamp = unix_ms();
         event["schema"] = json!("cost-balance.v1");
-        if let Some(policy) = self.trace_policy {
-            event["policy"] = json!(policy);
-        }
+        event["policy"] = json!(self.trace_policy);
         event["ts_unix_ms"] = json!(timestamp);
         event["ts_unix_s"] = json!(timestamp as f64 / 1000.0);
         event["elapsed_ms"] = json!(self.started.elapsed().as_millis() as u64);
-        event["cost_unit"] = json!(self.cost_unit());
-        event["restore_cost_divisor"] = json!(self.restore_cost_divisor);
+        event["cost_unit"] = json!("uncached_tokens");
         let result = match &mut state.trace {
-            Some(TraceSink::Sync(trace)) => serde_json::to_writer(&mut *trace, &event)
+            Some(trace) => serde_json::to_writer(&mut *trace, &event)
                 .map_err(io::Error::other)
                 .and_then(|()| trace.write_all(b"\n"))
                 .and_then(|()| trace.flush()),
-            // Off the lock's critical path: the writer thread serializes,
-            // writes and flushes.
-            Some(TraceSink::Async(trace)) => trace.send(TraceMsg::Row(event)),
             None => Ok(()),
         };
         if let Err(error) = result {
@@ -3020,25 +2163,22 @@ impl CostBook {
         }
         if !target.active() {
             entry.terminal_unix_ms = Some(now);
-            let (url, cost, uncached, restore, rid, acknowledged) = (
+            let (url, cost, uncached, rid, acknowledged) = (
                 entry.worker_url.clone(),
                 entry.cost,
                 entry.uncached_tokens,
-                entry.restore_tokens,
                 entry.rid.clone(),
                 entry.acknowledged,
             );
-            if self.remaining_work {
-                let rid = rid.as_ref().expect("validated rid");
-                state.active_by_rid.remove(rid);
-                // Never sent to an engine, so no engine snapshot can list it:
-                // a replan (e.g. the chosen worker began a role drain before
-                // the prepared plan was installed) may reuse the same rid.
-                if target == Status::RolledBack && old == Status::Reserved {
-                    state.used_rids.remove(rid);
-                    if let Some(entry) = state.entries.get_mut(&id) {
-                        entry.rid_released = true;
-                    }
+            let rid = rid.as_ref().expect("validated rid");
+            state.active_by_rid.remove(rid);
+            // Never sent to an engine, so no engine snapshot can list it:
+            // a replan (e.g. the chosen worker began a role drain before
+            // the prepared plan was installed) may reuse the same rid.
+            if target == Status::RolledBack && old == Status::Reserved {
+                state.used_rids.remove(rid);
+                if let Some(entry) = state.entries.get_mut(&id) {
+                    entry.rid_released = true;
                 }
             }
             let worker = state.workers.get_mut(&url).expect("entry worker exists");
@@ -3050,10 +2190,6 @@ impl CostBook {
                 .pending_uncached_tokens
                 .checked_sub(u128::from(uncached))
                 .expect("pending token ledger underflow");
-            worker.pending_restore_tokens = worker
-                .pending_restore_tokens
-                .checked_sub(u128::from(restore))
-                .expect("restore ledger underflow");
             if !acknowledged {
                 worker.pending_unacknowledged_tokens = worker
                     .pending_unacknowledged_tokens
@@ -3186,8 +2322,8 @@ impl CostBook {
         sent_at: Instant,
         received_at: Instant,
     ) -> Result<(), String> {
-        if !self.remaining_work || progress.epoch.is_empty() {
-            return Err("prefill progress requires uncached mode and an engine epoch".into());
+        if progress.epoch.is_empty() {
+            return Err("prefill progress requires an engine epoch".into());
         }
         let mut state = self.state.lock();
         if let Some(previous) = state.progress.get(worker_url) {
@@ -3230,32 +2366,20 @@ impl CostBook {
                 auto_seen.push((*id, *remaining));
             }
             // The first observation may correct an underestimated cache hit,
-            // even before the first chunk finishes. Only a later reduction
-            // proves a chunk retired; zero always means all work retired.
-            let restore = if *remaining == 0
-                || (entry.seen_engine_progress && *remaining < entry.uncached_tokens)
-            {
-                0
-            } else {
-                entry.restore_tokens
-            };
-            if *remaining != entry.uncached_tokens
-                || (self.restore_cost_divisor.is_some() && !entry.seen_engine_progress)
-            {
+            // even before the first chunk finishes.
+            if *remaining != entry.uncached_tokens {
                 updates.push((
                     *id,
                     entry.uncached_tokens,
                     *remaining,
-                    entry.restore_tokens,
-                    restore,
                     entry.cost,
-                    self.remaining_cost(*remaining, restore),
+                    u128::from(*remaining),
                 ));
             }
         }
         // Validate the entire update before emitting or mutating the ledger.
         let mut next_cost = state.workers.get(worker_url).map_or(0, |w| w.cost);
-        for (_, _, _, _, _, old_cost, cost) in &updates {
+        for (_, _, _, old_cost, cost) in &updates {
             next_cost = next_cost
                 .checked_sub(*old_cost)
                 .and_then(|v| v.checked_add(*cost))
@@ -3270,9 +2394,8 @@ impl CostBook {
                 "engine_sequence": progress.sequence,
                 "snapshot_truncated": progress.truncated,
                 "observed_rids": progress.remaining.len(),
-                "updates": updates.iter().map(|(id, old, new, old_restore, restore, old_cost, cost)| json!({
+                "updates": updates.iter().map(|(id, old, new, old_cost, cost)| json!({
                     "reservation_id": id, "remaining_before": old, "remaining_after": new,
-                    "restore_before": old_restore, "restore_after": restore,
                     "cost_before": old_cost.to_string(), "cost_after": cost.to_string(),
                 })).collect::<Vec<_>>(),
                 "engine_load": engine_load,
@@ -3346,22 +2469,16 @@ impl CostBook {
                 let _ = self.emit(&mut state, event);
             }
         }
-        for (id, old, remaining, old_restore, restore, old_cost, cost) in updates {
+        for (id, old, remaining, old_cost, cost) in updates {
             let worker = state.workers.get_mut(worker_url).expect("reserved worker");
             worker.pending_uncached_tokens = worker
                 .pending_uncached_tokens
                 .checked_sub(u128::from(old))
                 .expect("pending token ledger underflow")
                 + u128::from(remaining);
-            worker.pending_restore_tokens = worker
-                .pending_restore_tokens
-                .checked_sub(u128::from(old_restore))
-                .expect("restore ledger underflow")
-                + u128::from(restore);
             worker.cost = worker.cost - old_cost + cost;
             let entry = state.entries.get_mut(&id).expect("active entry");
             entry.uncached_tokens = remaining;
-            entry.restore_tokens = restore;
             entry.seen_engine_progress = true;
             entry.cost = cost;
         }
@@ -3453,7 +2570,6 @@ impl CostBook {
                     "worker_url": url,
                     "cost": worker.cost.to_string(),
                     "pending_uncached_tokens": worker.pending_uncached_tokens.to_string(),
-                    "pending_restore_tokens": worker.pending_restore_tokens.to_string(),
                     "active_requests": worker.active_requests,
                     "status_counts": counts,
                     "oldest_active_assigned_unix_ms": oldest_assigned_ms,
@@ -3474,8 +2590,7 @@ impl CostBook {
             "ts_unix_ms": timestamp,
             "ts_unix_s": timestamp as f64 / 1000.0,
             "elapsed_ms": self.started.elapsed().as_millis() as u64,
-            "cost_unit": self.cost_unit(),
-            "restore_cost_divisor": self.restore_cost_divisor,
+            "cost_unit": "uncached_tokens",
             "active_requests": active_requests,
             "unknown_requests": state.unknown.len(),
             "prefill_reader_gone": state.prefill_reader_gone,
@@ -3491,34 +2606,6 @@ impl CostBook {
             // Only with an unknown expiry, so other traces keep their fields.
             value["unknown_expire_s"] = json!(expire.as_secs_f64());
             value["expired_rid_listed_again"] = json!(state.expired_listed_again);
-        }
-        if let Some(book) = &state.host_room {
-            // --symmetric-pd-loads-host-room only: every P with a section, and the
-            // P whose engine rejected it.
-            value["host_room_by_p"] = book.by_p(book.latest.keys(), Instant::now());
-            value["host_room_rejected"] = json!(book.rejected);
-            value["host_room_invalid"] = json!(book.invalid);
-            value["host_room_missing"] = json!(book.missing);
-            if let Some(phi) = &book.phi {
-                // --trade-pull-price phi only: phi of every P with
-                // a section.
-                let now = Instant::now();
-                let rows: serde_json::Map<String, Value> = book
-                    .latest
-                    .keys()
-                    .map(|url| (url.clone(), phi.row(url, now)))
-                    .collect();
-                value["phi_by_p"] = Value::Object(rows);
-                value["phi_tau_s"] = json!(phi.tau_s);
-                value["phi_invalid"] = json!(phi.invalid);
-                value["phi_prices"] = json!({
-                    "decisions": phi.decisions,
-                    "chosen_floored": phi.chosen_floored,
-                    "rows": phi.rows,
-                    "rows_floored": phi.rows_floored,
-                    "rows_zero": phi.rows_zero,
-                });
-            }
         }
         if let Some(book) = &state.session_moves {
             // --symmetric-pd-trace-session-moves only: decisions with a session,
@@ -3568,72 +2655,17 @@ impl CostBook {
 
 /// The global waiting queue (`--co-schedule-global-queue`).
 impl CostBook {
-    /// Pull price phi (`--trade-pull-price phi`) of one decision
-    /// at `decided_at`: the base lambda_q (the copy price auto before the
-    /// clamp; the fallback price while it falls back), its source, tau, the
-    /// floor min of lambda_P (the auto clamp minimum), and phi of each P of
-    /// `urls` (None: no host_room data; that P pays max(min, lambda_q)). None
-    /// with the lambda price. A GWQ step and its release use the same time,
-    /// so the walk and the reservation see the same prices.
-    fn phi_prices(
-        state: &State,
-        configured: crate::scheduler::trade::TradeParams,
-        auto: Option<&TradeAutoParts>,
-        params: &crate::scheduler::trade::TradeParams,
-        urls: &[&str],
-        decided_at: Instant,
-    ) -> Option<PhiPrices> {
-        if configured.pull_price != crate::scheduler::trade::TradePullPrice::Phi {
-            return None;
-        }
-        let (base, base_source) = match auto.map(|a| &a.1) {
-            Some(resolution) => match resolution.lambda_raw {
-                Some(raw) => (raw, "q"),
-                None => (
-                    resolution.copy_lambda_used,
-                    resolution.fallback_reason.unwrap_or("fallback"),
-                ),
-            },
-            // The CLI requires the copy price auto with phi.
-            None => (params.copy_lambda, "fixed"),
-        };
-        // The floor of lambda_P: the auto clamp minimum
-        // (--trade-copy-lambda-min).
-        let floor = match configured.copy_lambda_mode {
-            crate::scheduler::trade::TradeLambdaMode::Auto { min, .. } => min,
-            crate::scheduler::trade::TradeLambdaMode::Fixed => 0.0,
-        };
-        let book = state.host_room.as_ref().and_then(|b| b.phi.as_ref());
-        let tau_s = book.map_or(configured.auto_tau_s, |b| b.tau_s);
-        let views = urls
-            .iter()
-            .map(|url| {
-                book.and_then(|b| b.states.get(*url))
-                    .and_then(|s| s.view(decided_at, tau_s))
-            })
-            .collect();
-        Some((base, base_source, tau_s, floor, views))
-    }
-
     /// The request-independent part of one TRADE decision at `decided_at`,
-    /// under the lock: the HOL record pruned to its window (HOL on), and the
-    /// copy price and the rate resolved from the router's measurements over
-    /// the P of `urls` (`auto`; the auto state starts at the first call).
-    /// Fixed modes resolve to the configured parameters bit for bit.
+    /// under the lock: the copy price and the rate resolved from the router's
+    /// measurements over the P of `urls` (`auto`; the auto state starts at
+    /// the first call). Fixed modes resolve to the configured parameters bit
+    /// for bit.
     fn trade_ctx(
         state: &mut State,
         configured: crate::scheduler::trade::TradeParams,
         urls: &[&str],
         decided_at: Instant,
     ) -> TradeDecisionCtx {
-        let hol = configured.hol_weight > 0.0;
-        if hol {
-            // The lazy prune of the arrival record; each candidate's a_w is
-            // read after it.
-            state
-                .trade_arrivals
-                .prune(decided_at, configured.hol_rate_window_s);
-        }
         // Copy price or rate auto: the measurements at this decision give
         // lambda and R of this decision ([`TradeParams::resolved`]); the
         // rest of the parameters is unchanged. Fixed modes skip this, so
@@ -3659,7 +2691,6 @@ impl CostBook {
         let params = auto.as_ref().map_or(configured, |a| a.0);
         TradeDecisionCtx {
             decided_at,
-            hol,
             params,
             auto,
         }
@@ -3765,15 +2796,6 @@ impl CostBook {
             })
             .collect();
         drop(unknown);
-        // Pull price phi: the walk prices each P as the reservation does.
-        let phi = Self::phi_prices(
-            &state,
-            configured,
-            ctx.auto.as_ref(),
-            &ctx.params,
-            &urls,
-            args.now,
-        );
         // `room = predicted`: the E3 drain of each P (a cold one-chunk
         // probe on the newest pushed or polled state, plus the router's own
         // rows that the engine does not show yet), as a `wait = e3` decision
@@ -3818,14 +2840,7 @@ impl CostBook {
             .zip(&drains)
             .enumerate()
             .map(|(i, (((url, depth), (queued, _, _)), (drain_s, _)))| {
-                let worker = &state.workers[url];
-                let ledger = if ctx.params.exclude_unlaunched {
-                    worker
-                        .pending_uncached_tokens
-                        .saturating_sub(worker.pending_unacknowledged_tokens)
-                } else {
-                    worker.pending_uncached_tokens
-                };
+                let ledger = state.workers[url].pending_uncached_tokens;
                 GwqRow {
                     // The forecast may make a P look emptier than the
                     // ledger, never fuller (work-conserving floor).
@@ -3842,16 +2857,6 @@ impl CostBook {
                     fresh: state.progress.get(url).is_some_and(|cursor| {
                         args.now.saturating_duration_since(cursor.sent_at) <= args.stale_after
                     }),
-                    arrival_rate_per_s: if ctx.hol {
-                        state
-                            .trade_arrivals
-                            .rate_per_s(url, args.now, ctx.params.hol_rate_window_s)
-                    } else {
-                        0.0
-                    },
-                    copy_lambda: phi
-                        .as_ref()
-                        .map(|(base, _, _, floor, views)| phi_price(*base, *floor, views[i]).0),
                 }
             })
             .collect();
@@ -3917,7 +2922,7 @@ impl CostBook {
         let late_bound = p_arrival != p_release;
         let row = &rows[pick.worker];
         let mut record = json!({
-            "mode": args.mode.as_str(),
+            "mode": "hrrn",
             "held": !h.arrival_pass,
             "hold_s": args.now.saturating_duration_since(h.arrived).as_secs_f64(),
             "arrived_unix_ms": h.arrived_unix_ms,
@@ -3972,7 +2977,6 @@ impl CostBook {
                 "lead_s": lead.lead_s,
                 "wait_s": row.queued as f64 / rate,
                 "lead_sample": lead_sample,
-                "shadow": Self::gwq_shadow(&state, h, p_release, args.now),
             });
             if let (Value::Object(record), Value::Object(extra)) = (&mut record, extra) {
                 record.extend(extra);
@@ -4008,7 +3012,6 @@ impl CostBook {
                 )
             })
             .collect();
-        let placement = Placement::Trade(configured);
         let reserve = GwqReserve {
             ctx,
             rows: notes,
@@ -4030,7 +3033,7 @@ impl CostBook {
                 (local - gpu, pulled)
             });
         let result = self
-            .validate_placement(h.input_tokens, &release_candidates, placement)
+            .validate_placement(h.input_tokens, &release_candidates)
             .and_then(|valid| {
                 self.reserve_locked(
                     &mut state,
@@ -4038,7 +3041,7 @@ impl CostBook {
                     h.rid.map(str::to_string),
                     release_candidates,
                     valid,
-                    placement,
+                    configured,
                     h.session,
                     None,
                     Some(reserve),
@@ -4080,44 +3083,6 @@ impl CostBook {
             plain: walked.plain,
             queue_tokens,
             release: Some((pick.index, result)),
-        })
-    }
-
-    /// The shadow counters of one `--symmetric-pd-gwq-auto` release of `h` to
-    /// `url` (no action): phi of the P, its dead (class 0) and free host
-    /// tokens, the tokens that the request inserts there (input minus the
-    /// P's own hit), and whether the working-set hold (ii) would hold it:
-    /// phi > 1/2 and the insert exceeds free + class 0. Null without
-    /// host_room data.
-    fn gwq_shadow(state: &State, h: GwqHeld<'_>, url: &str, now: Instant) -> Value {
-        let book = state.host_room.as_ref();
-        let view = book
-            .and_then(|b| b.phi.as_ref())
-            .and_then(|p| p.states.get(url).and_then(|s| s.view(now, p.tau_s)));
-        let section = book.and_then(|b| b.latest.get(url)).map(|(room, _)| room);
-        let field = |key: &str| section.and_then(|r| r.get(key)).and_then(Value::as_u64);
-        let (class0, free) = (field("class0_tokens"), field("free_tokens"));
-        let local = h
-            .candidates
-            .iter()
-            .find(|c| c.worker_url == url)
-            .map_or(0, |c| c.local_hit.min(h.input_tokens));
-        let insert = h.input_tokens - local;
-        let phi = view.map(|v| v.phi);
-        let would_hold = match (phi, class0, free) {
-            (Some(phi), Some(class0), Some(free)) => {
-                Some(phi > 0.5 && u128::from(insert) > u128::from(class0) + u128::from(free))
-            }
-            _ => None,
-        };
-        json!({
-            "phi": phi,
-            "phi_source": view.map_or("no_host_room", |v| v.source),
-            "class0_tokens": class0,
-            "free_tokens": free,
-            "insert_tokens": insert,
-            "phi_over_half": phi.map(|p| p > 0.5),
-            "ii_would_hold": would_hold,
         })
     }
 
@@ -4191,12 +3156,9 @@ impl CostBook {
         self.emit(&mut state, event)
     }
 
-    /// Why `rid` cannot be reserved (uncached mode: missing, empty or used),
-    /// with the same text as the reservation error; None when it can.
+    /// Why `rid` cannot be reserved (missing, empty or used), with the same
+    /// text as the reservation error; None when it can.
     pub fn rid_refusal(&self, rid: Option<&str>) -> Option<&'static str> {
-        if !self.remaining_work {
-            return None;
-        }
         match rid.filter(|r| !r.is_empty()) {
             None => Some("uncached balance requires a unique string rid"),
             Some(rid) if self.state.lock().used_rids.contains(rid) => {
@@ -4389,9 +3351,18 @@ mod tests {
     }
 
     fn uncached(book: &Arc<CostBook>, rid: &str, url: &str, tokens: u64) -> Reservation {
-        book.reserve_uncached(tokens, Some(rid.into()), vec![candidate(url, 0)], 12288)
-            .unwrap()
-            .1
+        res(book, rid, tokens, vec![candidate(url, 0)]).unwrap().1
+    }
+
+    /// A reservation with the default cost-function parameters.
+    fn res(
+        book: &Arc<CostBook>,
+        rid: &str,
+        tokens: u64,
+        candidates: Vec<Candidate>,
+    ) -> Result<(Candidate, Reservation), String> {
+        book.reserve_trade(tokens, Some(rid.into()), candidates, Default::default())
+            .map(|(candidate, reservation, _)| (candidate, reservation))
     }
 
     fn progress(sequence: u64, remaining: &[(&str, u64)]) -> PrefillProgress {
@@ -4406,10 +3377,9 @@ mod tests {
         }
     }
 
-    fn trade(lambda: f64, exclude_unlaunched: bool) -> crate::scheduler::trade::TradeParams {
+    fn trade(lambda: f64) -> crate::scheduler::trade::TradeParams {
         crate::scheduler::trade::TradeParams {
             copy_lambda: lambda,
-            exclude_unlaunched,
             ..Default::default()
         }
     }
@@ -4434,7 +3404,7 @@ mod tests {
     #[test]
     fn trade_moves_with_pull_at_lambda_zero_and_keeps_owner_at_large_lambda() {
         for (lambda, chosen, pulled) in [(0.0, "b", 100_000u64), (9.2, "a", 0)] {
-            let book = CostBook::new_uncached(None).unwrap();
+            let book = CostBook::new(None, "test", None).unwrap();
             let mut busy = uncached(&book, "busy", "a", 60_000);
             busy.mark_dispatched().unwrap();
             book.apply_progress(
@@ -4449,7 +3419,7 @@ mod tests {
                     110_000,
                     Some("req".into()),
                     vec![candidate("a", 100_000), pulling("b", 0, 100_000)],
-                    trade(lambda, false),
+                    trade(lambda),
                 )
                 .unwrap();
             assert_eq!(selected.worker_url, chosen, "lambda {lambda}");
@@ -4466,212 +3436,11 @@ mod tests {
         }
     }
 
-    /// Requests routed to a P but not yet in its progress snapshot (the engine
-    /// lists a RID only after its first chunk launches, so this includes the
-    /// engine waiting queue) count in the default backlog and are left out
-    /// only with exclude_unlaunched. Acknowledgement happens once per entry,
-    /// also when the reported remaining equals the estimate, and terminal
-    /// transitions keep the counter balanced.
-    #[test]
-    fn trade_backlog_counts_unlaunched_work_unless_excluded() {
-        let book = CostBook::new_uncached(None).unwrap();
-        let mut a = uncached(&book, "routed", "a", 30_000);
-        a.mark_dispatched().unwrap();
-        assert_eq!(unacknowledged(&book, "a"), 30_000);
-        let pick = |book: &Arc<CostBook>, rid: &str, exclude: bool| {
-            let (selected, r, decision) = book
-                .reserve_trade(
-                    20_000,
-                    Some(rid.into()),
-                    vec![candidate("a", 0), candidate("b", 0)],
-                    trade(9.2, exclude),
-                )
-                .unwrap();
-            drop(r); // rolls back: the next pick sees the same ledger
-            (selected.worker_url, decision)
-        };
-        // Default: the dispatched but unlaunched 30k counts and `b` wins.
-        let (worker, decision) = pick(&book, "q1", false);
-        assert_eq!(worker, "b");
-        assert_eq!(decision["candidates"][0]["backlog_tokens"], "30000");
-        assert_eq!(decision["candidates"][0]["unacknowledged_tokens"], "30000");
-        assert_eq!(decision["exclude_unlaunched"], false);
-        assert_eq!(decision["count_inflight"], true);
-        // Excluding unlaunched work, `a` looks idle: tie, smaller URL wins.
-        let (worker, decision) = pick(&book, "q2", true);
-        assert_eq!(worker, "a");
-        assert_eq!(decision["candidates"][0]["backlog_tokens"], "0");
-        assert_eq!(
-            unacknowledged(&book, "a"),
-            30_000,
-            "rollbacks keep the counter"
-        );
-        // The engine reports the RID unchanged: acknowledged, no work update.
-        book.apply_progress(
-            "a",
-            progress(1, &[("routed", 30_000)]),
-            json!({}),
-            Instant::now(),
-        )
-        .unwrap();
-        assert_eq!(unacknowledged(&book, "a"), 0);
-        assert_eq!(cost(&book, "a"), 30_000);
-        assert_eq!(pick(&book, "q3", false).0, "b");
-        assert_eq!(
-            pick(&book, "q3x", true).0,
-            "b",
-            "acknowledged work always counts"
-        );
-        a.finish("http_done").unwrap();
-        assert_eq!(unacknowledged(&book, "a"), 0);
-        assert_eq!(cost(&book, "a"), 0);
-        // A finished unacknowledged entry also leaves the counter.
-        let mut c = uncached(&book, "never_seen", "b", 5_000);
-        c.mark_dispatched().unwrap();
-        assert_eq!(unacknowledged(&book, "b"), 5_000);
-        c.finish("http_done").unwrap();
-        assert_eq!(unacknowledged(&book, "b"), 0);
-    }
-
-    #[test]
-    fn trade_is_uncached_only_and_records_its_policy() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("trade.jsonl");
-        let book = CostBook::new_uncached(Some(&path)).unwrap();
-        let (_, _r, _) = book
-            .reserve_trade(
-                1_000,
-                Some("r".into()),
-                vec![candidate("a", 0)],
-                trade(9.2, false),
-            )
-            .unwrap();
-        let line = std::fs::read_to_string(&path).unwrap();
-        let event: Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
-        assert_eq!(event["selection_policy"], "trade");
-        assert_eq!(event["trade_decision"]["copy_lambda"], 9.2);
-        assert!(event["locality_decision"].is_null());
-        // Without the global waiting queue there is no gwq key.
-        assert!(event.get("gwq").is_none());
-        assert!(event["trade_decision"]["candidates"][0]
-            .get("gwq_room")
-            .is_none());
-        let cost_book = CostBook::new(None).unwrap();
-        assert!(cost_book
-            .reserve_trade(
-                1_000,
-                Some("r".into()),
-                vec![candidate("a", 0)],
-                trade(9.2, false)
-            )
-            .is_err());
-        let restore = CostBook::new_restore_aware(None, 8).unwrap();
-        assert!(restore
-            .reserve_trade(
-                1_000,
-                Some("r".into()),
-                vec![candidate("a", 0)],
-                trade(9.2, false)
-            )
-            .is_err());
-        // The non-trade uncached event carries no trade field.
-        let path = tmp.path().join("plain.jsonl");
-        let plain = CostBook::new_uncached(Some(&path)).unwrap();
-        let _r = plain
-            .reserve_uncached(1_000, Some("r".into()), vec![candidate("a", 0)], 12288)
-            .unwrap();
-        let line = std::fs::read_to_string(&path).unwrap();
-        let event: Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
-        assert!(event.get("trade_decision").is_none());
-        assert_eq!(event["selection_policy"], "uncached_threshold");
-    }
-
-    /// HOL on (mu > 0): each TRADE placement is recorded per P when its
-    /// reservation commits, the next decision counts it in a_w, and the trace
-    /// has the HOL keys. A rollback keeps the record. With mu = 0 nothing is
-    /// recorded and the trace has no new key.
-    #[test]
-    fn trade_hol_records_placements_and_traces_its_terms() {
-        let hol = |mu: f64| crate::scheduler::trade::TradeParams {
-            hol_weight: mu,
-            ..trade(0.0, false)
-        };
-        let book = CostBook::new_uncached(None).unwrap();
-        // b holds 12,000 tokens from a placement outside TRADE (not recorded).
-        let _busy = uncached(&book, "busy", "b", 12_000);
-        let pick = |rid: &str, params: crate::scheduler::trade::TradeParams| {
-            book.reserve_trade(
-                10_000,
-                Some(rid.into()),
-                vec![candidate("a", 0), candidate("b", 0)],
-                params,
-            )
-            .unwrap()
-        };
-        let recorded = |url: &str| book.state.lock().trade_arrivals.recorded(url);
-        // No history: a_w = 0 and no HOL; a (10,000) beats b (22,000).
-        let (selected, r1, decision) = pick("r1", hol(10.0));
-        assert_eq!(selected.worker_url, "a");
-        assert_eq!(decision["hol_weight"], 10.0);
-        assert_eq!(decision["hol_rate_window_s"], 60.0);
-        assert_eq!(
-            decision["wait"], "ledger",
-            "mu > 0 adds the later-option keys"
-        );
-        for row in decision["candidates"].as_array().unwrap() {
-            assert_eq!(row["arrival_rate_per_s"], 0.0, "{row}");
-            assert_eq!(row["hol_tokens"], 0.0, "{row}");
-        }
-        assert_eq!((recorded("a"), recorded("b")), (1, 0));
-        // mu = 0: a (10,000 + 10,000) beats b (22,000); no record, no new key.
-        let (selected, r, decision) = pick("q0", hol(0.0));
-        assert_eq!(selected.worker_url, "a");
-        assert!(decision.get("hol_weight").is_none());
-        assert!(decision.get("hol_rate_window_s").is_none());
-        assert!(
-            decision.get("wait").is_none(),
-            "mu = 0 keeps the first-version trace"
-        );
-        assert!(decision["candidates"][0]
-            .get("arrival_rate_per_s")
-            .is_none());
-        assert!(decision["candidates"][0].get("hol_tokens").is_none());
-        drop(r);
-        assert_eq!((recorded("a"), recorded("b")), (1, 0));
-        // mu = 10: r1 gives a_a in (0, 1] (one placement / at least 1 s) and
-        // HOL(a) = 10 x a_a x 10,000 x (10,000 + 5,000) / 13,500, which moves
-        // the request to b (22,000) for any a_a above 0.02.
-        let (selected, r2, decision) = pick("r2", hol(10.0));
-        assert_eq!(selected.worker_url, "b");
-        let a = &decision["candidates"][0];
-        let rate = a["arrival_rate_per_s"].as_f64().unwrap();
-        assert!(rate > 0.0 && rate <= 1.0, "{rate}");
-        let hol_a = 10.0 * rate * 10_000.0 * 15_000.0 / 13_500.0;
-        assert!(
-            (a["hol_tokens"].as_f64().unwrap() - hol_a).abs() < 1e-6,
-            "{a}"
-        );
-        assert!(
-            (a["trade_cost"].as_f64().unwrap() - (20_000.0 + hol_a)).abs() < 1e-6,
-            "{a}"
-        );
-        let b = &decision["candidates"][1];
-        assert_eq!(b["arrival_rate_per_s"], 0.0);
-        assert_eq!(b["hol_tokens"], 0.0);
-        assert_eq!(b["trade_cost"], 22_000.0);
-        // The rollback of r2 keeps its record.
-        drop(r2);
-        assert_eq!((recorded("a"), recorded("b")), (1, 1));
-        drop(r1);
-    }
-
     fn auto_trade(fallback: f64) -> crate::scheduler::trade::TradeParams {
-        use crate::scheduler::trade::{TradeAutoQ, TradeLambdaMode, TradeParams};
+        use crate::scheduler::trade::{TradeLambdaMode, TradeParams};
         TradeParams {
             copy_lambda: fallback,
             copy_lambda_mode: TradeLambdaMode::Auto {
-                q: TradeAutoQ::Sat,
-                mu: 1.0,
                 min: 4.6,
                 max: 1000.0,
             },
@@ -4699,168 +3468,8 @@ mod tests {
     }
 
     #[test]
-    fn restore_cost_moves_only_when_work_saved_covers_the_new_restore() {
-        for (owner_load, peer_load, expected) in [
-            (20000, 19000, "owner"),
-            (20000, 0, "peer"),
-            (12288, 0, "owner"),
-        ] {
-            let book = CostBook::new_restore_aware(None, 8).unwrap();
-            let _owner = uncached(&book, "owner-load", "owner", owner_load);
-            let _peer = uncached(&book, "peer-load", "peer", peer_load);
-            // With a third heavily loaded node, minimum range can prefer the
-            // slower peer merely to raise the least loaded node's score.
-            let _third = uncached(&book, "third-load", "third", 100000);
-            let mut owner = candidate("owner", 65536);
-            owner.gpu_hit = Some(65536);
-            let mut peer = candidate("peer", 0);
-            peer.expected_hit = 65536;
-            peer.hint = Some(json!({"expected_hit_tokens":65536}));
-            let (chosen, _reservation) = book
-                .reserve_uncached(
-                    69633,
-                    Some("new".into()),
-                    vec![owner, peer, candidate("third", 0)],
-                    12288,
-                )
-                .unwrap();
-            assert_eq!(chosen.worker_url, expected);
-            assert!(!book.snapshot()["admission_blocked"].as_bool().unwrap());
-        }
-    }
-
-    #[test]
-    fn restore_progress_does_not_mistake_first_cache_correction_for_finished_copy() {
-        let book = CostBook::new_restore_aware(None, 8).unwrap();
-        let (_, mut request) = book
-            .reserve_uncached(100000, Some("r".into()), vec![candidate("p", 90000)], 12288)
-            .unwrap();
-        assert_eq!(cost(&book, "p"), 170000);
-        request.mark_dispatched().unwrap();
-        let sent = Instant::now();
-        for (sequence, remaining, expected_cost, expected_restore) in [
-            (1, 8000, 154000, 90000), // first actual prefix differs from prediction
-            (2, 8000, 154000, 90000), // launch/snapshot is not completion
-            (3, 7999, 63992, 0),      // later result retires a chunk
-            (4, 0, 0, 0),
-        ] {
-            book.apply_progress(
-                "p",
-                progress(sequence, &[("r", remaining)]),
-                json!({}),
-                sent + std::time::Duration::from_millis(sequence),
-            )
-            .unwrap();
-            assert_eq!(cost(&book, "p"), expected_cost);
-            assert_eq!(
-                book.state.lock().workers["p"].pending_restore_tokens,
-                expected_restore
-            );
-        }
-        request
-            .finish("P HTTP completed after native work")
-            .unwrap();
-        assert_eq!(cost(&book, "p"), 0);
-        assert_eq!(book.state.lock().workers["p"].active_requests, 0);
-    }
-
-    #[test]
-    fn restore_reservations_are_charged_before_progress_and_roll_back_exactly() {
-        let book = CostBook::new_restore_aware(None, 8).unwrap();
-        let (_, first) = book
-            .reserve_uncached(100000, Some("first".into()), vec![candidate("a", 90000)], 0)
-            .unwrap();
-        assert_eq!(book.state.lock().workers["a"].pending_restore_tokens, 90000);
-        let (next, second) = book
-            .reserve_uncached(
-                100000,
-                Some("second".into()),
-                vec![candidate("a", 90000), candidate("b", 90000)],
-                0,
-            )
-            .unwrap();
-        assert_eq!(next.worker_url, "b");
-        drop(first);
-        drop(second);
-        for worker in book.state.lock().workers.values() {
-            assert_eq!(worker.cost, 0);
-            assert_eq!(worker.pending_uncached_tokens, 0);
-            assert_eq!(worker.pending_restore_tokens, 0);
-        }
-        assert!(CostBook::new_restore_aware(None, 0).is_err());
-    }
-
-    #[test]
-    fn uncached_threshold_excludes_arrival_and_does_not_hold_a_busy_pool() {
-        for load in [12287, 12288, 12289, 50000] {
-            let book = CostBook::new_uncached(None).unwrap();
-            let _owner = uncached(&book, "busy-a", "a", load);
-            let _b = uncached(&book, "busy-b", "b", 15000);
-            let _c = uncached(&book, "busy-c", "c", 20000);
-            let mut peer = candidate("b", 0);
-            peer.expected_hit = 90000;
-            peer.hint = Some(json!({"expected_hit_tokens": 90000}));
-            let (selected, _request) = book
-                .reserve_uncached(
-                    100000,
-                    Some("new".into()),
-                    vec![candidate("a", 90000), peer, candidate("c", 0)],
-                    12288,
-                )
-                .unwrap();
-            // At 12289, A+10000 still produces the smallest spread; at 50000
-            // every P is above the threshold, but we immediately choose B.
-            assert_eq!(selected.worker_url, if load == 50000 { "b" } else { "a" });
-        }
-    }
-
-    #[test]
-    fn detour_requires_savings_after_restore_and_margin() {
-        for (owner_load, expected) in [(16000, "a"), (29000, "a"), (50000, "b")] {
-            let book = CostBook::new_restore_aware(None, 8).unwrap();
-            let _owner = uncached(&book, "owner-work", "a", owner_load);
-            let _peer = uncached(&book, "peer-work", "b", 10000);
-            let mut owner = candidate("a", 90000);
-            owner.gpu_hit = Some(90000);
-            let mut peer = candidate("b", 0);
-            peer.gpu_hit = Some(0);
-            peer.expected_hit = 90000;
-            peer.hint = Some(json!({"expected_hit_tokens": 90000}));
-            let (selected, _reservation) = book
-                .reserve_uncached_with_margin(
-                    100000,
-                    Some("arrival".into()),
-                    vec![owner, peer],
-                    16384,
-                    16384,
-                )
-                .unwrap();
-            assert_eq!(selected.worker_url, expected);
-        }
-    }
-
-    #[test]
-    fn uncached_threshold_protects_light_cache_owner_even_for_large_arrival() {
-        for load in [12288, 12289] {
-            let book = CostBook::new_uncached(None).unwrap();
-            let _busy = uncached(&book, "busy", "a", load);
-            let mut owner = candidate("a", 90000);
-            owner.gpu_hit = Some(90000);
-            let (selected, _) = book
-                .reserve_uncached(
-                    100000,
-                    Some("new".into()),
-                    vec![owner, candidate("b", 90000)],
-                    12288,
-                )
-                .unwrap();
-            assert_eq!(selected.worker_url, if load == 12288 { "a" } else { "b" });
-        }
-    }
-
-    #[test]
     fn uncached_progress_keeps_unseen_reservations_and_reconciles_actual_miss() {
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let mut a = uncached(&book, "a", "p", 20000);
         a.mark_dispatched().unwrap();
         let _queued = uncached(&book, "queued", "p", 6000);
@@ -4916,7 +3525,7 @@ mod tests {
 
     #[test]
     fn uncached_chunk_completion_zero_keeps_http_ownership_and_restart_keeps_unknown_work() {
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let mut a = uncached(&book, "a", "p", 10000);
         let mut b = uncached(&book, "b", "p", 6000);
         a.mark_dispatched().unwrap();
@@ -4942,14 +3551,12 @@ mod tests {
         a.finish("pd_transfer_complete").unwrap();
         b.finish("abort_confirmed").unwrap();
         assert_eq!(cost(&book, "p"), 0);
-        assert!(book
-            .reserve_uncached(1, Some("a".into()), vec![candidate("p", 0)], 12288)
-            .is_err());
+        assert!(res(&book, "a", 1, vec![candidate("p", 0)]).is_err());
     }
 
     #[test]
     fn concurrent_uncached_arrivals_reserve_before_the_next_load_refresh() {
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let barrier = Arc::new(Barrier::new(18));
         let threads: Vec<_> = (0..18)
             .map(|i| {
@@ -4957,11 +3564,11 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    book.reserve_uncached(
+                    res(
+                        &book,
+                        &format!("rid-{i}"),
                         4000,
-                        Some(format!("rid-{i}")),
                         vec![candidate("a", 0), candidate("b", 0), candidate("c", 0)],
-                        12288,
                     )
                     .unwrap()
                 })
@@ -4978,155 +3585,9 @@ mod tests {
     }
 
     #[test]
-    fn locality_retains_gpu_owner_until_savings_strictly_exceed_margin() {
-        for backlog in [32767, 32768, 32769] {
-            let book = CostBook::new(None).unwrap();
-            let (_, _busy) = book
-                .reserve(backlog, None, vec![candidate("owner", 0)])
-                .unwrap();
-            let mut owner = candidate("owner", 8000);
-            owner.gpu_hit = Some(8000);
-            // Both copies have the same total prefix; only owner has GPU KV.
-            let (chosen, request) = book
-                .reserve_locality(10000, None, vec![candidate("peer", 8000), owner], 32768)
-                .unwrap();
-            assert_eq!(
-                chosen.worker_url,
-                if backlog > 32768 { "peer" } else { "owner" }
-            );
-            assert_eq!(
-                book.state
-                    .lock()
-                    .workers
-                    .values()
-                    .map(|w| w.pending_uncached_tokens)
-                    .sum::<u128>(),
-                u128::from(backlog) + 2000
-            );
-            drop(request);
-            assert_eq!(
-                book.state
-                    .lock()
-                    .workers
-                    .values()
-                    .map(|w| w.pending_uncached_tokens)
-                    .sum::<u128>(),
-                u128::from(backlog)
-            );
-        }
-    }
-
-    #[test]
-    fn locality_charges_recomputation_when_no_pull_will_be_forwarded() {
-        for hinted in [false, true] {
-            let book = CostBook::new(None).unwrap();
-            let (_, _busy) = book
-                .reserve(40000, None, vec![candidate("owner", 0)])
-                .unwrap();
-            let mut owner = candidate("owner", 90000);
-            owner.gpu_hit = Some(90000);
-            let mut peer = candidate("peer", 0);
-            if hinted {
-                peer.expected_hit = 90000;
-                peer.hint = Some(json!({"expected_hit_tokens":90000}));
-            }
-            let (chosen, _) = book
-                .reserve_locality(100000, None, vec![owner, peer], 32768)
-                .unwrap();
-            assert_eq!(chosen.worker_url, if hinted { "peer" } else { "owner" });
-            assert_eq!(chosen.hint.is_some(), hinted);
-        }
-    }
-
-    #[test]
-    fn locality_missing_gpu_data_keeps_total_hit_priority_and_clamps_observations() {
-        let book = CostBook::new(None).unwrap();
-        let (chosen, _) = book
-            .reserve_locality(
-                100,
-                None,
-                vec![candidate("less-hit", 40), candidate("more-hit", 80)],
-                32768,
-            )
-            .unwrap();
-        assert_eq!(chosen.worker_url, "more-hit");
-        let mut a = candidate("a", 80);
-        a.gpu_hit = Some(u64::MAX);
-        let (chosen, _) = book
-            .reserve_locality(100, None, vec![a, candidate("b", 80)], 32768)
-            .unwrap();
-        assert_eq!(chosen.gpu_hit, Some(80));
-    }
-
-    #[test]
-    fn concurrent_locality_reservations_account_for_undispatched_work() {
-        let book = CostBook::new(None).unwrap();
-        let barrier = Arc::new(Barrier::new(16));
-        let threads: Vec<_> = (0..16)
-            .map(|_| {
-                let book = Arc::clone(&book);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    book.reserve_locality(
-                        10,
-                        None,
-                        vec![candidate("a", 0), candidate("b", 0)],
-                        32768,
-                    )
-                    .unwrap()
-                })
-            })
-            .collect();
-        let owned: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
-        assert_eq!(book.state.lock().workers["a"].pending_uncached_tokens, 80);
-        assert_eq!(book.state.lock().workers["b"].pending_uncached_tokens, 80);
-        drop(owned);
-        assert!(book
-            .state
-            .lock()
-            .workers
-            .values()
-            .all(|w| w.pending_uncached_tokens == 0));
-    }
-
-    #[test]
-    fn minimizes_post_assignment_range_not_current_load() {
-        let book = CostBook::new(None).unwrap();
-        let (_, mut busy) = book.reserve(10, None, vec![candidate("b", 9)]).unwrap();
-        busy.mark_dispatched().unwrap();
-        // A is idle but would cost 100. B has cost 10 and adds only 10.
-        let (chosen, _) = book
-            .reserve(10, None, vec![candidate("a", 0), candidate("b", 9)])
-            .unwrap();
-        assert_eq!(chosen.worker_url, "b");
-        busy.finish("done").unwrap();
-    }
-
-    #[test]
-    fn fixed_cost_survives_old_age_and_snapshots() {
-        let book = CostBook::new(None).unwrap();
-        let (_, mut request) = book.reserve(100, None, vec![candidate("a", 20)]).unwrap();
-        request.mark_dispatched().unwrap();
-        // Timestamp age never participates in membership or cost calculation.
-        book.state
-            .lock()
-            .entries
-            .get_mut(&request.id)
-            .unwrap()
-            .assigned_unix_ms = 0;
-        for _ in 0..3 {
-            book.snapshot();
-        }
-        assert_eq!(cost(&book, "a"), 8_000);
-        request.finish("prefill_complete").unwrap();
-        assert_eq!(cost(&book, "a"), 0);
-    }
-
-    #[test]
     fn drop_before_dispatch_rolls_back_and_retains_worker() {
-        let book = CostBook::new(None).unwrap();
-        let (_, request) = book.reserve(12, None, vec![candidate("a", 0)]).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
+        let (_, request) = res(&book, "r", 12, vec![candidate("a", 0)]).unwrap();
         let id = request.id;
         drop(request);
         assert_eq!(cost(&book, "a"), 0);
@@ -5138,8 +3599,8 @@ mod tests {
     /// (no engine snapshot can list it); once dispatched it stays used.
     #[test]
     fn rid_of_an_unsent_rollback_can_be_reused_but_not_after_dispatch() {
-        let book = CostBook::new_uncached(None).unwrap();
-        let reserve = || book.reserve_uncached(100, Some("x".into()), vec![candidate("a", 0)], 0);
+        let book = CostBook::new(None, "test", None).unwrap();
+        let reserve = || res(&book, "x", 100, vec![candidate("a", 0)]);
         drop(reserve().unwrap().1);
         let (_, mut sent) = reserve().unwrap();
         sent.mark_dispatched().unwrap();
@@ -5153,7 +3614,7 @@ mod tests {
     /// and a live request keeps its entry and its rid.
     #[test]
     fn ended_entries_leave_the_book_after_the_retire_window() {
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let mut live = uncached(&book, "live", "a", 100);
         live.mark_dispatched().unwrap();
         let mut ended = Vec::new();
@@ -5191,13 +3652,13 @@ mod tests {
     }
 
     #[test]
-    fn drop_after_dispatch_retains_unknown_and_blocks_admission() {
-        let book = CostBook::new(None).unwrap();
-        let (_, mut request) = book.reserve(12, None, vec![candidate("a", 0)]).unwrap();
+    fn drop_after_dispatch_retains_unknown() {
+        let book = CostBook::new(None, "test", None).unwrap();
+        let (_, mut request) = res(&book, "r", 12, vec![candidate("a", 0)]).unwrap();
         request.mark_dispatched().unwrap();
         drop(request);
-        assert_eq!(cost(&book, "a"), 144);
-        assert!(book.reserve(1, None, vec![candidate("b", 0)]).is_err());
+        assert_eq!(cost(&book, "a"), 12);
+        assert!(res(&book, "s", 1, vec![candidate("b", 0)]).is_ok());
         assert_eq!(
             book.snapshot()["unknown_entries"].as_array().unwrap().len(),
             1
@@ -5206,32 +3667,32 @@ mod tests {
 
     #[test]
     fn explicit_unknown_can_only_release_on_explicit_terminal_result() {
-        let book = CostBook::new(None).unwrap();
-        let (_, mut request) = book.reserve(10, None, vec![candidate("a", 0)]).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
+        let (_, mut request) = res(&book, "r", 10, vec![candidate("a", 0)]).unwrap();
         request.mark_dispatched().unwrap();
         request.mark_unknown("transport_timeout").unwrap();
         request.mark_unknown("duplicate").unwrap();
-        assert_eq!(cost(&book, "a"), 100);
+        assert_eq!(cost(&book, "a"), 10);
         request.finish("engine_abort_confirmed").unwrap();
         request.finish("duplicate_terminal").unwrap();
         assert_eq!(cost(&book, "a"), 0);
-        assert!(book.reserve(1, None, vec![candidate("a", 0)]).is_ok());
+        assert!(res(&book, "s", 1, vec![candidate("a", 0)]).is_ok());
     }
 
     #[test]
     fn dispatch_is_idempotent_but_cannot_reopen_unknown_or_terminal_entries() {
         for status in [Status::Unknown, Status::Finished, Status::RolledBack] {
-            let book = CostBook::new(None).unwrap();
-            let (_, mut request) = book.reserve(10, None, vec![candidate("a", 0)]).unwrap();
+            let book = CostBook::new(None, "test", None).unwrap();
+            let (_, mut request) = res(&book, "r", 10, vec![candidate("a", 0)]).unwrap();
             request.mark_dispatched().unwrap();
             request.mark_dispatched().unwrap();
-            assert_eq!(cost(&book, "a"), 100);
+            assert_eq!(cost(&book, "a"), 10);
             book.change_status(request.id, status, "test_transition")
                 .unwrap();
             assert!(request.mark_dispatched().is_err());
             assert_eq!(request.debuginfo()["status"], status.label());
             if status == Status::Unknown {
-                assert_eq!(cost(&book, "a"), 100);
+                assert_eq!(cost(&book, "a"), 10);
                 request.finish("confirmed_engine_terminal").unwrap();
             }
             request.finish("idempotent_terminal").unwrap();
@@ -5240,33 +3701,17 @@ mod tests {
     }
 
     #[test]
-    fn zero_cost_is_still_owned_and_counts_for_ties() {
-        let book = CostBook::new(None).unwrap();
-        let (a, first) = book
-            .reserve(10, None, vec![candidate("b", 10), candidate("a", 10)])
-            .unwrap();
-        let (b, second) = book
-            .reserve(10, None, vec![candidate("b", 10), candidate("a", 10)])
-            .unwrap();
-        assert_eq!(a.worker_url, "a");
-        assert_eq!(b.worker_url, "b");
-        assert_eq!(first.debuginfo()["cost"], "0");
-        assert_eq!(book.state.lock().workers["a"].active_requests, 1);
-        drop((first, second));
-    }
-
-    #[test]
     fn parallel_reservations_see_each_others_committed_cost() {
-        let book = CostBook::new(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let barrier = Arc::new(Barrier::new(16));
         let threads: Vec<_> = (0..16)
-            .map(|_| {
+            .map(|i| {
                 let book = Arc::clone(&book);
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    book.reserve(10, None, vec![candidate("a", 0), candidate("b", 0)])
-                        .unwrap()
+                    let rid = format!("r{i}");
+                    res(&book, &rid, 10, vec![candidate("a", 0), candidate("b", 0)]).unwrap()
                 })
             })
             .collect();
@@ -5274,49 +3719,32 @@ mod tests {
             .into_iter()
             .map(|thread| thread.join().unwrap())
             .collect();
-        assert_eq!(cost(&book, "a"), 800);
-        assert_eq!(cost(&book, "b"), 800);
+        assert_eq!(cost(&book, "a"), 80);
+        assert_eq!(cost(&book, "b"), 80);
         assert_eq!(owned.len(), 16);
     }
 
     #[test]
-    fn large_product_uses_u128_and_total_overflow_is_rejected() {
-        let book = CostBook::new(None).unwrap();
-        let (_, request) = book
-            .reserve(u64::MAX, None, vec![candidate("a", 0)])
-            .unwrap();
-        let expected = u128::from(u64::MAX) * u128::from(u64::MAX);
-        assert_eq!(cost(&book, "a"), expected);
-        assert_eq!(request.debuginfo()["cost"], expected.to_string());
-        assert!(book
-            .reserve(u64::MAX, None, vec![candidate("a", 0)])
-            .is_err());
-        assert_eq!(cost(&book, "a"), expected);
-    }
-
-    #[test]
     fn health_subset_does_not_erase_excluded_workers_entries() {
-        let book = CostBook::new(None).unwrap();
-        let (_, mut a) = book.reserve(10, None, vec![candidate("a", 0)]).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
+        let (_, mut a) = res(&book, "r1", 10, vec![candidate("a", 0)]).unwrap();
         a.mark_dispatched().unwrap();
-        let (_, b) = book.reserve(2, None, vec![candidate("b", 0)]).unwrap();
-        assert_eq!(cost(&book, "a"), 100);
+        let (_, b) = res(&book, "r2", 2, vec![candidate("b", 0)]).unwrap();
+        assert_eq!(cost(&book, "a"), 10);
         assert_eq!(book.snapshot()["healthy_candidates"], json!(["b"]));
         assert_eq!(book.snapshot()["workers"].as_array().unwrap().len(), 2);
-        let (chosen, c) = book
-            .reserve(2, None, vec![candidate("a", 0), candidate("b", 0)])
-            .unwrap();
+        let (chosen, c) = res(&book, "r3", 2, vec![candidate("a", 0), candidate("b", 0)]).unwrap();
         assert_eq!(chosen.worker_url, "b");
         a.finish("old_request_finished_after_recovery").unwrap();
         assert_eq!(cost(&book, "a"), 0);
-        assert_eq!(cost(&book, "b"), 8);
+        assert_eq!(cost(&book, "b"), 4);
         drop((b, c));
     }
 
     #[test]
     fn hit_clamps_and_remote_hit_requires_real_hint() {
-        let book = CostBook::new(None).unwrap();
-        let (_, request) = book.reserve(10, None, vec![candidate("a", 999)]).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
+        let (_, request) = res(&book, "r1", 10, vec![candidate("a", 999)]).unwrap();
         assert_eq!(request.debuginfo()["expected_hit"], 10);
         assert_eq!(request.debuginfo()["cost"], "0");
         let invalid = Candidate {
@@ -5326,7 +3754,7 @@ mod tests {
             expected_hit: 8,
             hint: None,
         };
-        assert!(book.reserve(10, None, vec![invalid]).is_err());
+        assert!(res(&book, "r2", 10, vec![invalid]).is_err());
         let hinted = Candidate {
             worker_url: "b".into(),
             local_hit: 0,
@@ -5334,19 +3762,17 @@ mod tests {
             expected_hit: 8,
             hint: Some(json!({"expected_hit_tokens": 8})),
         };
-        let (_, remote) = book.reserve(10, None, vec![hinted]).unwrap();
-        assert_eq!(remote.debuginfo()["cost"], "20");
+        let (_, remote) = res(&book, "r3", 10, vec![hinted]).unwrap();
+        assert_eq!(remote.debuginfo()["cost"], "2");
     }
 
     #[test]
     fn trace_is_exclusive_ordered_and_costs_are_strings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cost.jsonl");
-        let book = CostBook::new(Some(&path)).unwrap();
-        assert!(CostBook::new(Some(&path)).is_err());
-        let (_, mut request) = book
-            .reserve(10, Some("rid".into()), vec![candidate("a", 4)])
-            .unwrap();
+        let book = CostBook::new(Some(&path), "test", None).unwrap();
+        assert!(CostBook::new(Some(&path), "test", None).is_err());
+        let (_, mut request) = res(&book, "rid", 10, vec![candidate("a", 4)]).unwrap();
         request.mark_dispatched().unwrap();
         book.snapshot();
         request.finish("http_500_complete_response").unwrap();
@@ -5359,21 +3785,21 @@ mod tests {
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(row["sequence"], i + 1);
         }
-        assert_eq!(rows[0]["entry"]["cost"], "60");
+        assert_eq!(rows[0]["entry"]["cost"], "6");
         assert_eq!(rows[3]["entry"]["status"], "finished");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn trace_io_failure_blocks_current_and_future_reservations() {
-        let book = CostBook::new(None).unwrap();
-        book.state.lock().trace = Some(TraceSink::Sync(BufWriter::new(
+        let book = CostBook::new(None, "test", None).unwrap();
+        book.state.lock().trace = Some(BufWriter::new(
             OpenOptions::new().write(true).open("/dev/full").unwrap(),
-        )));
-        assert!(book.reserve(10, None, vec![candidate("a", 0)]).is_err());
+        ));
+        assert!(res(&book, "r1", 10, vec![candidate("a", 0)]).is_err());
         assert_eq!(cost(&book, "a"), 0);
         assert_eq!(book.state.lock().entries.len(), 0);
-        assert!(book.reserve(10, None, vec![candidate("a", 0)]).is_err());
+        assert!(res(&book, "r2", 10, vec![candidate("a", 0)]).is_err());
         assert_eq!(book.snapshot()["admission_blocked"], true);
     }
 
@@ -5493,7 +3919,7 @@ mod tests {
         let before = Instant::now()
             .checked_sub(std::time::Duration::from_secs(1))
             .unwrap();
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let ctx = e3_context(
             &[
                 (
@@ -5612,7 +4038,7 @@ mod tests {
     /// every P falls back (no_context).
     #[test]
     fn trade_e3_fallbacks_never_win_a_move_and_are_counted() {
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let zero = std::time::Duration::ZERO;
         let ctx = e3_context(
             &[
@@ -5724,7 +4150,7 @@ mod tests {
     /// e3_degraded.
     #[test]
     fn trade_e3_needs_the_bound_fit_policy_and_ignores_the_engine_stale_flag() {
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let zero = std::time::Duration::ZERO;
         let mut other = routing_snapshot(0, 0);
         other["policy"]["chunk_tokens"] = json!(16_384);
@@ -5829,7 +4255,7 @@ mod tests {
     /// reasons over decisions.
     #[test]
     fn trade_e3_uses_a_fresh_verified_push_and_falls_back_to_the_poll() {
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let idle = routing_snapshot(0, 0);
         let mut truncated = idle.clone();
         truncated["truncated"] = json!(true);
@@ -5910,11 +4336,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn dispatch_trace_failure_keeps_undispatched_reservation_rollbackable() {
-        let book = CostBook::new(None).unwrap();
-        let (_, mut request) = book.reserve(10, None, vec![candidate("a", 0)]).unwrap();
-        book.state.lock().trace = Some(TraceSink::Sync(BufWriter::new(
+        let book = CostBook::new(None, "test", None).unwrap();
+        let (_, mut request) = res(&book, "r", 10, vec![candidate("a", 0)]).unwrap();
+        book.state.lock().trace = Some(BufWriter::new(
             OpenOptions::new().write(true).open("/dev/full").unwrap(),
-        )));
+        ));
         assert!(request.mark_dispatched().is_err());
         assert_eq!(request.debuginfo()["status"], "reserved");
         drop(request);
@@ -5927,100 +4353,15 @@ mod tests {
 
     /// The ledger counters of one worker: cost, pending uncached, pending
     /// restore and unacknowledged tokens, active requests.
-    fn ledger(book: &CostBook, url: &str) -> (u128, u128, u128, u128, u64) {
+    fn ledger(book: &CostBook, url: &str) -> (u128, u128, u128, u64) {
         let st = book.state.lock();
         let w = &st.workers[url];
         (
             w.cost,
             w.pending_uncached_tokens,
-            w.pending_restore_tokens,
             w.pending_unacknowledged_tokens,
             w.active_requests,
         )
-    }
-
-    /// `--symmetric-pd-loads-host-room` is observation only. Without
-    /// [`CostBook::enable_host_room`] a section changes nothing and neither
-    /// the snapshot nor a decision has a host_room key. With it, every TRADE
-    /// decision has the latest section of each candidate with its age (null
-    /// without one), and the snapshot has every P with a section, the
-    /// rejected P and the count of invalid sections. An older reply does not
-    /// replace the kept section, a non-object is counted and ignored, and a
-    /// section clears the rejected mark. The decision is otherwise identical.
-    #[test]
-    fn host_room_is_traced_only_when_enabled_and_never_priced() {
-        let room = |free: u64| json!({"free_tokens": free, "class1_tokens": 600});
-        let decide = |book: &Arc<CostBook>| -> (String, Value) {
-            let (selected, _r, decision) = book
-                .reserve_trade(
-                    110_000,
-                    Some("req".into()),
-                    vec![candidate("a", 100_000), pulling("b", 0, 100_000)],
-                    trade(9.2, false),
-                )
-                .unwrap();
-            (selected.worker_url, decision)
-        };
-        let off = CostBook::new_uncached(None).unwrap();
-        off.note_host_room("a", room(100), Instant::now());
-        assert!(!off.note_host_room_rejected("b"));
-        let (chosen_off, decision_off) = decide(&off);
-        assert!(decision_off.get("host_room_by_p").is_none());
-        let snapshot = off.snapshot();
-        for key in ["host_room_by_p", "host_room_rejected", "host_room_invalid"] {
-            assert!(snapshot.get(key).is_none(), "{key}");
-        }
-
-        let on = CostBook::new_uncached(None).unwrap();
-        on.enable_host_room();
-        let sent = Instant::now();
-        on.note_host_room("a", room(100), sent);
-        on.note_host_room("a", room(999), sent - secs(1));
-        on.note_host_room("a", json!([1, 2]), sent + secs(1));
-        assert!(on.note_host_room_rejected("b"));
-        assert!(!on.note_host_room_rejected("b"), "logged once");
-        let (chosen_on, decision_on) = decide(&on);
-        assert_eq!(chosen_on, chosen_off);
-        let rows = &decision_on["host_room_by_p"];
-        assert_eq!(rows["a"]["free_tokens"], 100);
-        assert_eq!(rows["a"]["class1_tokens"], 600);
-        assert!(rows["a"]["age_s"].as_f64().unwrap() >= 0.0);
-        assert!(rows.as_object().unwrap().contains_key("b") && rows["b"].is_null());
-        let mut without = decision_on.clone();
-        without.as_object_mut().unwrap().remove("host_room_by_p");
-        assert_eq!(without, decision_off, "the section is not a decision input");
-        let snapshot = on.snapshot();
-        assert_eq!(snapshot["host_room_by_p"]["a"]["free_tokens"], 100);
-        assert!(snapshot["host_room_by_p"].get("b").is_none());
-        assert_eq!(snapshot["host_room_rejected"], json!(["b"]));
-        assert_eq!(snapshot["host_room_invalid"], 1);
-
-        on.note_host_room("b", room(7), sent);
-        on.note_host_room("a", room(50), sent + secs(1));
-        let snapshot = on.snapshot();
-        assert_eq!(snapshot["host_room_rejected"], json!([]));
-        assert_eq!(snapshot["host_room_by_p"]["a"]["free_tokens"], 50);
-        assert_eq!(snapshot["host_room_by_p"]["b"]["free_tokens"], 7);
-        assert!(on.note_host_room_rejected("b"), "a new rejection is logged");
-    }
-
-    /// A reply that accepted the include but had no section counts per P;
-    /// only the first one of each P asks the caller to log.
-    #[test]
-    fn host_room_missing_is_counted_per_p() {
-        let book = CostBook::new_uncached(None).unwrap();
-        assert!(
-            !book.note_host_room_missing("a"),
-            "no host_room book: nothing"
-        );
-        book.enable_host_room();
-        assert!(book.note_host_room_missing("a"));
-        assert!(!book.note_host_room_missing("a"));
-        assert!(book.note_host_room_missing("b"));
-        assert_eq!(
-            book.snapshot()["host_room_missing"],
-            json!({"a": 2, "b": 1})
-        );
     }
 
     // ---- --symmetric-pd-gwq-auto (GWQ-AUTO) ----
@@ -6049,7 +4390,7 @@ mod tests {
     /// time-weighted mean (each sample decays as exp(-age / tau)).
     #[test]
     fn gwq_lead_book_is_a_time_weighted_mean() {
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         book.enable_gwq_lead(120.0, 0.6);
         let mut state = book.state.lock();
         let lead = state.gwq_lead.as_mut().unwrap();
@@ -6075,7 +4416,7 @@ mod tests {
     ) -> GwqStepArgs<'a> {
         GwqStepArgs {
             auto: Some(GwqAutoStep { chunks }),
-            ..gwq_args(crate::global_queue::GlobalQueueMode::Hrrn, urls, depth)
+            ..gwq_args(urls, depth)
         }
     }
 
@@ -6090,7 +4431,7 @@ mod tests {
         use crate::global_queue::GwqRelease;
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("gwqa.jsonl");
-        let book = CostBook::new_uncached(Some(&path)).unwrap();
+        let book = CostBook::new(Some(&path), "test", None).unwrap();
         book.enable_gwq_lead(120.0, 0.5);
         let mut on_a = uncached(&book, "on_a", "a", 30_000);
         on_a.mark_dispatched().unwrap();
@@ -6107,11 +4448,7 @@ mod tests {
         let cands = vec![candidate("a", 0)];
         let held = [gwq_held("r", 5000, &cands, None, false)];
         let step = book
-            .gwq_step(
-                trade(9.2, false),
-                &held,
-                &gwq_auto_args(&urls, &depth, &chunks),
-            )
+            .gwq_step(trade(9.2), &held, &gwq_auto_args(&urls, &depth, &chunks))
             .unwrap();
         assert!(step.release.is_none(), "queued 14,943 > 14,942: {step:?}");
         book.apply_progress(
@@ -6122,11 +4459,7 @@ mod tests {
         )
         .unwrap();
         let step = book
-            .gwq_step(
-                trade(9.2, false),
-                &held,
-                &gwq_auto_args(&urls, &depth, &chunks),
-            )
+            .gwq_step(trade(9.2), &held, &gwq_auto_args(&urls, &depth, &chunks))
             .unwrap();
         let (_, result) = step.release.expect("queued 14,942: room");
         let released = result.unwrap();
@@ -6154,8 +4487,6 @@ mod tests {
             "{g}"
         );
         assert_eq!(g["lead_sample"], false);
-        assert_eq!(g["shadow"]["ii_would_hold"], Value::Null);
-        assert_eq!(g["shadow"]["insert_tokens"], 5000);
         let stats = book.gwq_lead_rows(&urls);
         assert_eq!(stats["by_p"]["a"]["depth_tokens"], 14_943);
         assert_eq!(
@@ -6178,7 +4509,7 @@ mod tests {
     fn gwq_auto_samples_t_react_only_at_an_empty_queue() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("gwqa-sample.jsonl");
-        let book = CostBook::new_uncached(Some(&path)).unwrap();
+        let book = CostBook::new(Some(&path), "test", None).unwrap();
         book.enable_gwq_lead(120.0, 0.5);
         let t0 = Instant::now();
         book.apply_progress("a", progress(1, &[]), json!({}), t0)
@@ -6190,11 +4521,7 @@ mod tests {
         let release = |rid: &'static str| {
             let held = [gwq_held(rid, 20_000, &cands, None, true)];
             let step = book
-                .gwq_step(
-                    trade(9.2, false),
-                    &held,
-                    &gwq_auto_args(&urls, &depth, &chunks),
-                )
+                .gwq_step(trade(9.2), &held, &gwq_auto_args(&urls, &depth, &chunks))
                 .unwrap();
             step.release.expect("room").1.unwrap()
         };
@@ -6252,10 +4579,9 @@ mod tests {
     /// priced cold, and the decision has no row for a.
     #[test]
     fn gwq_release_uses_the_step_pool() {
-        use crate::global_queue::GlobalQueueMode;
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("gwq-pool.jsonl");
-        let book = CostBook::new_uncached(Some(&path)).unwrap();
+        let book = CostBook::new(Some(&path), "test", None).unwrap();
         let from_a = Candidate {
             hint: Some(json!({"source_worker_id": "a", "expected_hit_tokens": 9000})),
             ..pulling("b", 0, 9000)
@@ -6265,11 +4591,7 @@ mod tests {
         let urls = vec!["b".to_string(), "c".to_string()];
         let depth = [1u64 << 40, 1 << 40];
         let step = book
-            .gwq_step(
-                trade(9.2, false),
-                &held,
-                &gwq_args(GlobalQueueMode::Hrrn, &urls, &depth),
-            )
+            .gwq_step(trade(9.2), &held, &gwq_args(&urls, &depth))
             .unwrap();
         let (_, result) = step.release.expect("room on b and c");
         let released = result.unwrap();
@@ -6303,7 +4625,6 @@ mod tests {
     /// breaker is on).
     #[test]
     fn gwq_release_keeps_a_pull_source_listed_in_sources() {
-        use crate::global_queue::GlobalQueueMode;
         let from_d = Candidate {
             hint: Some(json!({"source_worker_id": "d", "expected_hit_tokens": 9000})),
             ..pulling("b", 0, 9000)
@@ -6314,13 +4635,13 @@ mod tests {
         for (sources, kept) in [(vec!["d".to_string()], true), (Vec::new(), false)] {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("gwq-sources.jsonl");
-            let book = CostBook::new_uncached(Some(&path)).unwrap();
+            let book = CostBook::new(Some(&path), "test", None).unwrap();
             let held = [gwq_held("r", 12_000, &cands, Some("b"), false)];
             let args = GwqStepArgs {
                 sources: &sources,
-                ..gwq_args(GlobalQueueMode::Hrrn, &urls, &depth)
+                ..gwq_args(&urls, &depth)
             };
-            let step = book.gwq_step(trade(9.2, false), &held, &args).unwrap();
+            let step = book.gwq_step(trade(9.2), &held, &args).unwrap();
             let (_, result) = step.release.expect("room on b");
             let released = result.unwrap();
             assert_eq!(released.candidate.worker_url, "b");
@@ -6341,18 +4662,13 @@ mod tests {
     /// returns to its value before the release.
     #[test]
     fn gwq_unsent_release_rolls_back() {
-        use crate::global_queue::GlobalQueueMode;
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let urls = vec!["a".to_string()];
         let depth = [1u64 << 40];
         let cands = vec![candidate("a", 0)];
         let held = [gwq_held("r", 7000, &cands, None, true)];
         let step = book
-            .gwq_step(
-                trade(9.2, false),
-                &held,
-                &gwq_args(GlobalQueueMode::Hrrn, &urls, &depth),
-            )
+            .gwq_step(trade(9.2), &held, &gwq_args(&urls, &depth))
             .unwrap();
         let released = step.release.unwrap().1.unwrap();
         let pending = |b: &CostBook| b.state.lock().workers["a"].pending_uncached_tokens;
@@ -6360,42 +4676,6 @@ mod tests {
         drop(released);
         assert_eq!(pending(&book), 0, "rolled back");
         assert_eq!(book.state.lock().workers["a"].active_requests, 0);
-    }
-
-    /// The shadow of a release (no action): phi 0.75 > 1/2 and an insert of
-    /// 4,000 (5,000 minus the P's own hit 1,000) above free 500 + class 0
-    /// 1,000, so the working-set hold (ii) would hold it.
-    #[test]
-    fn gwq_shadow_reports_the_ii_hold() {
-        let Some(t0) = Instant::now().checked_sub(std::time::Duration::from_secs(600)) else {
-            return; // the monotonic clock is younger than 10 minutes
-        };
-        let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
-        let book = CostBook::new_uncached(None).unwrap();
-        book.enable_host_room();
-        book.enable_host_room_phi(120.0);
-        let room = |c0: u64, c1: u64| {
-            json!({"free_tokens": 500, "class0_tokens": 1000,
-                "evicted_class0_tokens": c0, "evicted_class1_tokens": c1})
-        };
-        book.note_host_room("a", room(0, 0), at(589.0));
-        book.note_host_room("a", room(100, 300), at(590.0));
-        let cands = vec![candidate("a", 1000)];
-        let held = gwq_held("r", 5000, &cands, None, false);
-        let state = book.state.lock();
-        let shadow = CostBook::gwq_shadow(&state, held, "a", at(590.5));
-        assert!(
-            (shadow["phi"].as_f64().unwrap() - 0.75).abs() < 1e-9,
-            "{shadow}"
-        );
-        assert_eq!(shadow["insert_tokens"], 4000);
-        assert_eq!(shadow["phi_over_half"], true);
-        assert_eq!(shadow["ii_would_hold"], true);
-        let other = CostBook::gwq_shadow(&state, held, "b", at(590.5));
-        assert_eq!(
-            (other["phi"].clone(), other["ii_would_hold"].clone()),
-            (Value::Null, Value::Null)
-        );
     }
 
     /// Run the unknown expiry of every worker with `at` as the sweep time.
@@ -6422,13 +4702,8 @@ mod tests {
 
     // ---- global waiting queue steps ----
 
-    fn gwq_args<'a>(
-        mode: crate::global_queue::GlobalQueueMode,
-        urls: &'a [String],
-        depth: &'a [u64],
-    ) -> GwqStepArgs<'a> {
+    fn gwq_args<'a>(urls: &'a [String], depth: &'a [u64]) -> GwqStepArgs<'a> {
         GwqStepArgs {
-            mode,
             urls,
             depth,
             stale_after: std::time::Duration::from_secs(1),
@@ -6492,7 +4767,7 @@ mod tests {
     /// subtracts its current work.
     #[test]
     fn unknown_still_listed_holds_until_the_engine_stops_listing_it() {
-        let book = CostBook::create(None, true, None, None, Some(secs(60))).unwrap();
+        let book = CostBook::new(None, "test", Some(secs(60))).unwrap();
         let mut r = uncached(&book, "slow", "p", 30_000);
         r.mark_dispatched().unwrap();
         r.mark_unknown("prefill_transport_error: upstream timed out")
@@ -6501,7 +4776,7 @@ mod tests {
         let at = |s: u64| since + secs(s);
         let status = || book.state.lock().entries[&r.id].status;
         reply(&book, "p", at(50), &[("slow", 22_000)]);
-        assert_eq!(ledger(&book, "p"), (22_000, 22_000, 0, 0, 1));
+        assert_eq!(ledger(&book, "p"), (22_000, 22_000, 0, 1));
         reply(&book, "p", at(100), &[("slow", 9_000)]);
         // The P answers without it from 130 s on: the evidence stays at 100 s.
         reply(&book, "p", at(130), &[]);
@@ -6509,7 +4784,7 @@ mod tests {
         assert_eq!((status(), cost(&book, "p")), (Status::Unknown, 9_000));
         reply(&book, "p", at(160), &[]);
         assert_eq!(status(), Status::Expired);
-        assert_eq!(ledger(&book, "p"), (0, 0, 0, 0, 0));
+        assert_eq!(ledger(&book, "p"), (0, 0, 0, 0));
     }
 
     /// A P without applied progress replies (dead, partitioned, or its polls
@@ -6518,7 +4793,7 @@ mod tests {
     /// reply of its P sent at least the expiry after the evidence expires it.
     #[test]
     fn unknown_on_a_p_without_replies_does_not_expire() {
-        let book = CostBook::create(None, true, None, None, Some(secs(60))).unwrap();
+        let book = CostBook::new(None, "test", Some(secs(60))).unwrap();
         let mut r = uncached(&book, "lost", "p", 8_000);
         r.mark_dispatched().unwrap();
         r.mark_unknown("prefill_transport_error: upstream timed out")
@@ -6538,7 +4813,7 @@ mod tests {
         // Its first reply after that expires it.
         reply(&book, "p", since + secs(24 * 3600), &[]);
         assert_eq!(status(), Status::Expired);
-        assert_eq!(ledger(&book, "p"), (0, 0, 0, 0, 0));
+        assert_eq!(ledger(&book, "p"), (0, 0, 0, 0));
     }
 
     /// The expiry runs when a reply of the entry's own P is applied (not
@@ -6547,7 +4822,7 @@ mod tests {
     /// the reply time in the future here.
     #[test]
     fn unknown_expiry_runs_on_its_workers_progress_and_on_snapshots() {
-        let book = CostBook::create(None, true, None, None, Some(secs(1))).unwrap();
+        let book = CostBook::new(None, "test", Some(secs(1))).unwrap();
         let mut a = uncached(&book, "ra", "a", 1_000);
         let mut b = uncached(&book, "rb", "b", 2_000);
         // A reply of `a` sent 10 s from now, applied before `ra` fails.
@@ -6575,9 +4850,7 @@ mod tests {
     fn without_an_expiry_unknown_work_is_held_until_a_terminal_result() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("cost.jsonl");
-        let book =
-            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", None)
-                .unwrap();
+        let book = CostBook::new(Some(&path), "symmetric_pd_cost_function", None).unwrap();
         let mut r = uncached(&book, "lost", "a", 12_000);
         r.mark_dispatched().unwrap();
         r.mark_unknown("prefill_transport_error: upstream timed out")
@@ -6589,9 +4862,9 @@ mod tests {
         assert_eq!(snapshot["unknown_requests"], 1);
         assert!(snapshot.get("unknown_expire_s").is_none());
         assert!(snapshot.get("expired_rid_listed_again").is_none());
-        assert_eq!(ledger(&book, "a"), (12_000, 12_000, 0, 12_000, 1));
+        assert_eq!(ledger(&book, "a"), (12_000, 12_000, 12_000, 1));
         r.finish("abort_confirmed").unwrap();
-        assert_eq!(ledger(&book, "a"), (0, 0, 0, 0, 0));
+        assert_eq!(ledger(&book, "a"), (0, 0, 0, 0));
         assert!(trace_rows(&path).iter().all(|e| e["event"] != "expired"));
     }
 
@@ -6607,9 +4880,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("cost.jsonl");
         let expire = Some(secs(60));
-        let book =
-            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", expire)
-                .unwrap();
+        let book = CostBook::new(Some(&path), "symmetric_pd_cost_function", expire).unwrap();
         let lose = |rid: &str, tokens: u64| {
             let mut r = uncached(&book, rid, "a", tokens);
             r.mark_dispatched().unwrap();
@@ -6620,7 +4891,7 @@ mod tests {
             r
         };
         let (mut f, mut u, d) = (lose("f", 5_000), lose("u", 6_000), lose("d", 7_000));
-        assert_eq!(ledger(&book, "a"), (0, 0, 0, 0, 0));
+        assert_eq!(ledger(&book, "a"), (0, 0, 0, 0));
         f.finish("prefill_response_success").unwrap();
         u.mark_unknown("prefill_transport_error: late").unwrap();
         assert!(u.mark_dispatched().is_err());
@@ -6631,7 +4902,7 @@ mod tests {
         reply(&book, "a", t, &listed[..2]);
         reply(&book, "a", t + secs(1), &listed[..2]);
         reply(&book, "b", t, &listed[2..]);
-        assert_eq!(ledger(&book, "a"), (0, 0, 0, 0, 0));
+        assert_eq!(ledger(&book, "a"), (0, 0, 0, 0));
         let snapshot = book.snapshot();
         assert_eq!(snapshot["unknown_requests"], 0);
         assert_eq!(snapshot["expired_rid_listed_again"], 2);
@@ -6672,122 +4943,6 @@ mod tests {
 
     // ---- async trace ----
 
-    /// The rows of a trace without the wall-clock and elapsed fields.
-    fn timeless_rows(path: &Path) -> Vec<Value> {
-        fn strip(v: &mut Value) {
-            match v {
-                Value::Object(map) => {
-                    for key in [
-                        "ts_unix_ms",
-                        "ts_unix_s",
-                        "elapsed_ms",
-                        "assigned_unix_ms",
-                        "assigned_elapsed_ms",
-                        "dispatched_unix_ms",
-                        "terminal_unix_ms",
-                        "oldest_active_assigned_unix_ms",
-                    ] {
-                        map.remove(key);
-                    }
-                    map.values_mut().for_each(strip);
-                }
-                Value::Array(items) => items.iter_mut().for_each(strip),
-                _ => {}
-            }
-        }
-        let mut rows = trace_rows(path);
-        rows.iter_mut().for_each(strip);
-        rows
-    }
-
-    /// Reservations, dispatches, replies, ends and snapshots on `book`.
-    fn trace_script(book: &Arc<CostBook>) {
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
-        let trade = trade(4.6, false);
-        let mut held = Vec::new();
-        for i in 0..40u64 {
-            let candidates = vec![
-                candidate("a", (i * 997) % 5_000),
-                candidate("b", (i * 131) % 3_000),
-            ];
-            let (_, mut r, _) = book
-                .reserve_trade(8_000 + i * 100, Some(format!("q{i}")), candidates, trade)
-                .unwrap();
-            r.mark_dispatched().unwrap();
-            if i % 5 == 0 {
-                book.snapshot();
-            }
-            held.push(r);
-        }
-        reply(book, "a", at(1), &[("q0", 100), ("q1", 0)]);
-        reply(book, "b", at(2), &[("q2", 50)]);
-        for (i, r) in held.iter_mut().enumerate() {
-            match i % 3 {
-                0 => r.finish(PREFILL_SUCCESS_REASON).unwrap(),
-                1 => r.mark_unknown("prefill_transport_error").unwrap(),
-                _ => {}
-            }
-        }
-        book.snapshot();
-    }
-
-    /// `--trade-cost-trace-async`: the same operations write the same
-    /// rows in the same order (sequence 1..n, no gap) as the synchronous
-    /// trace, apart from the clock fields; `sync_trace` waits for the writer;
-    /// dropping the book flushes the rest.
-    #[test]
-    fn async_trace_writes_the_same_rows_in_order() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (p_sync, p_async) = (
-            tmp.path().join("sync.jsonl"),
-            tmp.path().join("async.jsonl"),
-        );
-        let sync =
-            CostBook::new_uncached_with_policy(Some(&p_sync), "symmetric_pd_cost_function", None)
-                .unwrap();
-        let book =
-            CostBook::new_uncached_with_policy(Some(&p_async), "symmetric_pd_cost_function", None)
-                .unwrap();
-        book.enable_async_trace().unwrap();
-        book.enable_async_trace().unwrap();
-        trace_script(&sync);
-        trace_script(&book);
-        book.sync_trace().unwrap();
-        let rows = timeless_rows(&p_async);
-        assert_eq!(rows, timeless_rows(&p_sync));
-        let sequences: Vec<u64> = rows
-            .iter()
-            .map(|r| r["sequence"].as_u64().unwrap())
-            .collect();
-        assert_eq!(sequences, (1..=rows.len() as u64).collect::<Vec<_>>());
-        // A row emitted after the last sync is written when the book drops.
-        let before = trace_rows(&p_async).len();
-        book.snapshot();
-        drop(book);
-        drop(sync);
-        assert_eq!(trace_rows(&p_async).len(), before + 1);
-    }
-
-    /// An async trace that cannot be written: the writer keeps the error,
-    /// `sync_trace` fails, the next admission is refused and the snapshot
-    /// shows admission blocked.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn async_trace_failure_stops_admission() {
-        let book = CostBook::new_uncached(None).unwrap();
-        book.state.lock().trace = Some(TraceSink::Sync(BufWriter::new(
-            OpenOptions::new().write(true).open("/dev/full").unwrap(),
-        )));
-        book.enable_async_trace().unwrap();
-        let _first = uncached(&book, "first", "a", 1_000);
-        assert!(book.sync_trace().is_err());
-        let refused =
-            book.reserve_uncached(1_000, Some("next".into()), vec![candidate("a", 0)], 12288);
-        assert!(refused.unwrap_err().contains("trace failed"));
-        assert_eq!(book.snapshot()["admission_blocked"], true);
-    }
-
     /// `a` has 30k routed and not launched (queued 30k: no room at depth
     /// 9542); `b` runs a launched 40k request (queued 40k - one pass of 8192
     /// = 31,808: no room). A cold 5k request costs 35k on `a` and 45k on `b`:
@@ -6804,8 +4959,8 @@ mod tests {
     /// rule (fail-open): with b's fit missing, nothing is released.
     #[test]
     fn gwq_step_predicted_room_takes_the_e3_drain_and_falls_back_per_p() {
-        use crate::global_queue::{GlobalQueueMode, GwqRelease};
-        let book = CostBook::new_uncached(None).unwrap();
+        use crate::global_queue::GwqRelease;
+        let book = CostBook::new(None, "test", None).unwrap();
         let mut on_a = uncached(&book, "on_a", "a", 50_000);
         on_a.mark_dispatched().unwrap();
         let mut on_b = uncached(&book, "on_b", "b", 6_000);
@@ -6819,11 +4974,7 @@ mod tests {
         let cands = vec![candidate("a", 0), candidate("b", 0)];
         let held = [gwq_held("r0", 5000, &cands, None, false)];
         let step = book
-            .gwq_step(
-                trade(18.4, false),
-                &held,
-                &gwq_args(GlobalQueueMode::Hrrn, &urls, &depth),
-            )
+            .gwq_step(trade(18.4), &held, &gwq_args(&urls, &depth))
             .unwrap();
         assert!(step.release.is_none(), "no room by tokens: {step:?}");
 
@@ -6838,10 +4989,10 @@ mod tests {
         let args = GwqStepArgs {
             e3: Some(&ctx),
             lead_s: 1.0,
-            ..gwq_args(GlobalQueueMode::Hrrn, &urls, &depth)
+            ..gwq_args(&urls, &depth)
         };
         let held = [gwq_held("r1", 5000, &cands, None, false)];
-        let step = book.gwq_step(trade(18.4, false), &held, &args).unwrap();
+        let step = book.gwq_step(trade(18.4), &held, &args).unwrap();
         let r1 = step
             .release
             .expect("b is predicted to drain within the lead")
@@ -6878,20 +5029,20 @@ mod tests {
         let args = GwqStepArgs {
             e3: Some(&ctx),
             lead_s: 1.0,
-            ..gwq_args(GlobalQueueMode::Hrrn, &urls, &depth)
+            ..gwq_args(&urls, &depth)
         };
         let held = [gwq_held("r2", 5000, &cands, None, false)];
-        let step = book.gwq_step(trade(18.4, false), &held, &args).unwrap();
+        let step = book.gwq_step(trade(18.4), &held, &args).unwrap();
         assert!(step.release.is_none(), "{step:?}");
         drop((on_a, on_b));
     }
 
     #[test]
     fn gwq_step_holds_without_room_and_binds_the_p_at_release() {
-        use crate::global_queue::{GlobalQueueMode, GwqRelease};
+        use crate::global_queue::GwqRelease;
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("gwq.jsonl");
-        let book = CostBook::new_uncached(Some(&path)).unwrap();
+        let book = CostBook::new(Some(&path), "test", None).unwrap();
         let mut on_a = uncached(&book, "on_a", "a", 30_000);
         on_a.mark_dispatched().unwrap();
         let mut on_b = uncached(&book, "on_b", "b", 40_000);
@@ -6910,11 +5061,7 @@ mod tests {
         let cands = vec![candidate("a", 0), candidate("b", 0)];
         let held = [gwq_held("r", 5000, &cands, None, true)];
         let step = book
-            .gwq_step(
-                trade(9.2, false),
-                &held,
-                &gwq_args(GlobalQueueMode::Hrrn, &urls, &depth),
-            )
+            .gwq_step(trade(9.2), &held, &gwq_args(&urls, &depth))
             .unwrap();
         assert!(step.release.is_none(), "expected a hold: {step:?}");
         assert_eq!(step.plain, vec![0]);
@@ -6942,11 +5089,7 @@ mod tests {
         .unwrap();
         let held = [gwq_held("r", 5000, &cands, Some("a"), false)];
         let step = book
-            .gwq_step(
-                trade(9.2, false),
-                &held,
-                &gwq_args(GlobalQueueMode::Hrrn, &urls, &depth),
-            )
+            .gwq_step(trade(9.2), &held, &gwq_args(&urls, &depth))
             .unwrap();
         let Some((index, result)) = step.release else {
             panic!("expected a release");
@@ -6993,10 +5136,9 @@ mod tests {
     /// (room). The decision rows show the virtual tokens in the backlog.
     #[test]
     fn gwq_step_charges_the_held_work_ahead_as_virtual_backlog() {
-        use crate::global_queue::GlobalQueueMode;
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("gwq-virtual.jsonl");
-        let book = CostBook::new_uncached(Some(&path)).unwrap();
+        let book = CostBook::new(Some(&path), "test", None).unwrap();
         let mut on_a = uncached(&book, "on_a", "a", 10_000);
         on_a.mark_dispatched().unwrap();
         let mut on_b = uncached(&book, "on_b", "b", 12_000);
@@ -7018,11 +5160,7 @@ mod tests {
             gwq_held("second", 8000, &cands, Some("a"), false),
         ];
         let step = book
-            .gwq_step(
-                trade(9.2, false),
-                &held,
-                &gwq_args(GlobalQueueMode::Hrrn, &urls, &depth),
-            )
+            .gwq_step(trade(9.2), &held, &gwq_args(&urls, &depth))
             .unwrap();
         assert_eq!(step.plain, vec![0, 0]);
         let Some((index, result)) = step.release else {
@@ -7050,8 +5188,7 @@ mod tests {
     /// backlog keeps it.
     #[test]
     fn gwq_queued_work_leaves_out_unknown_reservations() {
-        use crate::global_queue::GlobalQueueMode;
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let mut lost = uncached(&book, "lost", "a", 30_000);
         lost.mark_dispatched().unwrap();
         lost.mark_unknown("prefill_transport_error: reset").unwrap();
@@ -7065,11 +5202,7 @@ mod tests {
         let cands = vec![candidate("a", 0)];
         let held = [gwq_held("r", 1000, &cands, None, true)];
         let step = book
-            .gwq_step(
-                trade(9.2, false),
-                &held,
-                &gwq_args(GlobalQueueMode::Hrrn, &urls, &[9542]),
-            )
+            .gwq_step(trade(9.2), &held, &gwq_args(&urls, &[9542]))
             .unwrap();
         let Some((_, result)) = step.release else {
             panic!("the unknown work does not block the P");
@@ -7087,7 +5220,7 @@ mod tests {
     #[test]
     fn terminal_hook_runs_after_terminal_statuses_only() {
         use std::sync::atomic::{AtomicU64, Ordering};
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let calls = Arc::new(AtomicU64::new(0));
         let counter = Arc::clone(&calls);
         book.set_terminal_hook(Box::new(move || {
@@ -7109,7 +5242,7 @@ mod tests {
 
     #[test]
     fn rid_refusal_matches_the_reservation_errors() {
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         assert!(book
             .rid_refusal(None)
             .unwrap()
@@ -7121,7 +5254,6 @@ mod tests {
             .rid_refusal(Some("used"))
             .unwrap()
             .contains("cannot reuse a rid"));
-        assert!(CostBook::new(None).unwrap().rid_refusal(None).is_none());
     }
 
     /// A book made with a policy label writes `"policy"` on every trace row
@@ -7131,15 +5263,13 @@ mod tests {
     fn policy_label_on_every_trace_event() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("labelled.jsonl");
-        let book =
-            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", None)
-                .unwrap();
+        let book = CostBook::new(Some(&path), "symmetric_pd_cost_function", None).unwrap();
         let (_, mut r, _) = book
             .reserve_trade_session(
                 10_000,
                 Some("r1".into()),
                 vec![candidate("a", 0)],
-                trade(18.4, false),
+                trade(18.4),
                 None,
             )
             .unwrap();
@@ -7170,13 +5300,6 @@ mod tests {
             assert_eq!(row["policy"], "symmetric_pd_cost_function", "{row}");
             assert_eq!(row["schema"], "cost-balance.v1", "{row}");
         }
-        let path = tmp.path().join("plain.jsonl");
-        let plain = CostBook::new_uncached(Some(&path)).unwrap();
-        let _r = uncached(&plain, "r2", "a", 1_000);
-        plain.snapshot();
-        let rows = read(&path);
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.get("policy").is_none()), "{rows:?}");
     }
 
     /// `--symmetric-pd-trace-session-moves`: the second decision of a session
@@ -7188,24 +5311,24 @@ mod tests {
         for on in [true, false] {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("moves.jsonl");
-            let book = CostBook::new_uncached(Some(&path)).unwrap();
+            let book = CostBook::new(Some(&path), "test", None).unwrap();
             if on {
                 book.enable_session_moves();
             }
             let cands = || vec![candidate("a", 4000), candidate("b", 0)];
             let session = Some("0/agent-1");
             let (_, r1, d1) = book
-                .reserve_trade_session(5000, Some("s1".into()), cands(), trade(9.2, false), session)
+                .reserve_trade_session(5000, Some("s1".into()), cands(), trade(9.2), session)
                 .unwrap();
             assert_eq!(d1["chosen"], "a");
             let mut busy = uncached(&book, "busy", "a", 60_000);
             busy.mark_dispatched().unwrap();
             let (_, r2, d2) = book
-                .reserve_trade_session(5000, Some("s2".into()), cands(), trade(9.2, false), session)
+                .reserve_trade_session(5000, Some("s2".into()), cands(), trade(9.2), session)
                 .unwrap();
             assert_eq!(d2["chosen"], "b");
             let (_, r3, _) = book
-                .reserve_trade_session(5000, Some("s3".into()), cands(), trade(9.2, false), None)
+                .reserve_trade_session(5000, Some("s3".into()), cands(), trade(9.2), None)
                 .unwrap();
             let events = trace_lines(&path);
             let moves: Vec<&Value> = events
@@ -7260,7 +5383,7 @@ mod tests {
     /// R_hat) from the traced q and R_hat, and the candidates pay it.
     #[test]
     fn trade_auto_decision_resolves_lambda_and_traces_its_inputs() {
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         let decide = |rid: &str| {
             let (_, r, d) = book
                 .reserve_trade_session(
@@ -7276,7 +5399,6 @@ mod tests {
         };
         let d = decide("s1");
         assert_eq!(d["lambda_mode"], "auto");
-        assert_eq!(d["q_mode"], "sat");
         assert_eq!(d["fallback_reason"], "startup");
         assert_eq!(d["copy_lambda_used"], 18.4);
         assert_eq!(d["copy_lambda"], 18.4);
@@ -7296,7 +5418,6 @@ mod tests {
             "auto_elapsed_s",
             "auto_tau_s",
             "session_idle_s",
-            "lambda_mu",
             "lambda_min",
             "lambda_max",
             "rate_fallback",
@@ -7363,13 +5484,13 @@ mod tests {
     fn trade_auto_end_snapshot_and_fixed_mode_untouched() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("fixed.jsonl");
-        let book = CostBook::new_uncached(Some(&path)).unwrap();
+        let book = CostBook::new(Some(&path), "test", None).unwrap();
         let (_, mut r, d) = book
             .reserve_trade_session(
                 10_000,
                 Some("f1".into()),
                 vec![candidate("a", 0)],
-                trade(18.4, false),
+                trade(18.4),
                 Some("0/agent"),
             )
             .unwrap();
@@ -7388,7 +5509,7 @@ mod tests {
         assert!(!text.contains("trade_auto"), "{text}");
 
         let path = tmp.path().join("auto.jsonl");
-        let book = CostBook::new_uncached(Some(&path)).unwrap();
+        let book = CostBook::new(Some(&path), "test", None).unwrap();
         let decide = |rid: &str, session: Option<&str>| {
             book.reserve_trade_session(
                 10_000,
@@ -7442,7 +5563,7 @@ mod tests {
     /// largest remaining work seen.
     #[test]
     fn trade_auto_ledger_counts_each_request_once_on_every_path() {
-        let book = CostBook::new_uncached(None).unwrap();
+        let book = CostBook::new(None, "test", None).unwrap();
         // 20,000 tokens with 8,000 cached on a: an estimate of 12,000 uncached.
         let pick = |rid: &str, session: Option<&str>| {
             book.reserve_trade_session(
@@ -7535,256 +5656,6 @@ mod tests {
         assert_eq!(in_flight(), Some(0));
     }
 
-    /// The floor of the pull price phi: lambda_P = max(min, lambda_q x
-    /// phi_P), min = --trade-copy-lambda-min (4.6). `c` (no
-    /// eviction, phi 0) pays 4.6 (floored) instead of 0, `b` (phi 0.25)
-    /// 18.4 x 0.25 = 4.6 (not floored), `d` (no host_room data) 18.4. The
-    /// floored pull of 100k tokens costs 460k: the request stays on the owner.
-    /// The snapshot counts the priced rows, the floored rows and the
-    /// decisions whose chosen P was floored.
-    #[test]
-    fn trade_phi_floor_is_the_auto_min() {
-        use crate::scheduler::trade::{TradePullPrice, TradeRateMode};
-        let Some(t0) = Instant::now().checked_sub(std::time::Duration::from_secs(600)) else {
-            return; // the monotonic clock is younger than 10 minutes
-        };
-        let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
-        let params = crate::scheduler::trade::TradeParams {
-            rate_mode: TradeRateMode::Auto,
-            pull_price: TradePullPrice::Phi,
-            ..auto_trade(18.4)
-        };
-        let room =
-            |c0: u64, c1: u64| json!({"evicted_class0_tokens": c0, "evicted_class1_tokens": c1});
-        let book = CostBook::new_uncached(None).unwrap();
-        book.enable_host_room();
-        book.enable_host_room_phi(120.0);
-        for (url, first, second) in [("b", (0, 0), (300, 100)), ("c", (50, 50), (50, 50))] {
-            book.note_host_room(url, room(first.0, first.1), at(589.0));
-            book.note_host_room(url, room(second.0, second.1), at(590.0));
-        }
-        let mut busy = uncached(&book, "busy", "a", 60_000);
-        busy.mark_dispatched().unwrap();
-        let (_, r, d) = book
-            .reserve_trade_session(
-                110_000,
-                Some("f1".into()),
-                vec![
-                    candidate("a", 100_000),
-                    pulling("b", 0, 100_000),
-                    pulling("c", 0, 100_000),
-                    pulling("d", 0, 100_000),
-                ],
-                params,
-                Some("0/agent-1"),
-            )
-            .unwrap();
-        drop(r);
-        let rows = d["candidates"].as_array().unwrap();
-        let col = |key: &str| rows.iter().map(|r| r[key].clone()).collect::<Vec<_>>();
-        assert_eq!(d["phi_lambda_min"], 4.6, "{d}");
-        assert_eq!(rows[2]["copy_lambda"], 4.6, "{d}");
-        assert_eq!(rows[1]["copy_lambda"], 4.6, "{d}");
-        assert_eq!(rows[3]["copy_lambda"], 18.4, "{d}");
-        assert_eq!(
-            col("phi_floored"),
-            [json!(false), json!(false), json!(true), json!(false)]
-        );
-        let copy_c = rows[2]["copy_tokens"].as_f64().unwrap();
-        assert!((copy_c - 460_000.0).abs() < 1e-6, "{d}");
-        assert_eq!(d["chosen"], "a", "the floor keeps the owner: {d}");
-        assert_eq!(
-            d["copy_lambda"], 18.4,
-            "the owner's price (no host_room data)"
-        );
-        assert_eq!(d["phi_floored"], false);
-        let prices = &book.snapshot()["phi_prices"];
-        assert_eq!(
-            (
-                prices["decisions"].clone(),
-                prices["rows"].clone(),
-                prices["rows_floored"].clone(),
-                prices["rows_zero"].clone(),
-                prices["chosen_floored"].clone()
-            ),
-            (json!(1), json!(4), json!(1), json!(0), json!(0))
-        );
-    }
-
-    /// Pull price phi: candidate P pays lambda_q x phi_P per pulled token.
-    /// lambda_q = the copy price auto before the clamp: the fallback 18.4
-    /// during start-up, then q (mu 1, R = R_hat). The owner `a` has 60k
-    /// pending; `b` evicted 300 class-0 and 100 class-1 host tokens (phi
-    /// 0.25), `c` evicted none (phi 0: a free pull), `d` has no host_room
-    /// data (it pays lambda_q, reason no_host_room). With the floor min 0
-    /// (the lambda = q words) the request moves to `c` with a pull, where the
-    /// lambda price keeps it on `a`. The lambda price writes no phi key, and
-    /// its copy charge is lambda x pulled. The decision's copy_lambda is the
-    /// price of the chosen P.
-    #[test]
-    fn trade_phi_prices_each_candidate_with_q_times_its_phi() {
-        use crate::scheduler::trade::{TradeLambdaMode, TradePullPrice, TradeRateMode};
-        let Some(t0) = Instant::now().checked_sub(std::time::Duration::from_secs(600)) else {
-            return; // the monotonic clock is younger than 10 minutes
-        };
-        let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
-        let lambda_params = crate::scheduler::trade::TradeParams {
-            rate_mode: TradeRateMode::Auto,
-            ..auto_trade(18.4)
-        };
-        let TradeLambdaMode::Auto { q, mu, max, .. } = lambda_params.copy_lambda_mode else {
-            unreachable!("auto_trade is auto");
-        };
-        let phi_params = crate::scheduler::trade::TradeParams {
-            pull_price: TradePullPrice::Phi,
-            copy_lambda_mode: TradeLambdaMode::Auto {
-                q,
-                mu,
-                min: 0.0,
-                max,
-            },
-            ..lambda_params
-        };
-        let room =
-            |c0: u64, c1: u64| json!({"evicted_class0_tokens": c0, "evicted_class1_tokens": c1});
-        let candidates = || {
-            vec![
-                candidate("a", 100_000),
-                pulling("b", 0, 100_000),
-                pulling("c", 0, 100_000),
-                pulling("d", 0, 100_000),
-            ]
-        };
-        let decide = |book: &Arc<CostBook>, rid: &str, params| {
-            let (_, r, d) = book
-                .reserve_trade_session(
-                    110_000,
-                    Some(rid.into()),
-                    candidates(),
-                    params,
-                    Some("0/agent-1"),
-                )
-                .unwrap();
-            drop(r);
-            d
-        };
-        let setup = |phi: bool| {
-            let book = CostBook::new_uncached(None).unwrap();
-            book.enable_host_room();
-            if phi {
-                book.enable_host_room_phi(120.0);
-            }
-            for (url, first, second) in [("b", (0, 0), (300, 100)), ("c", (50, 50), (50, 50))] {
-                book.note_host_room(url, room(first.0, first.1), at(589.0));
-                book.note_host_room(url, room(second.0, second.1), at(590.0));
-            }
-            // A section without the counters: no phi for `a`.
-            book.note_host_room("a", json!({"free_tokens": 0}), at(590.0));
-            let mut busy = uncached(&book, "busy", "a", 60_000);
-            busy.mark_dispatched().unwrap();
-            (book, busy)
-        };
-
-        // The lambda price: one lambda (the fallback 18.4), no phi key.
-        let (book, _busy) = setup(false);
-        let d = decide(&book, "l1", lambda_params);
-        assert_eq!(d["chosen"], "a", "{d}");
-        for key in [
-            "pull_price",
-            "phi_lambda_base",
-            "phi_base_source",
-            "phi_tau_s",
-        ] {
-            assert!(d.get(key).is_none(), "{key}: {d}");
-        }
-        for row in d["candidates"].as_array().unwrap() {
-            assert!(row.get("copy_lambda").is_none() && row.get("phi_hat").is_none());
-        }
-        let copy_d = d["candidates"][3]["copy_tokens"].as_f64().unwrap();
-        assert!((copy_d - 18.4 * 100_000.0).abs() < 1e-6, "{d}");
-        assert!(book.snapshot().get("phi_by_p").is_none());
-
-        // The phi price during start-up: lambda_q = the fallback 18.4.
-        let (book, _busy) = setup(true);
-        let d = decide(&book, "p1", phi_params);
-        assert_eq!(d["pull_price"], "phi");
-        assert_eq!(d["phi_base_source"], "startup");
-        assert_eq!(d["phi_lambda_base"], 18.4);
-        assert_eq!(d["phi_tau_s"], 120.0);
-        let rows = d["candidates"].as_array().unwrap();
-        let col = |key: &str| rows.iter().map(|r| r[key].clone()).collect::<Vec<_>>();
-        assert_eq!(
-            col("phi_source"),
-            [
-                json!("no_host_room"),
-                json!("phi"),
-                json!("no_eviction"),
-                json!("no_host_room")
-            ]
-        );
-        let lambda_b = rows[1]["copy_lambda"].as_f64().unwrap();
-        assert!(
-            (rows[1]["phi_hat"].as_f64().unwrap() - 0.25).abs() < 1e-12,
-            "{d}"
-        );
-        assert!((lambda_b - 18.4 * 0.25).abs() < 1e-9, "{d}");
-        assert_eq!(rows[2]["copy_lambda"], 0.0);
-        assert_eq!(rows[2]["phi_hat"], 0.0);
-        assert_eq!(rows[3]["copy_lambda"], 18.4);
-        assert!(rows[3]["phi_hat"].is_null());
-        let copy_b = rows[1]["copy_tokens"].as_f64().unwrap();
-        assert!((copy_b - lambda_b * 100_000.0).abs() < 1e-6, "{d}");
-        assert_eq!(rows[2]["copy_tokens"], 0.0);
-        assert_eq!(d["chosen"], "c", "the free pull moves the request: {d}");
-        assert_eq!(d["pulled_tokens"], 100_000);
-        // The decision reports the price of the chosen P (and the auto one).
-        assert_eq!(d["copy_lambda"], 0.0, "{d}");
-        assert_eq!(d["copy_lambda_used"], 0.0, "{d}");
-        assert_eq!(d["copy_lambda_auto"], 18.4, "{d}");
-        assert_eq!(d["phi_lambda_min"], 0.0, "{d}");
-        assert_eq!(d["phi_floored"], false, "{d}");
-        assert!(rows.iter().all(|r| r["phi_floored"] == false), "{d}");
-        let snapshot = book.snapshot();
-        let phi_b = &snapshot["phi_by_p"]["b"];
-        assert!((phi_b["phi_hat"].as_f64().unwrap() - 0.25).abs() < 1e-12);
-        assert_eq!(snapshot["phi_by_p"]["c"]["source"], "no_eviction");
-        assert_eq!(snapshot["phi_by_p"]["a"]["source"], "no_host_room");
-        assert_eq!(snapshot["phi_invalid"], 1);
-
-        // After tau of auto history: lambda_q = q (mu 1, R = R_hat).
-        let mut auto = crate::scheduler::trade::TradeAutoState::new(t0, 120.0);
-        auto.observe_pool(["a", "b", "c", "d"], t0);
-        let mut t = 0.0;
-        while t < 590.0 {
-            for p in ["a", "b", "c", "d"] {
-                auto.dispatched(p, at(t));
-                auto.prefill_done(p, Some(30_000), at(t + 3.0));
-            }
-            t += 4.0;
-        }
-        for i in 0..60u64 {
-            auto.session_started(i, at(594.0));
-            auto.session_finished(i, at(595.0));
-        }
-        book.state.lock().trade_auto = Some(auto);
-        let d = decide(&book, "p2", phi_params);
-        assert!(d["fallback_reason"].is_null(), "{d}");
-        assert_eq!(d["phi_base_source"], "q");
-        let q = d["q"].as_f64().unwrap();
-        assert_eq!(d["lambda_raw"], q, "R = R_hat and mu 1: {d}");
-        assert_eq!(d["phi_lambda_base"], q);
-        let rows = d["candidates"].as_array().unwrap();
-        let lambda_b = rows[1]["copy_lambda"].as_f64().unwrap();
-        assert!((lambda_b - q * 0.25).abs() < 1e-9, "{d}");
-        assert_eq!(rows[3]["copy_lambda"], q);
-        assert_eq!(d["chosen"], "c", "{d}");
-        assert_eq!(
-            book.snapshot()["phi_prices"]["rows_zero"],
-            2,
-            "c in both decisions"
-        );
-    }
-
     /// Regression: a P-leg that the engine never listed gets
     /// a transport error and stays unknown while its P keeps answering. It
     /// holds its work until a reply of its P sent 60 s after it became
@@ -7799,13 +5670,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("cost.jsonl");
         let expire = Some(secs(60));
-        let book =
-            CostBook::new_uncached_with_policy(Some(&path), "symmetric_pd_cost_function", expire)
-                .unwrap();
+        let book = CostBook::new(Some(&path), "symmetric_pd_cost_function", expire).unwrap();
         let mut other = uncached(&book, "other", "a", 7_000);
         other.mark_dispatched().unwrap();
         let before = ledger(&book, "a");
-        assert_eq!(before, (7_000, 7_000, 0, 7_000, 1));
+        assert_eq!(before, (7_000, 7_000, 7_000, 1));
         // 20,000 tokens with 8,000 cached: 12,000 uncached.
         let (_, mut lost, _) = book
             .reserve_trade_session(
@@ -7820,7 +5689,7 @@ mod tests {
         lost.mark_unknown("prefill_transport_error: upstream timed out")
             .unwrap();
         let held = ledger(&book, "a");
-        assert_eq!(held, (19_000, 19_000, 0, 19_000, 2));
+        assert_eq!(held, (19_000, 19_000, 19_000, 2));
         let auto = || {
             let st = book.state.lock();
             let auto = st.trade_auto.as_ref().unwrap();
@@ -7844,9 +5713,7 @@ mod tests {
         }
         assert_eq!(lost.debuginfo()["reason"], UNKNOWN_EXPIRED_REASON);
         assert_eq!(auto(), (Some(0), 0, 1), "auto end applied once");
-        assert!(book
-            .reserve_uncached(1, Some("lost".into()), vec![candidate("a", 0)], 12288)
-            .is_err());
+        assert!(res(&book, "lost", 1, vec![candidate("a", 0)]).is_err());
         // Later replies and snapshots change nothing and write no second event.
         reply(&book, "a", since + secs(600), &[]);
         let snapshot = book.snapshot();
@@ -7869,6 +5736,6 @@ mod tests {
         assert_eq!(e["expiry"]["unknown_for_s"], 60.0);
         assert!(e["expiry"]["since_last_progress_s"].is_null());
         other.finish("prefill_response_success").unwrap();
-        assert_eq!(ledger(&book, "a"), (0, 0, 0, 0, 0));
+        assert_eq!(ledger(&book, "a"), (0, 0, 0, 0));
     }
 }

@@ -21,7 +21,7 @@
 //!   host_hit_factor)`), clipped to `prompt_len`. Cache affinity is the
 //!   dominant default weight.
 //! * `backlog(p)`     = `backlog_uncached_tokens(p) / backlog_norm_tokens`
-//!   (pending uncached prefill tokens; co_schedule's backlog signal).
+//!   (pending uncached prefill tokens).
 //! * `role_pen(w, r)` = `1 - weight_r(w)` for a positive weight (clipped to
 //!   `[0, 1]`). A weight of **exactly 0 is a hard exclusion**: the worker is
 //!   never used for that leg. This is what lets the static 4+4 configuration
@@ -75,14 +75,13 @@
 //! `PlacementRequest::transfer_seed` (the caller supplies a fresh u64; the
 //! function itself has no state and no randomness).
 //!
-//! Placement is pure; the CoSchedule selector is shared with the legacy
-//! uncached-work policy so the owner guard and tie-breaks do not diverge.
+//! Placement is pure.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::policy::{CostModel, DefaultCostModel, PairCostInput, PrefillCostInput};
+use super::policy::{CostModel, DefaultCostModel, PairCostInput};
 
 /// Which legs a worker is able to execute ("Capability").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -407,8 +406,6 @@ impl Default for ScoreWeights {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PSelect {
-    /// Cached-owner protection, then minimum post-dispatch uncached spread.
-    CoSchedule,
     /// Argmax of the additive score over all `(p, d)` pairs.
     Score,
     /// `cache_aware_zmq` semantics: imbalance fast path, then best hit above
@@ -448,8 +445,6 @@ pub struct PlacementConfig {
     pub force_split: bool,
     #[serde(default)]
     pub p_select: PSelect,
-    #[serde(default)]
-    pub co_schedule: super::trade::CoScheduleConfig,
     #[serde(default)]
     pub d_select: DSelect,
     /// `cache_first`: best `reuse_gain` must exceed this to win on cache
@@ -575,7 +570,6 @@ impl Default for PlacementConfig {
             weights: ScoreWeights::default(),
             force_split: false,
             p_select: PSelect::default(),
-            co_schedule: super::trade::CoScheduleConfig::default(),
             d_select: DSelect::default(),
             cache_threshold: default_cache_threshold(),
             balance_abs_reqs: default_balance_abs_reqs(),
@@ -684,8 +678,8 @@ pub const D_SELECT_MIN_LOAD: f64 = 5.0;
 /// `code`: numeric `TERM_P_REASON` value, cast to an integer for lookup.
 ///
 /// # Outputs
-/// A static label (`score`, `cache`, `imbalance`, `min_load`, `replay`, `co_schedule` or
-/// `cost_function`), or `unknown`.
+/// A static label (`score`, `cache`, `imbalance`, `min_load`, `replay` or `cost_function`),
+/// or `unknown`.
 pub fn p_reason_name(code: f64) -> &'static str {
     match code as i64 {
         0 => "score",
@@ -693,7 +687,6 @@ pub fn p_reason_name(code: f64) -> &'static str {
         2 => "imbalance",
         3 => "min_load",
         4 => "replay",
-        5 => "co_schedule",
         6 => "cost_function",
         _ => "unknown",
     }
@@ -723,7 +716,6 @@ struct Candidate<'a> {
     id: &'a str,
     role: WorkerRole,
     hit_tokens: f64,
-    gpu_hit: u64,
     expected_hit: u64,
     reuse_gain: f64,
     backlog: f64,
@@ -924,7 +916,6 @@ pub fn place_with_cost<C: CostModel + ?Sized>(
                 id,
                 role: *role,
                 hit_tokens: reusable,
-                gpu_hit: hit.gpu.min(req.prompt_len),
                 expected_hit: hits
                     .expected_after_pull
                     .get(id)
@@ -968,65 +959,6 @@ pub fn place_with_cost<C: CostModel + ?Sized>(
     // then only ranks the remaining free leg (or just reports the terms).
     let (p_pin, p_reason): (Option<&Candidate>, f64) = match (replay, cfg.p_select) {
         (Some((p, _)), _) => (Some(p), P_REASON_REPLAY),
-        (None, PSelect::CoSchedule) => {
-            let p_pool: Vec<_> = p_pool
-                .iter()
-                .copied()
-                .filter(|p| !cfg.force_split || d_pool.iter().any(|d| d.id != p.id))
-                .collect();
-            if p_pool.is_empty() {
-                return Err(PlacementError::NoPairUnderForceSplit);
-            }
-            let work: Vec<_> = p_pool
-                .iter()
-                .map(|candidate| {
-                    model.prefill_cost(PrefillCostInput {
-                        worker: candidate.id,
-                        request: req,
-                        load: loads.get(candidate.id),
-                        local_hit: candidate.hit_tokens as u64,
-                        gpu_hit: candidate.gpu_hit,
-                        expected_hit: candidate.expected_hit,
-                    })
-                })
-                .collect();
-            let costs: Vec<_> = p_pool
-                .iter()
-                .zip(&work)
-                .map(|(candidate, cost)| {
-                    let (before, after) = (cost.before, cost.after);
-                    let (lo, hi) =
-                        p_pool
-                            .iter()
-                            .zip(&work)
-                            .fold((u128::MAX, 0), |(lo, hi), (other, work)| {
-                                let cost = if other.id == candidate.id {
-                                    after
-                                } else {
-                                    work.before
-                                };
-                                (lo.min(cost), hi.max(cost))
-                            });
-                    super::trade::Evaluation {
-                        worker: candidate.id,
-                        local_hit: candidate.hit_tokens as u64,
-                        gpu_hit: candidate.gpu_hit,
-                        before,
-                        after,
-                        spread: hi - lo,
-                        active_requests: candidate.active_reqs,
-                        pending_uncached_before: u128::from(candidate.backlog_tokens),
-                    }
-                })
-                .collect();
-            let selected = super::trade::select(
-                &costs,
-                cfg.co_schedule.owner_threshold_tokens,
-                model.detour_margin(cfg.co_schedule.detour_margin_tokens),
-                false,
-            );
-            (Some(p_pool[selected.chosen]), 5.0)
-        }
         (None, PSelect::Score) => (None, P_REASON_SCORE),
         (None, PSelect::CacheFirst) => {
             let (p, reason) = select_p_cache_first(&p_pool, cfg);
@@ -1172,7 +1104,7 @@ pub fn place_with_cost<C: CostModel + ?Sized>(
             (TERM_SCORE.to_string(), score),
         ],
     };
-    if matches!(cfg.p_select, PSelect::CoSchedule | PSelect::CostFunction) {
+    if cfg.p_select == PSelect::CostFunction {
         placement
             .score_terms
             .push((TERM_EXPECTED_HIT_TOKENS.into(), p.expected_hit as f64));
@@ -1194,7 +1126,7 @@ mod tests {
     fn default_policy_frozen_compatibility_matrix() {
         use sha2::{Digest, Sha256};
         let mut digest = Sha256::new();
-        for p_select in [PSelect::CoSchedule, PSelect::CacheFirst, PSelect::Score] {
+        for p_select in [PSelect::CacheFirst, PSelect::Score] {
             for d_select in [DSelect::RoundRobin, DSelect::Score] {
                 for force_split in [false, true] {
                     for seed in 0..6 {
@@ -1257,13 +1189,13 @@ mod tests {
             }
         }
         let actual = format!("{:x}", digest.finalize());
-        // Captured from the original place(), BEFORE injecting the
-        // policy/cost interfaces: 360 configurations including RR, replay,
+        // Captured from place() with the cache-first and score P selections:
+        // 240 configurations including RR, replay,
         // local/split, host/pull hits, ties and imbalance. Hash includes every
         // score term and exact floating-point serialization, not just node IDs.
         assert_eq!(
             actual,
-            "5ad08dee1010d9f8b80ee7881e7d694a20ae9ee43cfdc44046fa6e68fe99db31"
+            "e47738c1f8cbc13b805f999386e19598ece7fd922a1f26f91d2f304261a7b338"
         );
     }
 
@@ -2180,155 +2112,5 @@ mod tests {
         .unwrap_err();
         let want = "cost_function expects exactly one P candidate, got 2";
         assert_eq!(err, PlacementError::InvalidPolicyOutput(want.into()));
-    }
-    #[test]
-    /// Check co-schedule preserves light owners and records expected pull hits separately from
-    /// local residency.
-    ///
-    /// # Inputs
-    /// No arguments; raises an owner backlog across its guard and adds an expected peer hit for
-    /// the other P.
-    ///
-    /// # Outputs
-    /// No return value; the test asserts this contract and panics on a mismatch.
-    fn co_schedule_keeps_light_cached_owner_and_uses_validated_pull_hit() {
-        let mut weights = RoleWeights::new();
-        weights
-            .insert("p0", RoleWeight::PREFILL_LEANING)
-            .insert("p1", RoleWeight::PREFILL_LEANING)
-            .insert("d0", RoleWeight::DECODE_LEANING);
-        let mut hits = IndexerHits::new();
-        hits.insert(
-            "p0",
-            HitTokens {
-                gpu: 8192,
-                host: 8192,
-            },
-        );
-        let mut loads = WorkerLoads::new();
-        loads.insert(
-            "p0",
-            WorkerLoad {
-                backlog_uncached_tokens: 12288,
-                ..Default::default()
-            },
-        );
-        let cfg = PlacementConfig {
-            p_select: PSelect::CoSchedule,
-            d_select: DSelect::RoundRobin,
-            ..Default::default()
-        };
-        assert_eq!(
-            place(&req(16384), &hits, &loads, &weights, &cfg)
-                .unwrap()
-                .p_leg,
-            "p0"
-        );
-        loads.insert(
-            "p0",
-            WorkerLoad {
-                backlog_uncached_tokens: 40000,
-                ..Default::default()
-            },
-        );
-        let without = place(&req(16384), &hits, &loads, &weights, &cfg).unwrap();
-        assert_eq!(without.p_leg, "p1");
-        assert_eq!(without.term(TERM_EXPECTED_HIT_TOKENS), Some(0.0));
-        hits.expected_after_pull.insert("p1".into(), 8192);
-        let with = place(&req(16384), &hits, &loads, &weights, &cfg).unwrap();
-        assert_eq!(with.p_leg, "p1");
-        assert_eq!(with.term(TERM_HIT_TOKENS), Some(0.0));
-        assert_eq!(with.term(TERM_EXPECTED_HIT_TOKENS), Some(8192.0));
-    }
-    #[test]
-    /// Check both uncached-work selectors choose the same P and expected hit on identical
-    /// observations.
-    ///
-    /// # Inputs
-    /// No arguments; generates 128 matching legacy/new load, local-hit, expected-hit and margin
-    /// fixtures.
-    ///
-    /// # Outputs
-    /// No return value; the test asserts this contract and panics on a mismatch.
-    fn co_schedule_matches_legacy_uncached_selector_on_identical_views() {
-        use crate::cost_balance::{Candidate as LegacyCandidate, CostBook};
-        for case in 0..128u64 {
-            let book = CostBook::new_uncached(None).unwrap();
-            let mut reservations = Vec::new();
-            let mut weights = RoleWeights::new();
-            let mut loads = WorkerLoads::new();
-            let mut hits = IndexerHits::new();
-            let mut candidates = Vec::new();
-            for i in 0..3u64 {
-                let url = format!("p{i}");
-                let load = (case.wrapping_mul(7919) + i * 12289) % 100_000;
-                let local = (case * 1031 + i * 4096) % 16385;
-                let gpu = if i % 2 == 0 { local } else { local / 2 };
-                let expected = if case % 2 == 0 {
-                    local.max(8192)
-                } else {
-                    local
-                };
-                reservations.push(
-                    book.reserve_uncached(
-                        load,
-                        Some(format!("seed-{i}")),
-                        vec![LegacyCandidate {
-                            worker_url: url.clone(),
-                            local_hit: 0,
-                            gpu_hit: Some(0),
-                            expected_hit: 0,
-                            hint: None,
-                        }],
-                        12288,
-                    )
-                    .unwrap()
-                    .1,
-                );
-                weights.insert(&url, RoleWeight::PREFILL_LEANING);
-                loads.insert(
-                    &url,
-                    WorkerLoad {
-                        backlog_uncached_tokens: load,
-                        active_prefill_reqs: 1,
-                        ..Default::default()
-                    },
-                );
-                hits.insert(&url, HitTokens { gpu, host: local });
-                let hint = if expected > local {
-                    hits.expected_after_pull.insert(url.clone(), expected);
-                    Some(serde_json::json!({"expected_hit_tokens":expected}))
-                } else {
-                    None
-                };
-                candidates.push(LegacyCandidate {
-                    worker_url: url,
-                    local_hit: local,
-                    gpu_hit: Some(gpu),
-                    expected_hit: expected,
-                    hint,
-                });
-            }
-            weights.insert("d", RoleWeight::DECODE_LEANING);
-            let margin = if case % 3 == 0 { 2048 } else { 0 };
-            let cfg = PlacementConfig {
-                p_select: PSelect::CoSchedule,
-                d_select: DSelect::RoundRobin,
-                co_schedule: super::super::trade::CoScheduleConfig {
-                    owner_threshold_tokens: 12288,
-                    detour_margin_tokens: margin,
-                },
-                ..Default::default()
-            };
-            let actual = place(&req(16384), &hits, &loads, &weights, &cfg).unwrap();
-            let (expected, _reservation) = book
-                .reserve_uncached_with_margin(16384, Some("new".into()), candidates, 12288, margin)
-                .unwrap();
-            assert_eq!(actual.p_leg, expected.worker_url, "case {case}");
-            assert_eq!(
-                actual.term(TERM_EXPECTED_HIT_TOKENS),
-                Some(expected.expected_hit as f64)
-            );
-        }
     }
 }

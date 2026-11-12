@@ -19,8 +19,6 @@
 //!              queued and no launched work, fresh view); poll period + 500 ms
 //!              before the first sample of a P
 //! guard     = 300 s max wait (released to the TRADE argmin also without room)
-//! shadow    = at each release: phi_P, class-0 and free host tokens, "(ii)
-//!              would hold" (no action)
 //! ```
 //!
 //! The queue holds only the request's admission future: no reservation exists
@@ -45,9 +43,7 @@ use tokio::sync::{oneshot, Notify};
 use super::{restrict_to_pool, CostFunction, HINT_LOG_POLICY};
 use crate::config::SymmetricPdGwqAutoConfig;
 use crate::cost_balance::{Candidate, GwqAutoStep, GwqHeld, GwqStepArgs, Reservation};
-use crate::global_queue::{
-    GlobalQueueMode, GlobalQueueRoom, GwqRelease, AUTO_DISPATCH_DELAY_MS, CHUNK_TOKENS,
-};
+use crate::global_queue::{GlobalQueueRoom, GwqRelease, AUTO_DISPATCH_DELAY_MS, CHUNK_TOKENS};
 use crate::kv_hint::KvHintInjector;
 use crate::scheduler::trade::{TradeParams, TradeWait};
 use crate::scheduler::{PlaceInput, SymmetricPdError};
@@ -225,11 +221,6 @@ struct Counters {
     passes_pool_empty: u64,
     /// Released, but the admission had left (the reservation rolled back).
     send_failed: u64,
-    /// Shadow counters of the releases: with host_room data, phi > 1/2, and
-    /// "(ii) would hold" (phi > 1/2 and insert > free + class 0).
-    shadow_with_data: u64,
-    shadow_phi_over_half: u64,
-    shadow_ii_would_hold: u64,
     /// Releases whose reservation chose another P than the walk (a bug;
     /// must stay 0).
     walk_mismatch: u64,
@@ -267,9 +258,6 @@ impl Counters {
             "passes": self.passes,
             "passes_pool_empty": self.passes_pool_empty,
             "send_failed": self.send_failed,
-            "shadow_with_data": self.shadow_with_data,
-            "shadow_phi_over_half": self.shadow_phi_over_half,
-            "shadow_ii_would_hold": self.shadow_ii_would_hold,
             "walk_mismatch": self.walk_mismatch,
             "tie_breaks": self.tie_breaks,
             "tie_rotations": self.tie_rotations,
@@ -659,7 +647,6 @@ impl CostFunction {
                     walk_params,
                     &held,
                     &GwqStepArgs {
-                        mode: GlobalQueueMode::Hrrn,
                         urls: &urls,
                         depth: &depth,
                         stale_after: gwq.stale_after,
@@ -724,13 +711,6 @@ impl CostFunction {
                     let record = &released.record;
                     counters.lead_sample_releases +=
                         u64::from(record["lead_sample"].as_bool() == Some(true));
-                    let shadow = &record["shadow"];
-                    if let Some(would_hold) = shadow["ii_would_hold"].as_bool() {
-                        counters.shadow_with_data += 1;
-                        counters.shadow_ii_would_hold += u64::from(would_hold);
-                    }
-                    counters.shadow_phi_over_half +=
-                        u64::from(shadow["phi_over_half"].as_bool() == Some(true));
                     counters.walk_mismatch += u64::from(
                         record["p_release"].as_str()
                             != Some(released.candidate.worker_url.as_str()),

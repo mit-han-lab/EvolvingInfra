@@ -1427,7 +1427,7 @@ mod tests {
     /// The fixture plan with a TRADE cost entry for its P-leg (`http://p`).
     fn fixture_with_cost() -> (Executions, BackendState, Arc<crate::cost_balance::CostBook>) {
         let (e, s) = fixture();
-        let book = crate::cost_balance::CostBook::new(None).unwrap();
+        let book = crate::cost_balance::CostBook::new(None, "test", None).unwrap();
         let candidate = crate::cost_balance::Candidate {
             worker_url: "http://p".into(),
             local_hit: 0,
@@ -1435,8 +1435,13 @@ mod tests {
             expected_hit: 0,
             hint: None,
         };
-        let (_, reservation) = book
-            .reserve(4096, Some("req".into()), vec![candidate])
+        let (_, reservation, _) = book
+            .reserve_trade(
+                4096,
+                Some("req".into()),
+                vec![candidate],
+                Default::default(),
+            )
             .unwrap();
         e.records.lock().active.get_mut("r").unwrap().cost = Some(reservation);
         (e, s, book)

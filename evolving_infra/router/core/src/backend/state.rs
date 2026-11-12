@@ -1,10 +1,11 @@
 //! Authoritative router reservations plus engine observations.
 //!
 //! An observation is optional: a missing/stale engine is never reported as an
-//! idle engine. CoSchedule tracks each managed P request until an explicit
-//! terminal event; observed per-RID remaining work replaces its initial estimate.
-//! Missing/truncated snapshots preserve estimates. Legacy modes retain their
-//! separately labelled aggregate baseline + post-query reservation estimate.
+//! idle engine. The runtime uses the aggregate estimate: engine-reported load
+//! plus the reservations that no poll covers yet. The per-RID mode
+//! ([`BackendState::with_progress`]) replaces each request's initial estimate
+//! with its observed remaining work; missing/truncated snapshots preserve
+//! estimates.
 pub use crate::cost_balance::PrefillProgress;
 use crate::scheduler::placement::{WorkerLoad, WorkerLoads};
 use parking_lot::Mutex;

@@ -42,7 +42,7 @@ impl Backend {
     /// # Inputs
     /// `registry` and `model` identify the available engines; `import_cache_policy`
     /// controls D-side KV retention. `poll_ms` sets the refresh period (at least
-    /// 100 ms); `per_request_progress` selects per-RID remaining-work accounting.
+    /// 100 ms). The ledger uses aggregate engine-load accounting.
     ///
     /// # Outputs
     /// Returns an `Arc<Backend>` with an empty ledger and configured adapter.
@@ -54,13 +54,12 @@ impl Backend {
         model: ModelId,
         import_cache_policy: SymmetricPdImportCachePolicy,
         poll_ms: u64,
-        per_request_progress: bool,
         kv_session_retention: bool,
         kv_session_key_file: Option<&std::path::Path>,
         unknown_reconcile: Option<state::UnknownReconcile>,
     ) -> Arc<Self> {
         let changed = Arc::new(Notify::new());
-        let mut ledger = BackendState::with_progress(Arc::clone(&changed), per_request_progress);
+        let mut ledger = BackendState::new(Arc::clone(&changed));
         ledger.set_unknown_reconcile(unknown_reconcile);
         let backend = Arc::new(Self {
             registry: BackendRegistry::new(registry, model),
@@ -72,12 +71,7 @@ impl Backend {
             kv_sessions: kv_session_retention
                 .then(|| kv_sessions::KvSessions::spawn(kv_session_key_file)),
         });
-        refresh::spawn(
-            &backend,
-            poll_ms,
-            per_request_progress,
-            unknown_reconcile.is_some(),
-        );
+        refresh::spawn(&backend, poll_ms, false, unknown_reconcile.is_some());
         backend
     }
     #[cfg(test)]

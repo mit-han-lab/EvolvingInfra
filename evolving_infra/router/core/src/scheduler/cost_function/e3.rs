@@ -140,12 +140,6 @@ impl FlexE3 {
         }
     }
 
-    /// A polled snapshot of `worker` is kept (its forecast has a view).
-    #[cfg(test)]
-    pub(super) fn has_snapshot(&self, worker: &str) -> bool {
-        self.routing.read().contains_key(worker)
-    }
-
     /// The engine of `worker` answered `include=prefill_routing`.
     pub(super) fn note_routing_accepted(&self, worker: &str) {
         if self.rejections.lock().remove(worker).is_some() {

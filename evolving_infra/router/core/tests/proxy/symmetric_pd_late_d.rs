@@ -552,12 +552,10 @@ async fn fixture(opts: Opts) -> Fixture {
             cost_trace: Some(path.clone()),
             load_poll_ms: 10,
             unknown_expire_secs: 60,
-            loads_host_room: false,
             gwq_auto: None,
             trace_session_moves: false,
             trade_e3: None,
             pull_from_any_holder: false,
-            trace_async: false,
         });
         let kv = KvHintConfig {
             indexer_url: switchable_indexer(Arc::clone(&reply)).await,

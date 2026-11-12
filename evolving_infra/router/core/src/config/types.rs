@@ -387,8 +387,7 @@ pub struct GatewayCacheAwareConfig {
     /// 67108864): tree characters per worker kept by each eviction. A token
     /// is 8 characters, so the default is 8388608 tokens per worker.
     pub max_tree_size: usize,
-    /// `--kv-session-retention` with this policy (see
-    /// [`CoScheduleConfig::kv_session_retention`]).
+    /// `--kv-session-retention` with this policy.
     pub kv_session_retention: bool,
     /// `--kv-session-key-file` with this policy.
     pub kv_session_key_file: Option<std::path::PathBuf>,
@@ -653,9 +652,6 @@ pub enum SymmetricPdPSelect {
     /// least-loaded (default).
     #[value(name = "cache-first")]
     CacheFirst,
-    /// Co-schedule prefill placement and optional KV movement; D is configured separately.
-    #[value(name = "co-schedule")]
-    CoSchedule,
     /// sgl-model-gateway `--prefill-policy cache_aware` (the
     /// `--policy gateway_cache_aware` rule, its tree and its `--gateway-ca-*`
     /// flags and defaults) picks the P-leg among the prefill-capable
@@ -674,7 +670,6 @@ impl From<SymmetricPdPSelect> for crate::scheduler::placement::PSelect {
         match v {
             SymmetricPdPSelect::Score => Self::Score,
             SymmetricPdPSelect::CacheFirst => Self::CacheFirst,
-            SymmetricPdPSelect::CoSchedule => Self::CoSchedule,
             // The runtime narrows the prefill pool to the gateway's pick
             // (`SymmetricPdConfig::gateway_cache_aware`); the placement then
             // takes that single P.
@@ -709,11 +704,6 @@ pub struct SymmetricPdCostFunctionConfig {
     /// RID, omits the RID. A P without replies keeps it. 0 = never: it is
     /// held until a terminal result.
     pub unknown_expire_secs: u64,
-    /// `--symmetric-pd-loads-host-room` (default off): the progress poll also asks
-    /// each P for its `host_room` section (host pool by retention class), and
-    /// the cost trace records the latest one per P (`host_room_by_p` in the
-    /// snapshot and in every decision). Observation only.
-    pub loads_host_room: bool,
     /// `--symmetric-pd-gwq-auto` (default off = None): the global waiting queue
     /// of the TRADE P choice with the measured lead.
     pub gwq_auto: Option<SymmetricPdGwqAutoConfig>,
@@ -733,11 +723,6 @@ pub struct SymmetricPdCostFunctionConfig {
     /// role switch). The targets stay the healthy P-role workers. Off: every
     /// hit and every pull source is a P-role worker.
     pub pull_from_any_holder: bool,
-    /// `--trade-cost-trace-async`: the cost trace is written by a
-    /// background thread ([`crate::cost_balance::CostBook::enable_async_trace`]).
-    /// Off (default): each row is written and flushed under the cost-book
-    /// lock.
-    pub trace_async: bool,
 }
 
 /// The E3 forecast settings of the symmetric_pd cost function, shared with the

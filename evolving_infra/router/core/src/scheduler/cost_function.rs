@@ -26,13 +26,6 @@
 //! the CoScheduler's (`admit_reserved` in [`crate::co_schedule`]) on the
 //! P-role workers only: every hit and every pull source is a P-role worker.
 //!
-//! With `--symmetric-pd-loads-host-room` the poll also asks for the engine's
-//! `host_room` section (`include=core,queues,prefill_work,host_room`) and
-//! hands it to the cost book, which traces it ([`CostBook::note_host_room`]).
-//! An engine that rejects the include (HTTP 4xx or 500: no such section) is
-//! polled again at once without it, and asked again after
-//! [`HOST_ROOM_REPROBE`].
-//!
 //! With `--symmetric-pd-gwq-auto` a request that is free to go to any P waits in
 //! the global waiting queue of [`gwq_auto`] until its TRADE argmin P is about
 //! to run out of queued work; a request bound to its cache owner is reserved
@@ -59,9 +52,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::trade::{
-    trade_pull_tokens, TradeLambdaMode, TradePullPrice, TradeWait, TRADE_MIN_PULL_TOKENS,
-};
+use super::trade::{trade_pull_tokens, TradeWait, TRADE_MIN_PULL_TOKENS};
 use super::{PlaceInput, SymmetricPdError};
 use crate::config::SymmetricPdCostFunctionConfig;
 use crate::cost_balance::{Candidate, CostBook, Reservation};
@@ -73,10 +64,6 @@ use tokio::task::JoinHandle;
 
 /// The `policy` label of every row of the cost-function trace.
 pub const TRACE_POLICY: &str = "symmetric_pd_cost_function";
-
-/// `--symmetric-pd-loads-host-room`: after an engine rejected the `host_room`
-/// include, the poll of that worker asks for it again after this long.
-pub const HOST_ROOM_REPROBE: Duration = Duration::from_secs(30);
 
 /// The `policy` name of the cost-function line of
 /// [`KvHintInjector::log_decision`] (target `kv_hint`).
@@ -99,9 +86,6 @@ pub struct CostFunction {
     poll_client: reqwest::Client,
     /// One progress query per P-role worker in flight; stale sequences dropped.
     progress_refresh: Arc<LoadRefresh>,
-    /// `--symmetric-pd-loads-host-room`: worker URL -> the last time its engine
-    /// rejected the `host_room` include.
-    host_room_rejections: parking_lot::Mutex<HashMap<String, Instant>>,
     /// `--symmetric-pd-gwq-auto` (None: off): the global waiting queue.
     gwq: Option<gwq_auto::GwqAuto>,
     /// `--trade-wait e3` or `--symmetric-pd-gwq-room predicted`
@@ -124,8 +108,8 @@ impl CostFunction {
     /// Create the cost ledger (a new trace file) and log the cost model.
     ///
     /// # Inputs
-    /// `cfg`: the TRADE parameters, the trace path, the poll period, the
-    /// unknown expiry and the `host_room` switch;
+    /// `cfg`: the TRADE parameters, the trace path, the poll period and the
+    /// unknown expiry;
     /// `kv`: the runtime's indexer config (its incremental gate raises the
     /// pull floor above 512 tokens).
     ///
@@ -136,29 +120,13 @@ impl CostFunction {
     pub fn new(cfg: SymmetricPdCostFunctionConfig, kv: &KvHintConfig) -> Arc<Self> {
         let (trace, secs) = (cfg.cost_trace.as_deref(), cfg.unknown_expire_secs);
         let expire = (secs > 0).then_some(Duration::from_secs(secs));
-        let book = CostBook::new_uncached_with_policy(trace, TRACE_POLICY, expire)
+        let book = CostBook::new(trace, TRACE_POLICY, expire)
             .expect("create new cost trace before serving requests");
-        if cfg.trace_async {
-            book.enable_async_trace()
-                .expect("start the background cost trace writer before serving requests");
-        }
-        if cfg.loads_host_room {
-            book.enable_host_room();
-        }
-        if cfg.trade.pull_price == TradePullPrice::Phi {
-            // phi of each P from its host_room counters (the CLI requires
-            // --symmetric-pd-loads-host-room).
-            book.enable_host_room_phi(cfg.trade.auto_tau_s);
-        }
         let gwq = cfg
             .gwq_auto
             .map(|gwq| gwq_auto::GwqAuto::new(gwq, cfg.load_poll_ms));
         if let Some(gwq) = &gwq {
             book.enable_gwq_lead(cfg.trade.auto_tau_s, gwq.fallback_react_s);
-            if cfg.loads_host_room {
-                // The shadow counters read phi of each P.
-                book.enable_host_room_phi(cfg.trade.auto_tau_s);
-            }
         }
         if cfg.trace_session_moves {
             book.enable_session_moves();
@@ -187,7 +155,6 @@ impl CostFunction {
             trade_floor,
             poll_client,
             progress_refresh: Arc::new(LoadRefresh::default()),
-            host_room_rejections: parking_lot::Mutex::new(HashMap::new()),
             gwq,
             e3,
         });
@@ -550,61 +517,30 @@ impl CostFunction {
             .collect()
     }
 
-    /// One progress query of `worker`: the `prefill_routing` section with
-    /// the E3 forecast state, the `host_room` section with
-    /// `--symmetric-pd-loads-host-room`. The reply updates the cost book (and the
-    /// E3 state). Returns the engine cursor it applied.
+    /// One progress query of `worker`, with the `prefill_routing` section
+    /// when the E3 forecast state wants it. The reply updates the cost book
+    /// (and the E3 state). Returns the engine cursor it applied.
     async fn poll_progress(&self, worker: &Worker, query: &Query) -> anyhow::Result<(String, u64)> {
-        let room_wanted = self.host_room_wanted(&worker.url);
-        let routing_wanted = self
+        let mut routing = self
             .e3
             .as_ref()
             .is_some_and(|e3| e3.routing_wanted(&worker.url));
-        let (mut routing, mut room, mut room_rejected) = (routing_wanted, room_wanted, false);
         let fetched = loop {
-            match fetch_progress_poll(&self.poll_client, &worker.url, routing, room).await {
-                // An engine without a section rejects the include (HTTP 4xx
-                // or 500; the reply does not say which section): poll again
-                // without the rejected one, so the progress goes on;
-                // re-probe later. With both sections asked, the routing
-                // snapshot alone tells which: accepted, host_room was the
-                // rejected one (an engine with the snapshot but without
-                // host_room keeps its E3 view); rejected, the snapshot was,
-                // and host_room is asked alone next. A failed probe fails
-                // the poll and marks nothing.
-                Err(error) if routing && room && include_rejected(&error) => {
-                    match fetch_progress_poll(&self.poll_client, &worker.url, true, false).await {
-                        Err(alone) if include_rejected(&alone) => {
-                            if let Some(e3) = &self.e3 {
-                                e3.note_routing_rejected(&worker.url, &alone);
-                            }
-                            routing = false;
-                        }
-                        alone => {
-                            if alone.is_ok() {
-                                self.note_host_room_rejected(&worker.url, &error);
-                                room_rejected = true;
-                            }
-                            break alone;
-                        }
-                    }
-                }
+            match fetch_progress_poll(&self.poll_client, &worker.url, routing).await {
+                // An engine without the section rejects the include (HTTP 4xx
+                // or 500): poll again without it, so the progress goes on;
+                // re-probe later.
                 Err(error) if routing && include_rejected(&error) => {
                     if let Some(e3) = &self.e3 {
                         e3.note_routing_rejected(&worker.url, &error);
                     }
                     routing = false;
                 }
-                Err(error) if room && include_rejected(&error) => {
-                    self.note_host_room_rejected(&worker.url, &error);
-                    room = false;
-                    room_rejected = true;
-                }
                 fetched => break fetched,
             }
         };
         let received = Instant::now();
-        let (progress, load, routing_raw, room_raw) = fetched?;
+        let (progress, load, routing_raw) = fetched?;
         if routing {
             if let Some(e3) = &self.e3 {
                 e3.note_routing_accepted(&worker.url);
@@ -619,60 +555,9 @@ impl CostFunction {
             // Parsed here, off the cost-book lock.
             e3.observe(&worker.url, &raw, query.sent_at, received);
         }
-        match room_raw {
-            Some(room) => self.book.note_host_room(&worker.url, room, query.sent_at),
-            None if room_wanted && !room_rejected => self.note_host_room_missing(&worker.url),
-            None => {}
-        }
         // An applied view can give room: a release pass.
         self.gwq_wake_poll();
         Ok(cursor)
-    }
-
-    /// `--symmetric-pd-loads-host-room`, except for a worker whose engine rejected
-    /// the section less than [`HOST_ROOM_REPROBE`] ago.
-    fn host_room_wanted(&self, worker: &str) -> bool {
-        self.cfg.loads_host_room
-            && self
-                .host_room_rejections
-                .lock()
-                .get(worker)
-                .is_none_or(|at| at.elapsed() >= HOST_ROOM_REPROBE)
-    }
-
-    /// The engine of `worker` accepted `include=...,host_room` but its reply
-    /// has no host_room section: counted per P (snapshot host_room_missing);
-    /// the first one of each P is logged as a warning. The phi of that P
-    /// falls back (no_host_room) until a section comes.
-    fn note_host_room_missing(&self, worker: &str) {
-        if self.book.note_host_room_missing(worker) {
-            tracing::warn!(
-                target: "symmetric_pd",
-                worker,
-                "symmetric_pd cost_function: the engine reply has no host_room section although \
-                 the include was accepted (an engine without session retention or without a host \
-                 pool); with the pull price phi this P uses phi_P = 1 (no_host_room) until a \
-                 section comes; count: host_room_missing in the cost snapshot"
-            );
-        }
-    }
-
-    /// The engine of `worker` rejected `include=...,host_room`; the first
-    /// rejection of each worker is logged as a warning.
-    fn note_host_room_rejected(&self, worker: &str, error: &anyhow::Error) {
-        self.host_room_rejections
-            .lock()
-            .insert(worker.to_string(), Instant::now());
-        if self.book.note_host_room_rejected(worker) {
-            tracing::warn!(
-                target: "symmetric_pd",
-                worker,
-                %error,
-                reprobe_s = HOST_ROOM_REPROBE.as_secs(),
-                "symmetric_pd cost_function: the engine rejected include=host_room (no host_room \
-                 section); this poll and the next ones until the re-probe go without it"
-            );
-        }
     }
 }
 
@@ -816,51 +701,21 @@ async fn snapshot_loop(weak: Weak<CostFunction>) {
     }
 }
 
-/// The startup lines of the cost model (target `symmetric_pd`). The text is the
-/// CoScheduler's (`co_schedule TRADE ...`) behind the prefix
-/// `symmetric_pd cost_function:`, so the logs of both paths read alike.
+/// The startup lines of the cost model (target `symmetric_pd`).
 fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_floor: u64) {
     let trade = cfg.trade;
-    // Empty with hol_weight 0.
-    let hol = if trade.hol_weight > 0.0 {
-        format!(
-            " + mu*R*a_w*S*(B + S/2) (HOL: extra wait of the later arrivals at P; \
-             mu = {}, a_w = TRADE placements per s on P over the last {} s)",
-            trade.hol_weight, trade.hol_rate_window_s,
-        )
-    } else {
-        String::new()
-    };
     tracing::info!(
         target: "symmetric_pd",
         rate_tokens_per_s = trade.rate_tokens_per_s,
         pull_fixed_ms = trade.pull_fixed_ms,
         pull_ms_per_100k = trade.pull_ms_per_100k,
         copy_lambda = trade.copy_lambda,
-        exclude_unlaunched = trade.exclude_unlaunched,
+        wait = trade.wait.as_str(),
         pull_floor_tokens = trade_floor,
         local_prefix_fallback = kv.local_prefix_fallback,
         "symmetric_pd cost_function: TRADE cost model enabled: cost = backlog + uncached \
-         + R*max(0, pull_s - backlog/R) + lambda*pulled{hol}; no pull cap",
+         + R*max(0, pull_s - backlog/R) + lambda*pulled; no pull cap",
     );
-    if !trade.is_original() {
-        tracing::info!(
-            target: "symmetric_pd",
-            wait = trade.wait.as_str(),
-            dup_charge = trade.dup_charge.as_str(),
-            margin_noise_k = trade.margin_noise_k,
-            hol_weight = trade.hol_weight,
-            "symmetric_pd cost_function: TRADE options: dup all = lambda also on recomputed copies; \
-             noise margin = keep owner unless gain_s > k*sqrt(B_o^2 + B_best^2)",
-        );
-    }
-    if cfg.trace_async {
-        tracing::info!(
-            target: "symmetric_pd",
-            "symmetric_pd cost_function: cost trace writer async (background thread; rows in order, \
-             flushed per batch, off the cost-book lock)"
-        );
-    }
     if trade.is_auto() {
         let (lambda, rate) = trade.auto_description();
         let (tau, idle) = (trade.auto_tau_s, trade.auto_session_idle_s);
@@ -876,26 +731,6 @@ fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_
              prefill tokens per busy second, N_active = sessions with a request on a P \
              or an event in the idle window and no END. The fallback applies for the \
              first tau seconds and when an input is missing",
-        );
-    }
-    if trade.pull_price == TradePullPrice::Phi {
-        let floor = match trade.copy_lambda_mode {
-            TradeLambdaMode::Auto { min, .. } => min,
-            TradeLambdaMode::Fixed => 0.0,
-        };
-        tracing::info!(
-            target: "symmetric_pd",
-            pull_price = trade.pull_price.as_str(),
-            tau_s = trade.auto_tau_s,
-            lambda_min = floor,
-            "symmetric_pd cost_function: TRADE pull price phi: lambda_P = max(min, lambda_q * phi_P) \
-             for the target P with min = {floor} (--trade-copy-lambda-min; the max \
-             does not apply); lambda_q = mu*q*R/R_hat before the clamp (the fallback lambda \
-             while the auto price falls back); phi_P = live share (class 1) of the host tokens \
-             that P evicted, EWMA (tau = {} s) of the host_room counter increments, 0 without \
-             an eviction in the last tau; a P without host_room data uses phi_P = 1 \
-             (no_host_room). A pull discount on the pulled tokens only",
-            trade.auto_tau_s,
         );
     }
     if kv.local_prefix_fallback {
@@ -928,32 +763,11 @@ fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_
          (GET /v1/loads?include=core,queues,prefill_work on each P-role worker); \
          cost trace {trace}",
     );
-    if cfg.loads_host_room {
-        let used_by = if trade.pull_price == TradePullPrice::Phi {
-            "the TRADE pull price phi reads its evicted counters"
-        } else {
-            "no decision uses it"
-        };
-        tracing::info!(
-            target: "symmetric_pd",
-            loads_host_room = true,
-            "symmetric_pd cost_function: the progress poll also asks for the engine host_room \
-             section (GET /v1/loads?include=core,queues,prefill_work,host_room); the cost \
-             trace records the latest one per P (host_room_by_p in the snapshot and in each \
-             decision); {used_by}",
-        );
-    }
     if let Some(gwq) = cfg.gwq_auto {
         let fallback_ms = cfg
             .load_poll_ms
             .saturating_add(crate::global_queue::AUTO_DISPATCH_DELAY_MS);
         let (tau, max_wait_s) = (trade.auto_tau_s, gwq.max_wait_ms as f64 / 1000.0);
-        let shadow = if cfg.loads_host_room {
-            "phi, class-0 and free host tokens and the (ii) hold of each release are traced \
-             (shadow, no action)"
-        } else {
-            "no shadow counters (needs --symmetric-pd-loads-host-room)"
-        };
         tracing::info!(
             target: "symmetric_pd",
             gwq_auto = true,
@@ -966,7 +780,7 @@ fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_
              ahead as virtual backlog, until its TRADE argmin P has W <= lead, W = queued / R, \
              lead = C / R + T_react; T_react = time-weighted mean (tau = {tau} s) of release to \
              first sighting, sampled at an empty engine queue ({fallback_ms} ms before the \
-             first sample); max wait {max_wait_s} s; {shadow}; exact TRADE ties of a release \
+             first sample); max wait {max_wait_s} s; exact TRADE ties of a release \
              go to the P with room, the larger own hit, the fewest outstanding requests, then \
              in rotation; each step reads the current P-role pool",
         );
@@ -1062,14 +876,11 @@ fn log_e3(cfg: &SymmetricPdCostFunctionConfig) {
         tracing::info!(
             target: "symmetric_pd",
             gate_m = trade.gate_m,
-            gate_gmin_s = trade.gate_gmin_s,
-            hol_weight = trade.hol_weight,
             "symmetric_pd cost_function: TRADE wait e3: C_w = R*(pred_s + max(0, pull_s - wait_s)) \
              + copy; leave owner o for best w only if (C_o - C_w)/R - m*sqrt(b_o^2 + b_w^2) > \
-             g_min (b = error bound at the level, m = {}, g_min = {} s); a P without a usable \
-             forecast keeps the ledger terms and never wins a move",
+             0 (b = error bound at the level, m = {}); a P without a usable forecast keeps the \
+             ledger terms and never wins a move",
             trade.gate_m,
-            trade.gate_gmin_s,
         );
     }
     if drain {
@@ -1109,7 +920,7 @@ mod tests {
     use super::*;
     use crate::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
     use crate::kv_hint::KvWorkerMapEntry;
-    use crate::scheduler::trade::{TradeAutoQ, TradeLambdaMode, TradeParams, TradeWait};
+    use crate::scheduler::trade::{TradeLambdaMode, TradeParams, TradeWait};
     use serde_json::json;
 
     const P1: &str = "http://p1:30000";
@@ -1173,12 +984,10 @@ mod tests {
                 cost_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
-                loads_host_room: false,
                 gwq_auto: None,
                 trace_session_moves: false,
                 trade_e3: None,
                 pull_from_any_holder,
-                trace_async: false,
             },
             kv,
         )
@@ -1525,8 +1334,6 @@ mod tests {
         let auto = TradeParams {
             copy_lambda: 18.4,
             copy_lambda_mode: TradeLambdaMode::Auto {
-                q: TradeAutoQ::Sat,
-                mu: 1.0,
                 min: 4.6,
                 max: 1000.0,
             },
@@ -1619,7 +1426,6 @@ mod tests {
                 cost_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
-                loads_host_room: false,
                 gwq_auto: Some(crate::config::SymmetricPdGwqAutoConfig {
                     max_wait_ms,
                     ..Default::default()
@@ -1627,13 +1433,17 @@ mod tests {
                 trace_session_moves: false,
                 trade_e3: None,
                 pull_from_any_holder,
-                trace_async: false,
             },
             &kv,
         );
         let mut busy = cf
             .book
-            .reserve_uncached(remaining, Some("busy".into()), vec![cand(P1, 0)], 12288)
+            .reserve_trade(
+                remaining,
+                Some("busy".into()),
+                vec![cand(P1, 0)],
+                Default::default(),
+            )
             .unwrap()
             .1;
         busy.mark_dispatched().unwrap();
@@ -1918,7 +1728,6 @@ mod tests {
                 cost_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
-                loads_host_room: false,
                 gwq_auto: Some(crate::config::SymmetricPdGwqAutoConfig {
                     max_wait_ms: 300_000,
                     ..Default::default()
@@ -1926,14 +1735,18 @@ mod tests {
                 trace_session_moves: false,
                 trade_e3: None,
                 pull_from_any_holder: false,
-                trace_async: false,
             },
             &kv,
         );
         let busy = |url: &str, rid: &str, tokens: u64| {
             let mut r = cf
                 .book
-                .reserve_uncached(tokens, Some(rid.into()), vec![cand(url, 0)], 12288)
+                .reserve_trade(
+                    tokens,
+                    Some(rid.into()),
+                    vec![cand(url, 0)],
+                    Default::default(),
+                )
                 .unwrap()
                 .1;
             r.mark_dispatched().unwrap();
@@ -2039,7 +1852,6 @@ mod tests {
                 cost_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
-                loads_host_room: false,
                 gwq_auto: Some(crate::config::SymmetricPdGwqAutoConfig {
                     max_wait_ms: 300_000,
                     ..Default::default()
@@ -2047,7 +1859,6 @@ mod tests {
                 trace_session_moves: false,
                 trade_e3: None,
                 pull_from_any_holder: false,
-                trace_async: false,
             },
             kv,
         )
@@ -2217,7 +2028,6 @@ mod tests {
                 cost_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
-                loads_host_room: false,
                 gwq_auto: gwq_room.map(|room| crate::config::SymmetricPdGwqAutoConfig {
                     room,
                     ..Default::default()
@@ -2225,7 +2035,6 @@ mod tests {
                 trace_session_moves: false,
                 trade_e3: Some(e3_state()),
                 pull_from_any_holder: false,
-                trace_async: false,
             },
             kv,
         )
@@ -2329,12 +2138,10 @@ mod tests {
                     cost_trace: Some(dir.path().join("cost.jsonl")),
                     load_poll_ms: 100,
                     unknown_expire_secs: 60,
-                    loads_host_room: false,
                     gwq_auto: None,
                     trace_session_moves: false,
                     trade_e3: Some(crate::config::SymmetricPdTradeE3(Arc::new(cfg))),
                     pull_from_any_holder: false,
-                    trace_async: false,
                 },
                 &kv,
             );
@@ -2371,131 +2178,6 @@ mod tests {
         }
     }
 
-    /// A mock engine `/v1/loads` for the progress poll: it records the
-    /// `include` of each query and rejects (HTTP 400, as the engine's
-    /// section check) an include that names a section of `rejects`; it
-    /// answers the others with a progress row (sequence = the query count)
-    /// and, when asked, the recorded `prefill_routing` section and a
-    /// `host_room` section. Returns its URL and the includes it saw.
-    async fn mock_loads(rejects: &[&str]) -> (String, Arc<parking_lot::Mutex<Vec<String>>>) {
-        use axum::extract::Query as Params;
-        use axum::http::StatusCode;
-        use axum::response::IntoResponse;
-        let rejects: Arc<Vec<String>> = Arc::new(rejects.iter().map(|s| s.to_string()).collect());
-        let includes: Arc<parking_lot::Mutex<Vec<String>>> = Arc::default();
-        let snapshot = e3_snapshot();
-        let app = axum::Router::new().route(
-            "/v1/loads",
-            axum::routing::get({
-                let includes = Arc::clone(&includes);
-                move |Params(query): Params<HashMap<String, String>>| {
-                    let (includes, rejects) = (Arc::clone(&includes), Arc::clone(&rejects));
-                    let snapshot = snapshot.clone();
-                    async move {
-                        let include = query.get("include").cloned().unwrap_or_default();
-                        let sequence = {
-                            let mut seen = includes.lock();
-                            seen.push(include.clone());
-                            seen.len() as u64
-                        };
-                        let sections: Vec<&str> = include.split(',').collect();
-                        let rejected = rejects.iter().find(|s| sections.contains(&s.as_str()));
-                        if let Some(bad) = rejected {
-                            let body = format!("Invalid include sections: {{'{bad}'}}");
-                            return (StatusCode::BAD_REQUEST, body).into_response();
-                        }
-                        let mut row = json!({"prefill_work": {"epoch": "boot1",
-                            "sequence": sequence, "remaining": {}, "truncated": false}});
-                        if sections.contains(&"prefill_routing") {
-                            row["prefill_routing"] = snapshot;
-                        }
-                        if sections.contains(&"host_room") {
-                            row["host_room"] = json!({"free_tokens": 1_000, "class1_tokens": 0});
-                        }
-                        axum::Json(json!({"loads": [row]})).into_response()
-                    }
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (url, includes)
-    }
-
-    /// E3 (`--trade-wait e3`) with `--symmetric-pd-loads-host-room`:
-    /// the engine rejects the combined include without naming the section.
-    /// The routing snapshot alone tells which one: an engine without the
-    /// host_room section keeps its E3 view (rather than losing it at
-    /// every re-probe); one without the snapshot gets host_room alone; one
-    /// without both is polled plain. The second poll asks only the accepted
-    /// sections (the rejected ones wait for their re-probe).
-    #[tokio::test]
-    async fn combined_include_rejection_names_the_rejected_section() {
-        const BOTH: &str = "core,queues,prefill_work,prefill_routing,host_room";
-        const SNAP: &str = "core,queues,prefill_work,prefill_routing";
-        const ROOM: &str = "core,queues,prefill_work,host_room";
-        const PLAIN: &str = "core,queues,prefill_work";
-        // (rejected sections, includes of two polls, E3 view kept, host_room kept)
-        let cases: [(&[&str], &[&str], bool, bool); 4] = [
-            (&[], &[BOTH, BOTH], true, true),
-            (&["host_room"], &[BOTH, SNAP, SNAP], true, false),
-            (&["prefill_routing"], &[BOTH, SNAP, ROOM, ROOM], false, true),
-            (
-                &["prefill_routing", "host_room"],
-                &[BOTH, SNAP, ROOM, PLAIN, PLAIN],
-                false,
-                false,
-            ),
-        ];
-        for (rejects, asked, routing_kept, room_kept) in cases {
-            let why = format!("rejects {rejects:?}");
-            let (url, includes) = mock_loads(rejects).await;
-            let dir = tempfile::tempdir().unwrap();
-            let kv = kv(512, &[url.as_str()]);
-            let trade = TradeParams {
-                wait: TradeWait::E3,
-                gate_m: 0.0,
-                ..TradeParams::default()
-            };
-            let cf = CostFunction::new(
-                SymmetricPdCostFunctionConfig {
-                    trade,
-                    cost_trace: Some(dir.path().join("cost.jsonl")),
-                    load_poll_ms: 100,
-                    unknown_expire_secs: 60,
-                    loads_host_room: true,
-                    gwq_auto: None,
-                    trace_session_moves: false,
-                    trade_e3: Some(e3_state()),
-                    pull_from_any_holder: false,
-                    trace_async: false,
-                },
-                &kv,
-            );
-            let e3 = cf.e3.as_ref().unwrap();
-            for _ in 0..2 {
-                for poll in cf.refresh_progress(vec![worker(&url)]) {
-                    poll.await.unwrap();
-                }
-            }
-            assert_eq!(*includes.lock(), asked, "{why}");
-            assert_eq!(e3.routing_wanted(&url), routing_kept, "{why}");
-            assert_eq!(e3.has_snapshot(&url), routing_kept, "{why}");
-            assert_eq!(cf.host_room_wanted(&url), room_kept, "{why}");
-            let snapshot = cf.book.snapshot();
-            let rejected = if room_kept { json!([]) } else { json!([url]) };
-            assert_eq!(snapshot["host_room_rejected"], rejected, "{why}");
-            assert_eq!(
-                snapshot["host_room_by_p"].get(url.as_str()).is_some(),
-                room_kept,
-                "{why}: {snapshot}"
-            );
-        }
-    }
-
     /// `--symmetric-pd-gwq-room predicted` with the ledger wait: the E3 state
     /// gives the queue drain only (decisions keep the ledger terms, no E3
     /// session key). A free request on a P without room is held; the step
@@ -2519,7 +2201,12 @@ mod tests {
         e3.observe(P1, &e3_snapshot(), now, now);
         let mut busy = cf
             .book
-            .reserve_uncached(100_000, Some("busy".into()), vec![cand(P1, 0)], 12288)
+            .reserve_trade(
+                100_000,
+                Some("busy".into()),
+                vec![cand(P1, 0)],
+                Default::default(),
+            )
             .unwrap()
             .1;
         busy.mark_dispatched().unwrap();

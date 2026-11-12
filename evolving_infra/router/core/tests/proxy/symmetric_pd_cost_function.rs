@@ -13,7 +13,6 @@
 //! `"policy": "symmetric_pd_cost_function"`.
 
 use axum::body::Body;
-use axum::extract::Query;
 use axum::http::{Request, StatusCode};
 use axum::routing::{get, post};
 use axum::Json;
@@ -50,39 +49,18 @@ use tower::ServiceExt;
 /// `prefill_work`. A P-leg whose rid starts with `gone` answers 500 with
 /// the engine error type `symmetric_reader_gone`. A P-leg whose rid starts with
 /// `lost` never gets an answer and is never listed (a dropped request).
-/// `/v1/loads` records the `include` value of each query and answers
-/// `include=...,host_room` as its [`HostRoom`] says.
 struct Engine {
     url: String,
     bodies: Arc<Mutex<Vec<Value>>>,
     release: Arc<Notify>,
-    includes: Arc<Mutex<Vec<String>>>,
-}
-
-/// What a mock engine answers to `GET /v1/loads?include=...,host_room`.
-#[derive(Clone)]
-enum HostRoom {
-    /// An engine before the section: HTTP 400 (its load-snapshot section
-    /// check rejects the unknown section).
-    Rejected,
-    /// An engine with the section but without session retention: 200
-    /// without the section.
-    Omitted,
-    /// 200 with this section.
-    Section(Value),
 }
 
 impl Engine {
     async fn start(name: &'static str) -> Self {
-        Self::start_with(name, HostRoom::Rejected).await
-    }
-
-    async fn start_with(name: &'static str, room: HostRoom) -> Self {
         let bodies: Arc<Mutex<Vec<Value>>> = Arc::default();
         let release = Arc::new(Notify::new());
         let held: Arc<Mutex<BTreeMap<String, u64>>> = Arc::default();
         let sequence = Arc::new(AtomicU64::new(0));
-        let includes: Arc<Mutex<Vec<String>>> = Arc::default();
         let app = axum::Router::new()
             .route(
                 "/v1/completions",
@@ -122,26 +100,13 @@ impl Engine {
             )
             .route(
                 "/v1/loads",
-                get({
-                    let includes = includes.clone();
-                    move |Query(query): Query<BTreeMap<String, String>>| {
-                        let held = held.lock().unwrap().clone();
-                        let n = sequence.fetch_add(1, Ordering::SeqCst);
-                        let include = query.get("include").cloned().unwrap_or_default();
-                        includes.lock().unwrap().push(include.clone());
-                        let room = room.clone();
-                        async move {
-                            let mut load = json!({"num_running_reqs": held.len(),
-                                "prefill_work": {"epoch": name, "sequence": n, "remaining": held}});
-                            if include.split(',').any(|section| section == "host_room") {
-                                match room {
-                                    HostRoom::Rejected => return Err(StatusCode::BAD_REQUEST),
-                                    HostRoom::Omitted => {}
-                                    HostRoom::Section(room) => load["host_room"] = room,
-                                }
-                            }
-                            Ok(Json(json!({"loads": [load]})))
-                        }
+                get(move || {
+                    let held = held.lock().unwrap().clone();
+                    let n = sequence.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        let load = json!({"num_running_reqs": held.len(),
+                            "prefill_work": {"epoch": name, "sequence": n, "remaining": held}});
+                        Json(json!({"loads": [load]}))
                     }
                 }),
             );
@@ -154,7 +119,6 @@ impl Engine {
             url,
             bodies,
             release,
-            includes,
         }
     }
 
@@ -170,11 +134,6 @@ impl Engine {
 
     fn bodies(&self) -> Vec<Value> {
         self.bodies.lock().unwrap().clone()
-    }
-
-    /// The `include` value of every `/v1/loads` query so far, in order.
-    fn includes(&self) -> Vec<String> {
-        self.includes.lock().unwrap().clone()
     }
 }
 
@@ -239,13 +198,11 @@ struct Fixture {
 /// `min_incremental_tokens`; `reply` is the first indexer reply. The unknown
 /// expiry is 60 s and the upstream request timeout 5 s.
 async fn fixture(n_p: usize, trade: TradeParams, gate: u32, reply: Value) -> Fixture {
-    fixture_with(n_p, trade, gate, reply, 60, Duration::from_secs(5), None).await
+    fixture_with(n_p, trade, gate, reply, 60, Duration::from_secs(5)).await
 }
 
 /// [`fixture`] with the unknown expiry `unknown_expire_secs` and the
-/// upstream request timeout `timeout`. With `rooms` (one per P),
-/// `--symmetric-pd-loads-host-room` is on and P `i` answers the `host_room`
-/// include as `rooms[i]` says; without, every engine rejects it.
+/// upstream request timeout `timeout`.
 async fn fixture_with(
     n_p: usize,
     trade: TradeParams,
@@ -253,7 +210,6 @@ async fn fixture_with(
     reply: Value,
     unknown_expire_secs: u64,
     timeout: Duration,
-    rooms: Option<Vec<HostRoom>>,
 ) -> Fixture {
     let extra = (None, false);
     fixture_full(
@@ -263,7 +219,6 @@ async fn fixture_with(
         reply,
         unknown_expire_secs,
         timeout,
-        rooms,
         extra,
         None,
     )
@@ -286,16 +241,12 @@ async fn fixture_full(
     reply: Value,
     unknown_expire_secs: u64,
     timeout: Duration,
-    rooms: Option<Vec<HostRoom>>,
     extra: (Option<SymmetricPdGwqAutoConfig>, bool),
     any_holder: Option<bool>,
 ) -> Fixture {
     let mut ps = Vec::new();
-    for (i, name) in ["p1", "p2", "p3"].into_iter().take(n_p).enumerate() {
-        let room = rooms
-            .as_ref()
-            .map_or(HostRoom::Rejected, |rooms| rooms[i].clone());
-        ps.push(Engine::start_with(name, room).await);
+    for name in ["p1", "p2", "p3"].into_iter().take(n_p) {
+        ps.push(Engine::start(name).await);
     }
     let d = Engine::start("d1").await;
     let reply = Arc::new(Mutex::new(reply));
@@ -336,12 +287,10 @@ async fn fixture_full(
             cost_trace: Some(trace.clone()),
             load_poll_ms: 10,
             unknown_expire_secs,
-            loads_host_room: rooms.is_some(),
             gwq_auto: extra.0,
             trace_session_moves: extra.1,
             trade_e3: None,
             pull_from_any_holder: any_holder.unwrap_or(false),
-            trace_async: false,
         }),
         ..SymmetricPdConfig::default()
     };
@@ -623,12 +572,10 @@ async fn flex_trade_three_p(lambda: f64, gate: u32) {
 /// retention-off 400).
 #[tokio::test]
 async fn flex_cost_function_copy_lambda_auto_counts_sessions() {
-    use sgl_router::scheduler::trade::{TradeAutoQ, TradeLambdaMode};
+    use sgl_router::scheduler::trade::TradeLambdaMode;
     let trade = TradeParams {
         copy_lambda: 18.4,
         copy_lambda_mode: TradeLambdaMode::Auto {
-            q: TradeAutoQ::Sat,
-            mu: 1.0,
             min: 4.6,
             max: 1000.0,
         },
@@ -638,7 +585,6 @@ async fn flex_cost_function_copy_lambda_auto_counts_sessions() {
     f.send("a1", 2000, Some("agent-a")).await;
     let d = f.decision("a1");
     assert_eq!(d["lambda_mode"], "auto", "{d}");
-    assert_eq!(d["q_mode"], "sat");
     assert_eq!(d["fallback_reason"], "startup");
     assert_eq!(d["copy_lambda_used"], 18.4);
     assert_eq!(d["copy_lambda"], 18.4);
@@ -708,16 +654,7 @@ async fn flex_cost_function_unknown_p_leg_expires_without_engine_progress() {
     for expire_secs in [1u64, 0] {
         let timeout = Duration::from_millis(300);
         let reply = json!({"instances": {}});
-        let f = fixture_with(
-            2,
-            TradeParams::default(),
-            512,
-            reply,
-            expire_secs,
-            timeout,
-            None,
-        )
-        .await;
+        let f = fixture_with(2, TradeParams::default(), 512, reply, expire_secs, timeout).await;
         f.send("lost", 4_000, None).await;
         let (p, _) = f.landed_on("lost").await;
         f.wait_for("the unknown row of lost", |events| {
@@ -770,231 +707,6 @@ async fn flex_cost_function_unknown_p_leg_expires_without_engine_progress() {
     }
 }
 
-/// `--symmetric-pd-loads-host-room` (observation only). P1 answers the
-/// `host_room` section, P2 is an engine before the section (HTTP 400 for the
-/// include) and P3 has the section but no session retention (200 without
-/// it). With the flag every P is first asked for
-/// `core,queues,prefill_work,host_room`; P2 is asked again at once without
-/// it and not asked for the section again before the 30-s re-probe. The
-/// one-second snapshot has P1's section with its age and lists P2 as
-/// rejected; the decision has the section of P1 and null for P2 and P3.
-/// Without the flag every progress query is `core,queues,prefill_work`, no
-/// query asks for the section and no trace row has a `host_room` key. The P
-/// choice and its cost are the same. (The symmetric_pd backend also polls every
-/// worker, with `core` or `core,prefill_work`; only the progress queries,
-/// the ones with `queues`, are checked in order.)
-#[tokio::test]
-async fn flex_cost_function_traces_the_engine_host_room_only_with_the_flag() {
-    let room = json!({"total_tokens": 8_268_864u64, "free_tokens": 1_000,
-        "class0_tokens": 6_000_000u64, "class1_tokens": 2_267_864u64,
-        "evicted_class0_tokens": 300, "evicted_class1_tokens": 0});
-    let plain = "core,queues,prefill_work";
-    let asked = "core,queues,prefill_work,host_room";
-    let mut picks = Vec::new();
-    for flag in [false, true] {
-        let rooms = flag.then(|| {
-            vec![
-                HostRoom::Section(room.clone()),
-                HostRoom::Rejected,
-                HostRoom::Omitted,
-            ]
-        });
-        let reply = json!({"instances": {"1": {"cpu": 3000}}});
-        let timeout = Duration::from_secs(5);
-        let f = fixture_with(3, TradeParams::default(), 512, reply, 60, timeout, rooms).await;
-        let (p1, p2, p3) = (&f.ps[0].url, &f.ps[1].url, &f.ps[2].url);
-        if flag {
-            f.wait_for("a snapshot with P1's host_room and P2 rejected", |events| {
-                events.iter().any(|e| {
-                    e["event"] == "snapshot"
-                        && e["host_room_by_p"][p1.as_str()]["free_tokens"] == 1_000
-                        && e["host_room_rejected"] == json!([p2])
-                })
-            })
-            .await;
-        } else {
-            let any_snapshot = |events: &[Value]| events.iter().any(|e| e["event"] == "snapshot");
-            f.wait_for("a snapshot", any_snapshot).await;
-        }
-        f.send("r1", 4_000, None).await;
-        let (p, _) = f.landed_on("r1").await;
-        let d = f.decision("r1");
-        picks.push((p, d["trade_cost"].clone(), d["pulled_tokens"].clone()));
-        let polls = |i: usize| -> Vec<String> {
-            let includes = f.ps[i].includes().into_iter();
-            includes
-                .filter(|include| include.contains("queues"))
-                .collect()
-        };
-        if flag {
-            let rows = &d["host_room_by_p"];
-            assert_eq!(rows[p1.as_str()]["class1_tokens"], 2_267_864u64, "{d}");
-            assert_eq!(rows[p1.as_str()]["evicted_class0_tokens"], 300, "{d}");
-            assert!(rows[p1.as_str()]["age_s"].as_f64().unwrap() >= 0.0, "{d}");
-            assert!(
-                rows[p2.as_str()].is_null() && rows[p3.as_str()].is_null(),
-                "{d}"
-            );
-            let snapshot = f
-                .events()
-                .into_iter()
-                .rev()
-                .find(|e| e["event"] == "snapshot")
-                .unwrap();
-            assert_eq!(snapshot["host_room_invalid"], 0);
-            assert!(snapshot["host_room_by_p"].get(p3.as_str()).is_none());
-            for i in [0, 2] {
-                let polls = polls(i);
-                assert!(
-                    !polls.is_empty() && polls.iter().all(|s| s == asked),
-                    "{polls:?}"
-                );
-            }
-            // P2: one rejected probe, then the plain poll at once and after.
-            let polls = polls(1);
-            assert_eq!(polls.first().map(String::as_str), Some(asked), "{polls:?}");
-            assert_eq!(polls.get(1).map(String::as_str), Some(plain), "{polls:?}");
-            assert_eq!(polls.iter().filter(|s| *s == asked).count(), 1, "{polls:?}");
-            assert!(polls.len() > 2, "P2 is still polled: {polls:?}");
-        } else {
-            assert!(d.get("host_room_by_p").is_none(), "{d}");
-            for (i, engine) in f.ps.iter().enumerate() {
-                let polls = polls(i);
-                assert!(
-                    !polls.is_empty() && polls.iter().all(|s| s == plain),
-                    "{polls:?}"
-                );
-                assert!(engine.includes().iter().all(|s| !s.contains("host_room")));
-            }
-            let keys = |e: &Value| -> Vec<String> {
-                e.as_object()
-                    .map(|row| row.keys().filter(|k| k.starts_with("host_room")).cloned())
-                    .into_iter()
-                    .flatten()
-                    .collect()
-            };
-            for event in f.events() {
-                assert!(keys(&event).is_empty(), "{event}");
-                assert!(keys(&event["trade_decision"]).is_empty(), "{event}");
-            }
-        }
-    }
-    assert_eq!(picks[0], picks[1], "the section never changes the choice");
-    assert_eq!(picks[0].0, 0, "P1 holds 3,000 of the 4,000 tokens");
-}
-
-/// `--trade-pull-price phi` end to end, with the lambda = q
-/// words (copy price auto, mu 1, no clamp, rate auto) during start-up, so
-/// lambda_q = the fallback 18.4. P1 owns 18,000 of the 20,000-token prompt
-/// and holds `busy` (20,000 tokens of backlog). P1 and P2 answer a
-/// host_room section with constant evicted counters (phi 0: no eviction in
-/// the window); P3 has no section (it pays lambda_q, reason no_host_room).
-/// `pull`: with the lambda price every pull costs 18.4 per token, so the
-/// request stays on P1 (22,000 < P2's 339,518); with phi, P2 pulls 18,000
-/// tokens from P1 and pays only the pull time (8,318 < 22,000). The
-/// decision's copy_lambda is the price of the chosen P2 (0), and P3's
-/// omitted section is counted (host_room_missing).
-#[tokio::test]
-async fn flex_cost_function_phi_price_moves_off_a_loaded_owner() {
-    use sgl_router::scheduler::trade::{
-        TradeAutoQ, TradeLambdaMode, TradePullPrice, TradeRateMode,
-    };
-    let room = json!({"total_tokens": 1_000, "free_tokens": 0, "class0_tokens": 600,
-        "class1_tokens": 400, "evicted_class0_tokens": 300, "evicted_class1_tokens": 0});
-    for pull_price in [TradePullPrice::Lambda, TradePullPrice::Phi] {
-        let trade = TradeParams {
-            copy_lambda: 18.4,
-            copy_lambda_mode: TradeLambdaMode::Auto {
-                q: TradeAutoQ::Sat,
-                mu: 1.0,
-                min: 0.0,
-                max: 1e9,
-            },
-            rate_mode: TradeRateMode::Auto,
-            pull_price,
-            ..TradeParams::default()
-        };
-        let rooms = vec![
-            HostRoom::Section(room.clone()),
-            HostRoom::Section(room.clone()),
-            HostRoom::Omitted,
-        ];
-        let reply = json!({"instances": {"1": {"cpu": 18000}, "3": {"cpu": 300}}});
-        let timeout = Duration::from_secs(5);
-        let f = fixture_with(3, trade, 512, reply, 60, timeout, Some(rooms)).await;
-        let (p1, p2) = (f.ps[0].url.clone(), f.ps[1].url.clone());
-        let phi = pull_price == TradePullPrice::Phi;
-        if phi {
-            // Two samples of P1 and of P2: phi 0 (no increment).
-            f.wait_for("phi of P1 and P2", |events| {
-                events.iter().any(|e| {
-                    e["event"] == "snapshot"
-                        && e["phi_by_p"][p1.as_str()]["source"] == "no_eviction"
-                        && e["phi_by_p"][p2.as_str()]["source"] == "no_eviction"
-                })
-            })
-            .await;
-        }
-        f.send("busy", 20_000, None).await;
-        let (p, _) = f.landed_on("busy").await;
-        assert_eq!(p, 0, "the owner P1 takes the first request");
-        f.wait_for("busy progress", |events| {
-            events.iter().any(|e| {
-                e["event"] == "prefill_progress"
-                    && e["updates"]
-                        .as_array()
-                        .is_some_and(|u| u.iter().any(|u| u["remaining_after"] == 20000))
-            })
-        })
-        .await;
-        f.send("pull", 20_000, None).await;
-        let (p, body) = f.landed_on("pull").await;
-        let d = f.decision("pull");
-        if phi {
-            assert_eq!(p, 1, "P2 pulls without a copy charge: {d}");
-            assert_eq!(d["pull_price"], "phi");
-            assert_eq!(d["phi_base_source"], "startup");
-            assert_eq!(d["phi_lambda_base"], 18.4);
-            assert_eq!(d["pulled_tokens"], 18000);
-            let p2_row = row(&f, &d, 1);
-            assert_eq!(p2_row["copy_lambda"], 0.0);
-            assert_eq!(p2_row["phi_source"], "no_eviction");
-            let p3_row = row(&f, &d, 2);
-            assert_eq!(p3_row["copy_lambda"], 18.4);
-            assert_eq!(p3_row["phi_source"], "no_host_room");
-            assert_eq!(d["copy_lambda"], 0.0, "the chosen P2's price: {d}");
-            assert_eq!(d["copy_lambda_auto"], 18.4, "{d}");
-            assert_eq!(d["phi_floored"], false, "min 0: {d}");
-            let p3 = f.ps[2].url.clone();
-            f.wait_for("P3 counted in host_room_missing", |events| {
-                events.iter().any(|e| {
-                    e["event"] == "snapshot"
-                        && e["host_room_missing"][p3.as_str()]
-                            .as_u64()
-                            .is_some_and(|n| n >= 1)
-                        && e["host_room_missing"].get(p1.as_str()).is_none()
-                })
-            })
-            .await;
-            let hint = body.get("kv_pull_hint").expect("P2's P-leg has the hint");
-            assert_eq!(hint["source_worker_id"], p1.as_str());
-            assert_eq!(hint["expected_hit_tokens"], 18000);
-        } else {
-            assert_eq!(p, 0, "the copy price keeps the request on P1: {d}");
-            assert!(d.get("pull_price").is_none(), "{d}");
-            assert!(row(&f, &d, 1).get("copy_lambda").is_none(), "{d}");
-            assert!(body.get("kv_pull_hint").is_none());
-        }
-        f.ps[0].release.notify_one();
-        f.wait_for("busy finished", |events| {
-            events
-                .iter()
-                .any(|e| e["event"] == "finished" && e["entry"]["rid"] == "busy")
-        })
-        .await;
-    }
-}
-
 /// `POST /symmetric_pd/place` cannot report a request's dispatch and end to the
 /// cost ledger, so it is refused (400) and reserves nothing.
 #[tokio::test]
@@ -1038,7 +750,6 @@ async fn flex_cost_function_gwq_auto_holds_a_free_request_until_room() {
         json!({"instances": {}}),
         60,
         Duration::from_secs(5),
-        None,
         (gwq, true),
         None,
     )
@@ -1172,7 +883,6 @@ async fn flex_cost_function_any_holder_pulls_from_a_d_role_holder() {
             reply,
             60,
             Duration::from_secs(5),
-            None,
             (gwq_cfg, false),
             Some(flag),
         )
@@ -1239,7 +949,6 @@ async fn flex_cost_function_any_holder_skips_unregistered_and_breaker_open_holde
         reply,
         60,
         Duration::from_secs(5),
-        None,
         (None, false),
         Some(true),
     )
