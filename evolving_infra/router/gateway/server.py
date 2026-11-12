@@ -20,6 +20,7 @@ from aiohttp import web
 from evolving_infra.router.gateway.sessions import Tracker
 
 log = logging.getLogger("evolving_infra.gateway")
+PLACEMENT_RETRIES = 2  # 503 symmetric_pd_no_placement: the router's pair changed role during placement
 HOP = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "x-agent-context",
        "authorization", "x-api-key"}
 
@@ -95,7 +96,16 @@ class Gateway:
         out = None
         try:
             outcome["sent"] = True  # from here the router may have registered the branch
-            async with self.session.post(self.router + request.path, json=body, headers=headers) as upstream:
+            for attempt in range(PLACEMENT_RETRIES + 1):
+                upstream = await self.session.post(self.router + request.path, json=body, headers=headers)
+                if upstream.status != 503 or attempt == PLACEMENT_RETRIES:
+                    break
+                text = await upstream.text()
+                upstream.release()
+                if "symmetric_pd_no_placement" not in text:  # another 503: pass it on as it is
+                    return web.Response(status=503, text=text, content_type="application/json")
+                await asyncio.sleep(0.5 * (attempt + 1))  # a worker left its role while placed: place again
+            async with upstream:
                 out = web.StreamResponse(status=upstream.status, headers={
                     k: v for k, v in upstream.headers.items() if k.lower() not in HOP})
                 await out.prepare(request)

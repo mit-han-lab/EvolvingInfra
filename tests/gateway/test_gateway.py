@@ -178,3 +178,30 @@ def test_a_branch_whose_request_failed_still_gets_end():
         assert [s[0] for s in seen] == ["chat", "end"]
 
     asyncio.run(run())
+
+
+def test_a_placement_refused_during_a_role_switch_is_retried():
+    async def run():
+        calls = []
+
+        async def chat(request):
+            calls.append(request.headers.get("x-agent-context"))
+            if len(calls) == 1:
+                return web.json_response({"error": {"code": "symmetric_pd_no_placement"}}, status=503)
+            return web.json_response({"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", chat)
+        router = TestServer(app)
+        await router.start_server()
+        client = TestClient(TestServer(Gateway(str(router.make_url(""))).app()))
+        await client.start_server()
+        try:
+            r = await client.post("/v1/chat/completions", json={"model": "m", "messages": [SYS, U1]})
+            assert r.status == 200
+        finally:
+            await client.close()
+            await router.close()
+        assert len(calls) == 2 and calls[0] == calls[1]
+
+    asyncio.run(run())
