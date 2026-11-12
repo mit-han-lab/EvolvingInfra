@@ -84,9 +84,8 @@ bash examples/agents/<harness>.sh <the harness's one-shot flag> "List the files 
 ```
 
 **Check**: the first prints the model's reply; the second runs the harness's file or shell tool
-and answers from its output. An HTTP 501 `late_d_route_unsupported` means the stack was not
-served with an `examples/agents/<model>.yaml` config; a tool call printed as text means the
-config's parsers are missing.
+and answers from its output. A tool call printed as text means the stack was not served with
+an `examples/agents/<model>.yaml` config, which has the parsers.
 
 ### 5. Document it
 

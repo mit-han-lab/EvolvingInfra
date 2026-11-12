@@ -66,6 +66,10 @@ pub struct ProxyConfig {
     /// `/internal/prepared_image`), see [`crate::image_source`]. Leaked:
     /// lives for the process. `None`: decode legs carry the pixels.
     pub late_d_image_source_url: Option<&'static str>,
+    /// `--chat-tools-tokenize`: a chat request with tools gets its token
+    /// ids from an engine's `/v1/tokenize`, see [`crate::engine_tokenize`].
+    /// `false`: such a request is placed on the ids of its messages alone.
+    pub chat_tools_tokenize: bool,
 }
 
 /// Default `/v1/completions` body cap (5 MiB).
@@ -86,6 +90,7 @@ impl Default for ProxyConfig {
             max_completions_body_bytes: DEFAULT_MAX_COMPLETIONS_BODY_BYTES,
             image_layout: None,
             late_d_image_source_url: None,
+            chat_tools_tokenize: false,
         }
     }
 }

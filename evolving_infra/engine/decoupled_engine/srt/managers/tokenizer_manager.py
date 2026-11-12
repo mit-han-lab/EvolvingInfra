@@ -1826,7 +1826,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
     ):
         # Not all request types have `stream` (e.g., EmbeddingReqInput). Default to non-streaming.
         is_stream = getattr(obj, "stream", False)
-        # Late D: a choose leg of /v1/completions answers an abort before its
+        # Late D: a choose leg of an OpenAI route answers an abort before its
         # first chunk with an HTTP status (LateDLegEnded).
         late_d_leg = getattr(obj, LATE_D_STATUS_ROUTE_ATTR, False)
         late_d_leg = late_d_leg and bool(getattr(obj, "late_d", None))

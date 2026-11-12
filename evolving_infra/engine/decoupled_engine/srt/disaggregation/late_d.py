@@ -166,7 +166,7 @@ LATE_D_READER_GONE_ERR = "late_d_reader_gone"
 # LateDControl.detail of a ``fail`` control (why the entry ends).
 FAIL_OWNER_ABORT = "owner_abort"
 FAIL_MODE_MISMATCH = "mode_mismatch"
-# A late-D outcome's err_type is "late_d_<reason>". /v1/completions sends the
+# A late-D outcome's err_type is "late_d_<reason>". The OpenAI routes send the
 # reason in this header.
 LATE_D_ERR_PREFIX = "late_d_"
 LATE_D_REASON_HEADER = "X-Late-D-Reason"
@@ -174,10 +174,23 @@ LATE_D_REASON_HEADER = "X-Late-D-Reason"
 # is the stream ("local": the owner runs it) or a one-token stub ("stub").
 LATE_D_LEG_HEADER = "X-Late-D-Leg"
 LATE_D_OUTCOME_LOCAL = "local"
-# Process-local mark that /v1/completions sets on the requests it converts:
-# the route answers LateDLegEnded with the leg's HTTP status. In v1 choose
-# mode serves only this route; /generate and chat keep in-band errors.
+# Process-local mark that /v1/completions and /v1/chat/completions set on the
+# requests they convert: the route answers LateDLegEnded with the leg's HTTP
+# status. Choose mode serves these two routes; /generate keeps in-band errors.
 LATE_D_STATUS_ROUTE_ATTR = "_late_d_status_route"
+# Process-local: the late-D outcome of a stream's first chunk.
+LATE_D_OUTCOME_ATTR = "_late_d_outcome"
+
+
+def late_d_leg_headers(adapted_request, outcome: Optional[str]) -> Optional[Dict[str, str]]:
+    """X-Late-D-Leg for a symmetric choose P-leg (kv_export + late_d):
+    "local" when its owner runs it as a Local request (the client stream),
+    else "stub" (one token; a D-leg is the stream). None for other requests,
+    PD legs included (no header means stub)."""
+    if adapted_request.late_d is None or adapted_request.kv_export is None:
+        return None
+    leg = LATE_D_OUTCOME_LOCAL if outcome == LATE_D_OUTCOME_LOCAL else "stub"
+    return {LATE_D_LEG_HEADER: leg}
 
 
 def _resolved(server_args, field):

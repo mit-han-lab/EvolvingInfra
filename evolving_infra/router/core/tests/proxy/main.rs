@@ -12,6 +12,7 @@ mod common;
 
 mod cache_aware_input_ids;
 mod chat_routing;
+mod chat_tools_tokenize;
 mod completions_image_layout;
 mod decode_po2_smg;
 mod decode_token_balance;

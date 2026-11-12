@@ -99,7 +99,8 @@ that is given wins.
 | `--co-schedule-trade-copy-lambda X` | Price per pulled token of the second copy a pull creates (default 4.6). |
 | `--co-schedule-cost-trace FILE` | Write every placement decision to a new JSONL file. |
 | `--symmetric-pd-p-select cache-first\|cost-function` | `cache-first`: the worker with the best cache hit unless it is overloaded. `cost-function`: the lowest predicted wait plus compute plus pull cost. See [Placement](placement.md). |
-| `--pd-late-decode-rule fit_req\|d1` | How late decode choice picks D. Late decode choice applies to `/v1/completions`; a native `/generate` request gets its D at arrival, and `/v1/chat/completions` is refused. |
+| `--pd-late-decode-rule fit_req\|d1` | How late decode choice picks D. Late decode choice applies to `/v1/completions` and `/v1/chat/completions`; a native `/generate` request gets its D at arrival. A chat request with `n` above 1 is refused, as a batch prompt is. |
+| `--chat-tools-tokenize` | A chat request with `tools` is placed on token ids from an engine's `/v1/tokenize` (prompt length, KV directory query, pull hint). The router's chat encoder renders messages only, so without the flag such a request matches no cached prefix. The ids are not forwarded to the engine; a tokenize that fails or takes over 3 s leaves the request placed as without the flag. Off by default; the configs in `examples/agents` turn it on. |
 
 ### Dynamic P/D
 

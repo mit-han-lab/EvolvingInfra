@@ -55,6 +55,9 @@ enum Ingress {
     Completions,
     /// Native bodies may omit `model`; the router's single model is implied.
     Generate,
+    /// A chat request under late D choose (`routes/chat.rs` sends it here):
+    /// its token ids come from the router's chat encoder.
+    Chat,
 }
 
 impl Ingress {
@@ -62,6 +65,7 @@ impl Ingress {
         match self {
             Ingress::Completions => "/v1/completions",
             Ingress::Generate => "/generate",
+            Ingress::Chat => "/v1/chat/completions",
         }
     }
 
@@ -70,16 +74,18 @@ impl Ingress {
         let field = match self {
             Ingress::Completions => "prompt",
             Ingress::Generate => "input_ids",
+            Ingress::Chat => return None,
         };
         flat_token_ids(value.get(field)?)
     }
 
     /// Whether late D choose may dispatch this request. Its legs go to the
-    /// engines' `/v1/completions`, which answer a released candidate with
-    /// 409; a native `/generate` request takes the plain two-leg dispatch,
-    /// and the engines serve a request without `late_d` as late D alloc.
+    /// engines' `/v1/completions` or `/v1/chat/completions`, which answer a
+    /// released candidate with 409; a native `/generate` request takes the
+    /// plain two-leg dispatch, and the engines serve a request without
+    /// `late_d` as late D alloc.
     fn late_d_choose(self) -> bool {
-        matches!(self, Ingress::Completions)
+        matches!(self, Ingress::Completions | Ingress::Chat)
     }
 }
 
@@ -117,6 +123,16 @@ pub async fn generate(
     dispatch(ctx, headers, body, Ingress::Generate).await
 }
 
+/// A chat request under `--pd-late-decode choose`, dispatched like
+/// completions with the legs on the engines' chat route.
+pub(crate) async fn chat(
+    ctx: Arc<AppContext>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response<Body>, ApiError> {
+    dispatch(ctx, headers, body, Ingress::Chat).await
+}
+
 async fn dispatch(
     ctx: Arc<AppContext>,
     headers: HeaderMap,
@@ -129,7 +145,7 @@ async fn dispatch(
     let model_str = match (probe.model, ingress) {
         (Some(model), _) => model,
         (None, Ingress::Generate) => ctx.config.model.id.clone(),
-        (None, Ingress::Completions) => {
+        (None, Ingress::Completions | Ingress::Chat) => {
             return Err(ApiError::BadRequest("missing `model` field".into()))
         }
     };
@@ -197,6 +213,26 @@ async fn dispatch(
     // as `input_ids` — the forwarded `prompt` already carries them.
     let mut prompt_ids: Option<Vec<u32>> =
         request_value.as_ref().and_then(|v| ingress.token_ids(v));
+    if let (Ingress::Chat, Some(value)) = (ingress, request_value.as_mut()) {
+        // Late D choose binds one request: `n` choices are one engine batch.
+        if value.get("n").and_then(serde_json::Value::as_u64) > Some(1) {
+            return Err(ApiError::LateDBatchUnsupported);
+        }
+        let tokens = super::chat::chat_request_tokens(&ctx, &model_id, value, &workers).await;
+        // Engine-equivalent ids ride on every leg as `input_ids`, so the
+        // prefill and each decode candidate skip tokenizing the same prompt.
+        if let (Some(t), Some(obj)) = (tokens.as_ref(), value.as_object_mut()) {
+            if t.engine_equivalent
+                && super::chat::input_ids_safe_to_forward(&serde_json::Value::Object(obj.clone()))
+            {
+                obj.insert("input_ids".to_string(), serde_json::json!(t.ids));
+                body = Bytes::from(
+                    serde_json::to_vec(&*obj).map_err(|e| ApiError::Internal(e.into()))?,
+                );
+            }
+        }
+        prompt_ids = tokens.map(|t| t.ids);
+    }
     // `--image-layout-config`: a token-id prompt with uploaded screenshots
     // routes on the engine's radix view (placeholders expanded to the
     // images' layout pad values), and the forwarded body carries the
@@ -797,6 +833,7 @@ async fn dispatch(
                 choose,
                 prefill: Arc::clone(&worker),
                 prefill_holds: Box::new((guard, active_guard)),
+                path: ingress.path(),
                 headers: headers.clone(),
                 prefill_body,
                 legs,

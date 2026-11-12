@@ -5,7 +5,8 @@ base: ../gb300/glm52-1node.yaml
 engine_args:
   - --tool-call-parser=glm47
   - --reasoning-parser=glm45
-  # Late decode choice serves /v1/completions only; harnesses send chat completions.
+  # Each request gets its decode worker at arrival (late decode choice off).
   - --disaggregation-late-d=off
 router_args:
   - --pd-late-decode=off
+  - --chat-tools-tokenize        # place requests with tools on the engine's token ids

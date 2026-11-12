@@ -133,13 +133,6 @@ pub enum ApiError {
     #[error("{0}")]
     SymmetricPdEndpoints(String),
 
-    /// `--pd-late-decode choose` serves only `/v1/completions`: on another
-    /// route a released or failed candidate would reach the client as a
-    /// 2xx stream. 501
-    /// `late_d_route_unsupported`.
-    #[error("late decode (choose) serves only /v1/completions")]
-    LateDRouteUnsupported,
-
     /// `--pd-late-decode choose` binds one request at a time; a batch
     /// prompt is refused. 400 `late_d_batch_unsupported`.
     #[error(
@@ -209,9 +202,6 @@ impl ApiError {
             }
             ApiError::SymmetricPdEndpoints(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "symmetric_pd_endpoints")
-            }
-            ApiError::LateDRouteUnsupported => {
-                (StatusCode::NOT_IMPLEMENTED, "late_d_route_unsupported")
             }
             ApiError::LateDBatchUnsupported => {
                 (StatusCode::BAD_REQUEST, "late_d_batch_unsupported")
@@ -341,7 +331,6 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(_)
             | ApiError::ModelNotFound(_)
             | ApiError::SymmetricPdDisabled
-            | ApiError::LateDRouteUnsupported
             | ApiError::LateDBatchUnsupported => self.to_string(),
         };
         let mut resp = (
@@ -490,11 +479,6 @@ mod tests {
     #[test]
     fn late_d_envelopes_have_their_codes() {
         for (err, status, code) in [
-            (
-                ApiError::LateDRouteUnsupported,
-                StatusCode::NOT_IMPLEMENTED,
-                "late_d_route_unsupported",
-            ),
             (
                 ApiError::LateDBatchUnsupported,
                 StatusCode::BAD_REQUEST,
