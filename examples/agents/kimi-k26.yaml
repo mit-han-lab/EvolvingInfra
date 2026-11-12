@@ -3,7 +3,7 @@ base: ../gb300/kimi-k26.yaml
 engine_args:
   - --tool-call-parser=kimi_k2
   - --reasoning-parser=kimi_k2
-  # Late decode choice serves /v1/completions only; harnesses send chat completions.
+  # Each request gets its decode worker at arrival (late decode choice off).
   - --disaggregation-late-d=off
 router_args:
   - --pd-late-decode=off

@@ -53,9 +53,8 @@ writes its launch script.
   with [`connect-agent`](../../skills/connect-agent/SKILL.md).
 - A stack started with `--planner` (KV retention on) refuses plain requests, so harnesses need a
   stack without `--planner`.
-- The configs here turn late decode choice off on engines and router: it serves `/v1/completions`
-  only, and harnesses send chat completions (a stack with the `paper` preset answers them with
-  HTTP 501 `late_d_route_unsupported`).
+- The configs here turn late decode choice off on engines and router: each request gets its
+  decode worker at arrival.
 - The router's chat encoder renders messages only. The configs here pass `--chat-tools-tokenize`,
   so for a request with tools the router asks an engine's `/v1/tokenize` for the token ids and
   places the request on them; this adds one tokenization per request. Without the flag such a

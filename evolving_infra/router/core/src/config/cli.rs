@@ -1056,7 +1056,9 @@ pub struct Cli {
     /// = one decode leg chosen at arrival; `choose` = the request goes to the
     /// prefill and to every decode candidate at once, and the prefill asks
     /// this router for the winner (link to its `late_d.control_port`) when it
-    /// is about to prefill. `/v1/completions` only (chat answers 501).
+    /// is about to prefill. It serves `/v1/completions` and
+    /// `/v1/chat/completions`; a native `/generate` request gets its decode
+    /// at arrival.
     /// Requires `--pd-decode-policy power-of-two-smg` (the arrival pick that
     /// the prefill admits on a choice timeout) and `--pd-late-decode-rule`.
     /// With `--policy symmetric_pd` (symmetric workers; needs

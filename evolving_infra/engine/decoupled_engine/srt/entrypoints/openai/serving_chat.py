@@ -37,6 +37,12 @@ _CHAT_TEMPLATE_CLIENT_ERRORS: tuple[type[BaseException], ...] = (
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from jsonschema import Draft202012Validator, SchemaError
 
+from decoupled_engine.srt.disaggregation.late_d import (
+    LATE_D_OUTCOME_ATTR,
+    LATE_D_STATUS_ROUTE_ATTR,
+    LateDLegEnded,
+    late_d_leg_headers,
+)
 from decoupled_engine.srt.entrypoints.openai import chat_encoding, encoding_dsv4, encoding_dsv32
 from decoupled_engine.srt.entrypoints.openai.protocol import (
     ChatCompletionMessageContentTextPart,
@@ -1071,6 +1077,7 @@ class OpenAIServingChat(OpenAIServingBase):
             kv_pull_hint=request.kv_pull_hint,
             kv_export=request.kv_export,
             kv_import=request.kv_import,
+            late_d=request.late_d,
             kv_session=request.kv_session,
             routed_dp_rank=effective_routed_dp_rank,
             disagg_prefill_dp_rank=request.disagg_prefill_dp_rank,
@@ -1100,6 +1107,9 @@ class OpenAIServingChat(OpenAIServingBase):
             and envs.SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES.get()
         ):
             apply_header_overrides(adapted_request, raw_request.headers)
+        # Late D (choose): this route answers a leg that ends before its first
+        # chunk with the leg's HTTP status (LateDLegEnded).
+        setattr(adapted_request, LATE_D_STATUS_ROUTE_ATTR, True)
 
         return adapted_request, request
 
@@ -1577,6 +1587,8 @@ class OpenAIServingChat(OpenAIServingBase):
             first_chunk = await generator.__anext__()
         except ValueError as e:
             return self.create_error_response(str(e))
+        except LateDLegEnded as ended:
+            return self.late_d_error_response(ended)
 
         async def prepend_first_chunk():
             yield first_chunk
@@ -1587,6 +1599,9 @@ class OpenAIServingChat(OpenAIServingBase):
             prepend_first_chunk(),
             media_type="text/event-stream",
             background=self.tokenizer_manager.create_abort_task(adapted_request),
+            headers=late_d_leg_headers(
+                adapted_request, getattr(adapted_request, LATE_D_OUTCOME_ATTR, None)
+            ),
         )
 
     async def _generate_chat_stream(
@@ -1631,6 +1646,14 @@ class OpenAIServingChat(OpenAIServingBase):
                 adapted_request, raw_request
             ):
                 index = content.get("index", 0)
+                if not hasattr(adapted_request, LATE_D_OUTCOME_ATTR):
+                    # The first chunk says whether a symmetric choose
+                    # P-leg runs Local (read by _handle_streaming_request).
+                    setattr(
+                        adapted_request,
+                        LATE_D_OUTCOME_ATTR,
+                        content["meta_info"].get("late_d_outcome"),
+                    )
 
                 prompt_tokens[index] = self._reported_prompt_tokens(
                     content["meta_info"]
@@ -1868,6 +1891,8 @@ class OpenAIServingChat(OpenAIServingBase):
             ).__anext__()
         except ValueError as e:
             return self.create_error_response(str(e))
+        except LateDLegEnded as ended:
+            return self.late_d_error_response(ended)
 
         if not isinstance(ret, list):
             ret = [ret]
@@ -1877,7 +1902,13 @@ class OpenAIServingChat(OpenAIServingBase):
             ret,
             int(time.time()),
         )
-
+        headers = late_d_leg_headers(
+            adapted_request, ret[0]["meta_info"].get("late_d_outcome")
+        )
+        if headers is not None and not isinstance(response, ORJSONResponse):
+            return ORJSONResponse(content=response.model_dump(), headers=headers)
+        if headers is not None:
+            response.headers.update(headers)
         return response
 
     def _build_chat_response(

@@ -46,6 +46,7 @@ use zeromq::{Endpoint, RouterSocket, Socket, SocketRecv, SocketSend, ZmqMessage}
 
 const COMPLETIONS: &str = "/v1/completions";
 const GENERATE: &str = "/generate";
+const CHAT: &str = "/v1/chat/completions";
 const CHOICE_TIMEOUT: Duration = Duration::from_millis(500);
 
 // ---------------------------------------------------------------------------
@@ -450,8 +451,21 @@ async fn fixture(n: usize, opts: Opts) -> Fixture {
     let p_url = {
         let (link, rooms, seen) = (Arc::clone(&link), Arc::clone(&rooms), Arc::clone(&seen));
         let (glink, grooms, gseen) = (Arc::clone(&link), Arc::clone(&rooms), Arc::clone(&seen));
+        let (clink, crooms, cseen) = (Arc::clone(&link), Arc::clone(&rooms), Arc::clone(&seen));
         serve(
             axum::Router::new()
+                .route(
+                    CHAT,
+                    post(move |Json(mut body): Json<Value>| {
+                        body["mock_route"] = json!(CHAT);
+                        prefill_handler(
+                            Arc::clone(&clink),
+                            Arc::clone(&crooms),
+                            Arc::clone(&cseen),
+                            body,
+                        )
+                    }),
+                )
                 .route(
                     COMPLETIONS,
                     post(move |Json(body): Json<Value>| {
@@ -484,7 +498,15 @@ async fn fixture(n: usize, opts: Opts) -> Fixture {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (me, rooms, seen) = (url.clone(), Arc::clone(&rooms), Arc::clone(&seen));
         let (gme, grooms, gseen) = (me.clone(), Arc::clone(&rooms), Arc::clone(&seen));
+        let (cme, crooms, cseen) = (me.clone(), Arc::clone(&rooms), Arc::clone(&seen));
         let app = axum::Router::new()
+            .route(
+                CHAT,
+                post(move |Json(mut body): Json<Value>| {
+                    body["mock_route"] = json!(CHAT);
+                    decode_handler(cme.clone(), Arc::clone(&crooms), Arc::clone(&cseen), body)
+                }),
+            )
             .route(
                 COMPLETIONS,
                 post(move |Json(body): Json<Value>| {
@@ -1017,21 +1039,66 @@ async fn choose_dead_candidates_and_no_winner() {
     assert_eq!(f.late().pending(), 0);
 }
 
-/// Choose mode serves /v1/completions only (chat: 501) and one request at
-/// a time (a batch prompt: 400).
+/// A chat request under choose: the P-leg and one D-leg per candidate go to
+/// the engines' chat route, and the bound candidate's answer is the client's.
 #[tokio::test]
-async fn choose_refuses_chat_and_batches() {
+async fn choose_serves_chat_on_the_engines_chat_route() {
+    let f = fixture(3, choose(LateDecodeRule::D1)).await;
+    let _c0 = f.decode[0].charge_decode_tokens(50_000);
+    let _c2 = f.decode[2].charge_decode_tokens(40_000);
+    for (round, stream) in [true, false].into_iter().enumerate() {
+        let res = f
+            .post(
+                CHAT,
+                json!({"model": "tiny", "messages": [{"role": "user", "content": "hi there"}],
+                    "max_tokens": 4, "stream": stream, "rid": "rid-chat"}),
+            )
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "stream={stream}");
+        assert_eq!(
+            decode_url_header(&res).as_deref(),
+            Some(f.decode[1].url.as_str())
+        );
+        let text = body_text(res).await;
+        if stream {
+            assert!(text.contains("[DONE]"), "{text}");
+        } else {
+            assert_eq!(
+                serde_json::from_str::<Value>(&text).unwrap()["choices"][0]["text"],
+                "x"
+            );
+        }
+        let p = f.prefill_bodies()[round].clone();
+        assert_eq!(p["mock_route"], CHAT);
+        assert_eq!(p["late_d"]["mode"], "choose");
+        assert_eq!(p["late_d"]["k"], 3);
+        assert_eq!(p["messages"][0]["content"], "hi there");
+        let legs = f.legs_of(p["bootstrap_room"].as_u64().unwrap());
+        assert_eq!(legs.len(), 3);
+        for (_, leg) in &legs {
+            assert_eq!(leg["mock_route"], CHAT);
+            assert_eq!(leg["messages"][0]["content"], "hi there");
+            assert!(leg["late_d"]["cand_idx"].is_u64());
+        }
+        assert_eq!(f.late().pending(), 0);
+    }
+}
+
+/// Choose mode binds one request at a time: a batch prompt and a chat
+/// request with several choices are refused (400).
+#[tokio::test]
+async fn choose_refuses_batches() {
     let f = fixture(2, choose(LateDecodeRule::Po2)).await;
     let res = f
         .post(
-            "/v1/chat/completions",
-            json!({"model": "tiny", "messages": [{"role": "user", "content": "hi"}]}),
+            CHAT,
+            json!({"model": "tiny", "messages": [{"role": "user", "content": "hi"}], "n": 2}),
         )
         .await;
-    assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         error_code(&res).as_deref(),
-        Some("late_d_route_unsupported")
+        Some("late_d_batch_unsupported")
     );
     let res = f
         .post(

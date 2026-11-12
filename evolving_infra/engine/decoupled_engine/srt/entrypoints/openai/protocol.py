@@ -1074,6 +1074,9 @@ class ChatCompletionRequest(BaseModel):
     kv_import: Optional[Union[List[Optional[Dict[str, Any]]], Dict[str, Any]]] = None
     kv_session: Optional[Union[List[Optional[Dict[str, Any]]], Dict[str, Any]]] = None
 
+    # Late D stage 2: the router's per-leg field (see GenerateReqInput.late_d).
+    late_d: Optional[Union[List[Optional[Dict[str, Any]]], Dict[str, Any]]] = None
+
     # Cross-engine KV pull hint (kv-p2p): opaque hint injected by the gateway;
     # forwarded untouched to the engine (see GenerateReqInput.kv_pull_hint).
     kv_pull_hint: Optional[Union[List[Optional[Dict[str, Any]]], Dict[str, Any]]] = None

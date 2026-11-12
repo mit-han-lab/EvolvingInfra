@@ -102,11 +102,11 @@ pub async fn chat_completions(
     headers: HeaderMap,
     mut body: Bytes,
 ) -> Result<Response<Body>, ApiError> {
-    // `--pd-late-decode choose` serves /v1/completions only: here a
-    // released or failed decode candidate would reach the client as a 2xx
-    // stream.
+    // `--pd-late-decode choose`: the completions dispatch serves the request
+    // (one decode leg per candidate; a released or failed candidate never
+    // reaches the client).
     if ctx.late_bind.is_some() {
-        return Err(ApiError::LateDRouteUnsupported);
+        return crate::server::routes::completions::chat(ctx, headers, body).await;
     }
     let start = std::time::Instant::now();
     let probe = parse_probe(&body)?;
@@ -185,30 +185,9 @@ pub async fn chat_completions(
     // forwarded as `input_ids` so it skips re-tokenizing the same prompt. The
     // ingress owns the tokenize via the shared registry, so the choice of
     // policy never changes whether we tokenize.
-    let request_tokens = request_value
-        .as_ref()
-        .and_then(|v| request_tokens_for(&ctx.tokenizers, &model_id, v));
-    // `--chat-tools-tokenize`: the ids above render the messages alone. For a
-    // request with tools, an engine's ids replace them for placement only.
     let request_tokens = match request_value.as_ref() {
-        Some(v)
-            if ctx.config.proxy.chat_tools_tokenize
-                && request_has_tools(v)
-                && !request_is_multimodal(v) =>
-        {
-            let engines = match ctx.symmetric_pd.as_ref() {
-                Some(flex) => flex.role_members_all(),
-                None => workers.clone(),
-            };
-            match crate::engine_tokenize::chat_ids(&engines, v).await {
-                Some(ids) => Some(RequestTokens {
-                    ids,
-                    engine_equivalent: false,
-                }),
-                None => request_tokens,
-            }
-        }
-        _ => request_tokens,
+        Some(v) => chat_request_tokens(&ctx, &model_id, v, &workers).await,
+        None => None,
     };
     let external_prefix = if let Some(index) = &ctx.dynamo_prefix {
         Some(
@@ -1228,6 +1207,36 @@ pub(crate) fn build_outgoing_body(
     Ok(Bytes::from(bytes))
 }
 
+/// The token ids of chat request `value` for placement. The router's chat
+/// encoder renders the messages alone; with `--chat-tools-tokenize`, the ids
+/// of a request with tools come from an engine instead (placement only,
+/// never forwarded). `workers` are the engines outside symmetric_pd.
+pub(crate) async fn chat_request_tokens(
+    ctx: &AppContext,
+    model_id: &ModelId,
+    value: &serde_json::Value,
+    workers: &[Arc<Worker>],
+) -> Option<RequestTokens> {
+    let tokens = request_tokens_for(&ctx.tokenizers, model_id, value);
+    if !ctx.config.proxy.chat_tools_tokenize
+        || !request_has_tools(value)
+        || request_is_multimodal(value)
+    {
+        return tokens;
+    }
+    let engines = match ctx.symmetric_pd.as_ref() {
+        Some(flex) => flex.role_members_all(),
+        None => workers.to_vec(),
+    };
+    match crate::engine_tokenize::chat_ids(&engines, value).await {
+        Some(ids) => Some(RequestTokens {
+            ids,
+            engine_equivalent: false,
+        }),
+        None => tokens,
+    }
+}
+
 /// Whether the router's `input_ids` may be forwarded for this request.
 ///
 /// We forward only when the engine, fed `input_ids`, would have produced the
@@ -1266,7 +1275,7 @@ pub(crate) fn build_outgoing_body(
 /// matches the engine on tokenizers that auto-add them (the common case); a
 /// tokenizer that does not would diverge by a leading special, again undetectable
 /// from the request.
-fn input_ids_safe_to_forward(value: &serde_json::Value) -> bool {
+pub(crate) fn input_ids_safe_to_forward(value: &serde_json::Value) -> bool {
     if request_has_tools(value) || request_is_multimodal(value) {
         return false;
     }

@@ -270,7 +270,7 @@ async fn main() -> Result<()> {
             stale_request_timeout_secs = cfg.active_load.stale_request_timeout_secs,
             "late D choose: each PD request goes to its prefill and to every decode \
              candidate; the prefill binds one over its router link (--pd-late-decode choose; \
-             /v1/completions only)"
+             /v1/completions and /v1/chat/completions)"
         );
     } else if late_decode.packed_prompt {
         tracing::info!(

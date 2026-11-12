@@ -1,6 +1,6 @@
 # DeepSeek-V4-Flash on H200 for coding agents: the engine settings of h200/dsv4-flash.yaml
 # without the synthetic draft-acceptance oracle (it serves greedy replay only), plus the tool-call
-# and reasoning parsers, with late decode choice off (it serves /v1/completions only).
+# and reasoning parsers, with late decode choice off.
 
 model: /models/DeepSeek-V4-Flash
 served_model_name: deepseek-v4-flash
