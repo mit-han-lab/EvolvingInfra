@@ -55,8 +55,6 @@ frontend:
   request_timeout_seconds: 3600
 router_args:                   # the e3 wait model with measured copy price and prefill rate
   - --trade-copy-lambda=auto
-  - --trade-copy-lambda-q=sat
-  - --trade-copy-lambda-mu=1
   - --trade-copy-lambda-min=0
   - --trade-copy-lambda-max=1000000000
   - --trade-copy-lambda-fallback=18.4

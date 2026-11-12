@@ -86,7 +86,7 @@ ROUTER_ARGS = [
     "--symmetric-pd-import-cache-policy", "retain",
     "--symmetric-pd-load-poll-ms", "100", "--symmetric-pd-pull-hint", "--kv-indexer-timeout-ms", "200",
     "--request-timeout-secs", "3600", "--stale-request-timeout-secs", "3600", "--cb-threshold", "4294967295",
-    "--trade-copy-lambda", "4.6", "--trade-count-inflight",
+    "--trade-copy-lambda", "4.6",
     "--trade-load-poll-ms", "100",
     "--kv-pull-hint-min-tokens", "256", "--kv-pull-hint-min-incremental-tokens", "512",
     "--symmetric-pd-unknown-expire-secs", "60", "--symmetric-pd-pull-from-any-holder",
