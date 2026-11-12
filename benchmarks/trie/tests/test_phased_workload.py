@@ -186,14 +186,21 @@ def test_slots_replay_the_same_templates_and_cuts_for_any_process_count(tmp_path
             merged.update(seen)
         return merged
 
-    one = asyncio.run(replay("one", 1))
-    two = asyncio.run(replay("two", 2))
-    for slot in (0, 1):
-        assert sum(1 for s, _ in one if s == slot) >= 6 and sum(1 for s, _ in two if s == slot) >= 6
-    common = one.keys() & two.keys()
-    assert len(common) >= 12
-    assert {key: one[key] for key in common} == {key: two[key] for key in common}
-    assert {trace for trace, _ in one.values()} == {f"c{i}" for i in range(3)} | {f"p{i}" for i in range(5)}
+    def by_workload(seen):
+        """Each slot's templates and cuts per workload, in order. Which cycle of a slot falls in which phase
+        depends on timing, so the n-th template of a workload is compared, not the n-th cycle."""
+        out = {}
+        for (slot, _), (trace_id, cut) in sorted(seen.items()):
+            out.setdefault((slot, trace_id[0]), []).append((trace_id, cut))
+        return out
+
+    one = by_workload(asyncio.run(replay("one", 1)))
+    two = by_workload(asyncio.run(replay("two", 2)))
+    assert one.keys() == two.keys() == {(0, "c"), (0, "p"), (1, "c"), (1, "p")}
+    for key in one:
+        n = min(len(one[key]), len(two[key]))
+        assert n >= 2 and one[key][:n] == two[key][:n], key
+    assert {trace for runs in one.values() for trace, _ in runs} == {f"c{i}" for i in range(3)} | {f"p{i}" for i in range(5)}
 
 
 def test_only_slots_of_the_first_phase_start_at_a_warm_cut(tmp_path, monkeypatch):
