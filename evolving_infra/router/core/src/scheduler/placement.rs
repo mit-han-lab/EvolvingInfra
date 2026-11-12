@@ -1084,7 +1084,7 @@ pub fn place_with_cost<C: CostModel + ?Sized>(
             }
         }
     };
-    let same = |pin: Option<&Candidate>, c: &Candidate| pin.map_or(true, |x| x.id == c.id);
+    let same = |pin: Option<&Candidate>, c: &Candidate| pin.is_none_or(|x| x.id == c.id);
 
     let w = cfg.weights;
     let split_cost = cfg.xfer_fixed_cost + prompt_len / xfer_norm;

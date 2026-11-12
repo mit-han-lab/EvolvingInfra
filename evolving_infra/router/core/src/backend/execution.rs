@@ -156,8 +156,8 @@ impl PreparedConfig {
         ];
         if h.len() != hash_fields.len() + usize::from(c.image_config.is_some())
             || h.keys().any(|key| {
-                !hash_fields.contains(&key.as_str())
-                    && !(key == "image_config" && c.image_config.is_some())
+                !(hash_fields.contains(&key.as_str())
+                    || (key == "image_config" && c.image_config.is_some()))
             })
         {
             return Err("hash specification does not match the tokenizer contract".into());

@@ -209,9 +209,7 @@ pub fn build_leg_bodies(
     if !split
         && input_ids.is_none()
         && pull_hint.is_none()
-        && !value
-            .as_ref()
-            .is_some_and(|v| v.get("kv_session").is_some())
+        && value.as_ref().is_none_or(|v| v.get("kv_session").is_none())
     {
         return Ok((body.clone(), body.clone()));
     }

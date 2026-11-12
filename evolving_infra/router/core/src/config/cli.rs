@@ -2719,12 +2719,11 @@ impl Cli {
                 ));
             }
         }
-        if self.symmetric_pd_owner_threshold_tokens.is_some()
-            || self.symmetric_pd_detour_margin_tokens.is_some()
+        if (self.symmetric_pd_owner_threshold_tokens.is_some()
+            || self.symmetric_pd_detour_margin_tokens.is_some())
+            && placement.p_select != crate::scheduler::placement::PSelect::CoSchedule
         {
-            if placement.p_select != crate::scheduler::placement::PSelect::CoSchedule {
-                return Err(anyhow!("--symmetric-pd-owner-threshold-tokens / --symmetric-pd-detour-margin-tokens require --symmetric-pd-p-select co-schedule"));
-            }
+            return Err(anyhow!("--symmetric-pd-owner-threshold-tokens / --symmetric-pd-detour-margin-tokens require --symmetric-pd-p-select co-schedule"));
         }
         if let Some(v) = self.symmetric_pd_owner_threshold_tokens {
             placement.co_schedule.owner_threshold_tokens = v;

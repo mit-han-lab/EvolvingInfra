@@ -47,6 +47,7 @@ impl Backend {
     /// Returns an `Arc<Backend>` with an empty ledger and configured adapter.
     /// Starts polling when a Tokio runtime is present; otherwise logs a warning
     /// and returns the backend without a refresh task.
+    #[allow(clippy::too_many_arguments)] // one call site per policy; a builder adds nothing
     pub fn new(
         registry: Arc<WorkerRegistry>,
         model: ModelId,

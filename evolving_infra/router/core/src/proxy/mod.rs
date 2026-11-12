@@ -294,16 +294,6 @@ impl Proxy {
         }
     }
 
-    /// Breaker-gated JSON POST: checks `breaker.allow()` first, records
-    /// success/failure based on response status, and returns
-    /// `ApiError::BreakerOpen` immediately when the breaker is Open.
-    ///
-    /// `worker_url` is the discovery-emitted worker URL string. It's parsed
-    /// to [`reqwest::Url`] internally so we can use [`Url::join`] for clean
-    /// path concatenation (no double-slash) and pass a typed URL to the
-    /// split error variants (`UpstreamUnreachable` / `UpstreamTimeout` /
-    /// `UpstreamStatus`).
-
     /// Send with a connection-level targeted retry: connect-class failures
     /// (SYN loss, the hard-coded 5 s connect timeout, refused/reset before
     /// any byte of the request was written) are retried up to 2 extra
@@ -337,6 +327,15 @@ impl Proxy {
         }
     }
 
+    /// Breaker-gated JSON POST: checks `breaker.allow()` first, records
+    /// success/failure based on response status, and returns
+    /// `ApiError::BreakerOpen` immediately when the breaker is Open.
+    ///
+    /// `worker_url` is the discovery-emitted worker URL string. It's parsed
+    /// to [`reqwest::Url`] internally so we can use [`Url::join`] for clean
+    /// path concatenation (no double-slash) and pass a typed URL to the
+    /// split error variants (`UpstreamUnreachable` / `UpstreamTimeout` /
+    /// `UpstreamStatus`).
     pub async fn forward_json_to(
         &self,
         worker_url: &str,

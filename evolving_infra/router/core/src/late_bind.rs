@@ -1578,7 +1578,7 @@ impl LateBind {
                     tokens,
                     entry.key,
                     input_tokens,
-                    &*self.capacity.snapshot(),
+                    &self.capacity.snapshot(),
                     Duration::from_millis(self.config.fit_state_max_age_ms),
                 )?;
                 if !fit {
@@ -3409,9 +3409,9 @@ mod tests {
             .unwrap()
             .with_imports(&imports)
             .unwrap();
-        for i in 0..2 {
+        for (i, import) in imports.iter().enumerate() {
             let v: Value = serde_json::from_slice(&sym.leg(i)).unwrap();
-            assert_eq!(v["kv_import"], imports[i]);
+            assert_eq!(v["kv_import"], *import);
             assert_eq!(v["late_d"]["cand_idx"], i);
             assert_eq!(v["late_d"]["k"], 2);
             assert_eq!(v["prompt"], json!([1, 2, 3]));

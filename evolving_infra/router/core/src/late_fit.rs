@@ -302,7 +302,7 @@ pub fn start_collector_over(
             let Some(registry) = weak.upgrade() else {
                 return;
             };
-            let workers: Vec<Arc<Worker>> = select(&*registry);
+            let workers: Vec<Arc<Worker>> = select(&registry);
             drop(registry);
             if workers.len() > MAX_WORKERS {
                 store.replace(HashMap::new());

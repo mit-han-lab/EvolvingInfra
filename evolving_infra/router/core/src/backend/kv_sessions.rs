@@ -509,10 +509,12 @@ impl KvSessions {
             // END reaches every recorded worker, this one included.
         } else if s.version != tag.version {
             // A newer request already registered: this copy is not the home.
-            if worker != s.p && worker != s.d && s.workers.get(worker) == Some(&tag.version) {
-                if s.retire.insert(worker.to_string(), tag.version).is_none() {
-                    newly.push(worker.to_string());
-                }
+            if worker != s.p
+                && worker != s.d
+                && s.workers.get(worker) == Some(&tag.version)
+                && s.retire.insert(worker.to_string(), tag.version).is_none()
+            {
+                newly.push(worker.to_string());
             }
         } else {
             let old = std::mem::replace(&mut s.d, worker.to_string());
@@ -1314,7 +1316,7 @@ mod tests {
         };
         let mut reply = ready(&first, "boot1", 0);
         reply.results[0].status = "missing".into();
-        owner.apply("p1", &[control.clone()], reply);
+        owner.apply("p1", std::slice::from_ref(&control), reply);
         assert_eq!(
             owner.state.lock().sessions[&first.session_id]
                 .retire
@@ -1323,7 +1325,7 @@ mod tests {
         );
         let mut reply = ready(&first, "newboot", 0);
         reply.results[0].status = "released".into();
-        owner.apply("p1", &[control.clone()], reply);
+        owner.apply("p1", std::slice::from_ref(&control), reply);
         assert_eq!(
             owner.state.lock().sessions[&first.session_id]
                 .retire

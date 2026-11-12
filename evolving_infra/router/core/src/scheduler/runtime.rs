@@ -237,6 +237,7 @@ impl From<SymmetricPdError> for ApiError {
 ///   the same event); repeated occurrences of the same length take
 ///   successive pairs. A miss on the exact length falls back to the nearest
 ///   length within `len_tolerance` tokens, then to the configured selection.
+///
 /// Both shapes may be present; content-keyed wins when it has an entry.
 #[derive(Debug)]
 pub struct DecisionReplay {
@@ -388,7 +389,7 @@ impl DecisionReplay {
                 None
             };
             let Some((len, outcome)) = pick else {
-                if self.sessions.get(&key).is_none() {
+                if !self.sessions.contains_key(&key) {
                     self.unknown.fetch_add(1, Ordering::Relaxed);
                     return (None, "unknown_len");
                 }

@@ -883,7 +883,8 @@ async fn trade_three_p(lambda: f64, gate: u32) {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     };
-    let wait_for = |what: &'static str, check: Box<dyn Fn(&[Value]) -> bool>| {
+    type EventCheck = Box<dyn Fn(&[Value]) -> bool>;
+    let wait_for = |what: &'static str, check: EventCheck| {
         let read_events = &read_events;
         async move {
             tokio::time::timeout(Duration::from_secs(3), async {
