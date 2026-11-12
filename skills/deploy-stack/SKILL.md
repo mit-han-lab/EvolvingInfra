@@ -160,17 +160,9 @@ The reply's `choices[0].text` holds generated text. Report the URL, the workers,
 the reply. Each process logs to `run/logs/<name>.log`; `SIGTERM` to `evolving-infra serve`
 stops everything it started.
 
-With `--planner` and KV session retention (on unless the config sets `retention: false`), the
-router answers this request with HTTP 400 ("requires /symmetric_pd/prepared lifecycle
-callbacks"): it accepts generation on the prepared path only. Check that stack with
-`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30900/readyz` (200 once a prefill and
-a decode worker are up) and `curl -s http://127.0.0.1:30900/v1/models` (lists
-`<served_model_name>`). To check generation, start the same config once without `--planner` and
-send the request above, or send a prepared-path request as the
-[`connect-agent`](../connect-agent/SKILL.md) skill describes.
+With `--planner` the same request works: the router serves and counts plain requests too.
 
-**Check**: `run/READY` exists and the reply's `choices[0].text` holds generated text (with
-`--planner`: `/readyz` returns 200 and `/v1/models` lists the model). If it does not become
+**Check**: `run/READY` exists and the reply's `choices[0].text` holds generated text. If it does not become
 ready, or the request fails, use the [`diagnose-run`](../diagnose-run/SKILL.md) skill.
 
 ## Returns

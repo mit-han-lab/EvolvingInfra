@@ -116,16 +116,25 @@ where
             let mut s = stream;
             let mut aborted = false;
             loop {
-                let next = match abort.as_ref() {
-                    Some(token) => tokio::select! {
-                        biased;
-                        _ = token.cancelled() => {
-                            aborted = true;
-                            None
+                // A client that left ends the pump at once, not at the next
+                // upstream chunk: the guards (a decode's in-flight count, its
+                // load) and the upstream connection go with it.
+                let next = tokio::select! {
+                    biased;
+                    _ = async {
+                        match abort.as_ref() {
+                            Some(token) => token.cancelled().await,
+                            None => std::future::pending().await,
                         }
-                        next = s.next() => next,
-                    },
-                    None => s.next().await,
+                    } => {
+                        aborted = true;
+                        None
+                    }
+                    _ = tx.closed() => {
+                        tracing::debug!("SSE client disconnected while waiting for upstream");
+                        None
+                    }
+                    next = s.next() => next,
                 };
                 let Some(chunk) = next else {
                     break;
@@ -206,6 +215,38 @@ mod tests {
     use bytes::Bytes;
     use futures::stream;
     use http_body_util::BodyExt;
+
+    /// A client that leaves while the upstream is silent ends the pump at
+    /// once: the guards drop without waiting for the next upstream chunk.
+    #[tokio::test]
+    async fn a_client_that_leaves_drops_the_guards_while_upstream_is_silent() {
+        struct Flag(Arc<AtomicBool>);
+        impl Drop for Flag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let upstream =
+            stream::once(async { Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: x\n\n")) })
+                .chain(stream::pending());
+        let mut body = bytes_stream_to_body_abortable(
+            Box::pin(upstream),
+            Some(Box::new(Flag(Arc::clone(&dropped)))),
+            None,
+            None,
+            None,
+        );
+        body.frame().await.unwrap().unwrap();
+        drop(body);
+        for _ in 0..100 {
+            if dropped.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the guards outlived the client");
+    }
 
     #[tokio::test]
     async fn passes_through_a_simple_byte_stream() {

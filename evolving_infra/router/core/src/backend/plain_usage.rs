@@ -15,8 +15,9 @@
 //!
 //! The engines send usage on a stream only when asked, and the verify steps
 //! only with `return_spec_tokens_details`, so [`ask`] sets both on the request
-//! and [`PlainUsage::tap`] removes from the client's stream the chunks the
-//! client did not ask for. A request is counted once, when its decode reply
+//! and [`PlainUsage::tap`] removes from the client's reply what the client
+//! did not ask for: the chunks that carry only that, and the `sglext` field
+//! of the other chunks and of a buffered reply. A request is counted once, when its decode reply
 //! ends complete; a failed or cut reply counts nothing.
 
 use crate::backend::workload::{CompletedWorkload, RequestSample};
@@ -145,8 +146,10 @@ impl PlainUsage {
     }
 
     /// Count the request from the client's reply `response` as it passes,
-    /// removing the chunks only [`ask`] asked for. A non-2xx reply passes
-    /// untouched.
+    /// removing what only [`ask`] asked for: the chunks that carry only that,
+    /// and `sglext` when the client did not ask for it (a buffered reply is
+    /// then held until its end, up to [`MAX_BUFFERED_REPLY`]). A non-2xx
+    /// reply passes untouched.
     pub fn tap(self, response: Response<Body>, asked: ClientAsked) -> Response<Body> {
         if !response.status().is_success() {
             return response;
@@ -156,7 +159,11 @@ impl PlainUsage {
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.starts_with("text/event-stream"));
-        let (parts, body) = response.into_parts();
+        let (mut parts, body) = response.into_parts();
+        if sse || !asked.spec_details {
+            // The forwarded bytes may differ from the engine's.
+            parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+        }
         struct Tap<S> {
             stream: S,
             pending: BytesMut,
@@ -187,11 +194,23 @@ impl PlainUsage {
                         return Some((Err(error), tap));
                     }
                     Some(Ok(chunk)) if !tap.sse => {
-                        // A buffered reply: forwarded as is, read at its end.
-                        if tap.pending.len() + chunk.len() <= MAX_BUFFERED_REPLY {
+                        // A buffered reply: read at its end. It is forwarded
+                        // as it comes when the client asked for `sglext`,
+                        // else held to remove `sglext` at its end.
+                        let hold = !tap.asked.spec_details;
+                        if tap.complete && tap.pending.len() + chunk.len() <= MAX_BUFFERED_REPLY {
                             tap.pending.extend_from_slice(&chunk);
-                        } else {
-                            tap.complete = false;
+                            if hold {
+                                continue;
+                            }
+                            return Some((Ok(chunk), tap));
+                        }
+                        // Too large to read: forwarded uncounted and as is.
+                        tap.complete = false;
+                        if hold && !tap.pending.is_empty() {
+                            let mut held = tap.pending.split();
+                            held.extend_from_slice(&chunk);
+                            return Some((Ok(held.freeze()), tap));
                         }
                         return Some((Ok(chunk), tap));
                     }
@@ -200,15 +219,23 @@ impl PlainUsage {
                         let mut forward = BytesMut::new();
                         while let Some(end) = find(&tap.pending, b"\n\n") {
                             let event = tap.pending.split_to(end + 2);
-                            let keep = match data(&event) {
-                                Some(value) => {
+                            match data(&event) {
+                                Some(mut value) => {
                                     tap.usage.observe(&value);
-                                    !only_asked_by_router(&value, tap.asked)
+                                    if only_asked_by_router(&value, tap.asked) {
+                                        continue;
+                                    }
+                                    if strip_unasked(&mut value, tap.asked) {
+                                        forward.extend_from_slice(b"data: ");
+                                        forward.extend_from_slice(
+                                            &serde_json::to_vec(&value).unwrap_or_default(),
+                                        );
+                                        forward.extend_from_slice(b"\n\n");
+                                    } else {
+                                        forward.extend_from_slice(&event);
+                                    }
                                 }
-                                None => true,
-                            };
-                            if keep {
-                                forward.extend_from_slice(&event);
+                                None => forward.extend_from_slice(&event),
                             }
                         }
                         if !forward.is_empty() {
@@ -218,15 +245,23 @@ impl PlainUsage {
                     None => {
                         tap.done = true;
                         let rest = tap.pending.split();
+                        let held = !tap.sse && !tap.asked.spec_details;
+                        let mut stripped = None;
                         if !tap.sse && tap.complete {
-                            if let Ok(value) = serde_json::from_slice::<Value>(&rest) {
+                            if let Ok(mut value) = serde_json::from_slice::<Value>(&rest) {
                                 tap.usage.observe(&value);
+                                if held && strip_unasked(&mut value, tap.asked) {
+                                    stripped = serde_json::to_vec(&value).ok();
+                                }
                             }
                         }
                         if tap.complete {
                             tap.usage.finish();
                         }
-                        if tap.sse && !rest.is_empty() {
+                        if let Some(bytes) = stripped {
+                            return Some((Ok(bytes.into()), tap));
+                        }
+                        if (tap.sse || held) && !rest.is_empty() {
                             return Some((Ok(rest.freeze()), tap));
                         }
                         return None;
@@ -319,6 +354,18 @@ fn read(event: &Value, seen: &mut Seen) {
     {
         seen.verify_steps = Some(n);
     }
+}
+
+/// Remove `sglext` from a chunk or reply the client did not ask it of;
+/// true when it was there.
+fn strip_unasked(event: &mut Value, asked: ClientAsked) -> bool {
+    if asked.spec_details {
+        return false;
+    }
+    event
+        .as_object_mut()
+        .and_then(|obj| obj.remove("sglext"))
+        .is_some()
 }
 
 /// A chunk without choices that carries only what the router asked for.
@@ -453,6 +500,50 @@ mod tests {
         // bounded by the prompt.
         assert_eq!(workload.totals().uncached_tokens, 0);
         assert_eq!(workload.totals().requests, 1);
+    }
+
+    /// `sglext` that only the router asked for leaves the chunks that carry
+    /// choices and a buffered reply; it is still counted.
+    #[tokio::test]
+    async fn unasked_sglext_is_removed_from_every_reply() {
+        let (u, workload) = usage();
+        let out = through(
+            u,
+            "text/event-stream",
+            vec![
+                "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}],\"sglext\":{\"spec_tokens_details\":{\"spec_verify_ct\":3}}}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            NOTHING,
+        )
+        .await;
+        assert_eq!(
+            out,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata: [DONE]\n\n"
+        );
+        assert_eq!(workload.totals().requests, 1);
+        let (u, workload) = usage();
+        let body = vec![
+            r#"{"choices":[{"message":{"content":"x"}}],"usage":{"prompt_tokens":30,"#,
+            r#""completion_tokens":4},"sglext":{"spec_tokens_details":{"spec_verify_ct":2}}}"#,
+        ];
+        let out = through(u, "application/json", body, NOTHING).await;
+        assert_eq!(
+            out,
+            r#"{"choices":[{"message":{"content":"x"}}],"usage":{"prompt_tokens":30,"completion_tokens":4}}"#
+        );
+        assert_eq!(workload.totals().requests, 1);
+        let (u, _) = usage();
+        let asked = ClientAsked {
+            usage: true,
+            spec_details: true,
+        };
+        let body = r#"{"choices":[],"sglext":{"spec_tokens_details":{"spec_verify_ct":2}}}"#;
+        assert_eq!(
+            through(u, "application/json", vec![body], asked).await,
+            body
+        );
     }
 
     #[tokio::test]

@@ -16,6 +16,17 @@ use tracing::info;
 
 const POLL: Duration = Duration::from_millis(200);
 
+/// Legs `worker` still owes: those of prepared plans, and the D-legs of
+/// requests the router proxies itself (the plain routes, with or without
+/// late decode choice), which it counts in the backend ledger from the
+/// placement until the leg's reply ends. A plain D-leg cannot be migrated,
+/// so with retention the drain waits for it to end.
+fn legs_owed(spd: &SymmetricPdRuntime, executions: &Executions, worker: &str) -> usize {
+    executions
+        .legs_owed(worker)
+        .max(spd.decode_legs_in_flight(worker))
+}
+
 /// Start a drain for each worker that assignment `revision` moved from decode to prefill.
 pub fn spawn(
     spd: &Arc<SymmetricPdRuntime>,
@@ -56,13 +67,13 @@ pub async fn drain_to_prefill(
     timeout: Duration,
 ) {
     let started = Instant::now();
-    let mut owed = executions.legs_owed(&worker);
+    let mut owed = legs_owed(&spd, &executions, &worker);
     while owed > 0 && started.elapsed() < timeout {
         if !spd.is_role_draining(&worker, revision) {
             return;
         }
         tokio::time::sleep(POLL).await;
-        owed = executions.legs_owed(&worker);
+        owed = legs_owed(&spd, &executions, &worker);
     }
     if !spd.is_role_draining(&worker, revision) {
         return;
@@ -79,7 +90,7 @@ pub async fn drain_to_prefill(
         if !spd.is_role_draining(&worker, revision) {
             return;
         }
-        owed = executions.legs_owed(&worker);
+        owed = legs_owed(&spd, &executions, &worker);
         if (spd.kv_sessions().is_none() || owed == 0) && spd.finish_role_drain(&worker, revision) {
             break true;
         }

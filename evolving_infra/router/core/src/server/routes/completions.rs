@@ -367,6 +367,18 @@ async fn dispatch(
                 },
             })
             .await?;
+        // Role control: the placement was made outside the role lock. A
+        // pair with a worker that has left its role since gets no leg
+        // (503: the client retries and is placed again). The reservations
+        // the placement made are already counted, so a drain that starts
+        // after this check waits for this request's D-leg.
+        if spd.config().external_role_control && !d.is_local() {
+            let current = spd.with_current_role_pair(&d.p_worker.url, &d.d_worker.url, || Ok(()));
+            if let Err(reason) = current {
+                d.ledger.retire();
+                return Err(ApiError::SymmetricPdNoPlacement(reason));
+            }
+        }
         let w = Arc::clone(&d.p_worker);
         spd_decision = Some(d);
         w
@@ -819,6 +831,14 @@ async fn dispatch(
                 duration_guard: streaming.then(make_duration_guard),
                 ttft_hook: streaming.then(make_ttft_hook),
                 image_hold: late_image_hold.take(),
+                decode_reservation: spd_decision
+                    .as_mut()
+                    .and_then(|d| d.d_reservation.take())
+                    .zip(ctx.symmetric_pd.as_ref().map(|spd| {
+                        let spd = Arc::clone(spd);
+                        Arc::new(move |w: &str| spd.reserve_decode(w))
+                            as crate::backend::execution::ReserveDecode
+                    })),
             },
         )
         .await

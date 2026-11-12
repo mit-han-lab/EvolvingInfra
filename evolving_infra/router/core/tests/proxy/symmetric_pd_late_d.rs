@@ -249,6 +249,9 @@ struct Engine {
     seen: Arc<Seen>,
     capacity: Option<(u64, u64)>,
     cost: Option<Arc<CostEngine>>,
+    /// A streaming D-leg of a request with `"hold_stream": true` sends one
+    /// chunk, then waits until this is true before it ends.
+    hold: tokio::sync::watch::Receiver<bool>,
 }
 
 /// The P-role engine state of the cost-function test: the P-leg of `busy`
@@ -276,6 +279,31 @@ fn released() -> Response {
 
 fn ok_answer() -> Response {
     Json(json!({"choices": [{"index": 0, "text": "x"}]})).into_response()
+}
+
+/// The answer of a D-leg: an event stream that sends one chunk and ends
+/// when `hold` turns true, for a streaming request with `"hold_stream":
+/// true`; else [`ok_answer`].
+fn decode_answer(e: &Engine, body: &Value) -> Response {
+    if body["hold_stream"] != true || body["stream"] != true {
+        return ok_answer();
+    }
+    let mut hold = e.hold.clone();
+    let first = futures::stream::once(async {
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"data: {\"choices\":[{\"index\":0,\"text\":\"x\"}]}\n\n",
+        ))
+    });
+    let rest = futures::stream::once(async move {
+        let _ = hold.wait_for(|released| *released).await;
+        Ok::<_, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"))
+    });
+    let mut r = Response::new(Body::from_stream(futures::StreamExt::chain(first, rest)));
+    r.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("text/event-stream"),
+    );
+    r
 }
 
 async fn engine_completions(e: Engine, body: Value) -> Response {
@@ -330,11 +358,14 @@ async fn engine_completions(e: Engine, body: Value) -> Response {
             .wait_for(id, Duration::from_secs(10), |t| t.winner)
             .await
         {
-            Some(w) if w == idx => ok_answer(),
+            Some(w) if w == idx => decode_answer(&e, &body),
             _ => released(),
         };
     }
     // A plain Split leg or a Local request.
+    if body.get("kv_import").is_some() {
+        return decode_answer(&e, &body);
+    }
     ok_answer()
 }
 
@@ -427,6 +458,8 @@ struct Fixture {
     trace: Option<std::path::PathBuf>,
     costs: HashMap<String, Arc<CostEngine>>,
     _tmp: Option<tempfile::TempDir>,
+    /// See [`Engine::hold`].
+    hold: tokio::sync::watch::Sender<bool>,
 }
 
 struct Opts {
@@ -442,6 +475,8 @@ struct Opts {
     cost_function: bool,
     /// circuit breaker `(threshold, cool-down ms)` of every worker.
     breaker: Option<(u32, u64)>,
+    /// `--symmetric-pd-external-role-control` with a 300-ms drain timeout.
+    role_control: bool,
 }
 
 async fn fixture(opts: Opts) -> Fixture {
@@ -453,6 +488,7 @@ async fn fixture(opts: Opts) -> Fixture {
     let mut links = Vec::new();
     let mut d_capacity = HashMap::new();
     let mut costs = HashMap::new();
+    let (hold, hold_rx) = tokio::sync::watch::channel(false);
     let n_d = opts.d_capacity.len();
     for i in 0..opts.n_p + n_d {
         let prefill = i < opts.n_p;
@@ -480,6 +516,7 @@ async fn fixture(opts: Opts) -> Fixture {
                     opts.d_capacity[i - opts.n_p]
                 },
                 cost,
+                hold: hold_rx.clone(),
             },
             listener,
         )
@@ -530,6 +567,8 @@ async fn fixture(opts: Opts) -> Fixture {
     let mut spd = SymmetricPdConfig {
         max_queue_wait_ms: 0,
         kv_session_retention: opts.kv_sessions,
+        external_role_control: opts.role_control,
+        role_drain_timeout: opts.role_control.then_some(Duration::from_millis(300)),
         gateway_cache_aware: opts.gateway_ca.then(|| GatewayCacheAwareConfig {
             max_tree_size: 66_163_200,
             ..GatewayCacheAwareConfig::default()
@@ -619,7 +658,27 @@ async fn fixture(opts: Opts) -> Fixture {
     let tokenizers = Arc::new(TokenizerRegistry::load_from_config(&cfg).unwrap());
     let policies = Arc::new(build_registry_with_defaults(&cfg).unwrap());
     let proxy = Arc::new(Proxy::new(Duration::from_secs(20)).unwrap());
-    let ctx = Arc::new(AppContext::new(cfg, tokenizers, proxy, registry, policies));
+    // Role control needs the prepared-input configuration and a controller
+    // credential, given here instead of through the environment.
+    let prepared = opts
+        .role_control
+        .then(|| sgl_router::backend::execution::PreparedConfig {
+            callback_url: "http://127.0.0.1:9/symmetric_pd/events".into(),
+            max_inflight: 16,
+            contracts: HashMap::new(),
+            decode_unresolved_expire_secs: 300,
+            silent_expire_secs: 7_500,
+        });
+    let ctx = Arc::new(AppContext::with_role_control_inputs(
+        cfg,
+        tokenizers,
+        proxy,
+        registry,
+        policies,
+        sgl_router::policies::active_load::ActiveLoadRegistry::with_defaults(),
+        prepared,
+        opts.role_control.then(|| "k".repeat(32)),
+    ));
     if let Some(late) = ctx.late_bind.as_ref() {
         assert!(late.symmetric());
         for endpoint in &links {
@@ -653,6 +712,7 @@ async fn fixture(opts: Opts) -> Fixture {
         trace,
         costs,
         _tmp: tmp,
+        hold,
     }
 }
 
@@ -731,6 +791,7 @@ fn opts(late: Option<LateDecodeRule>, d_capacity: Vec<Option<(u64, u64)>>) -> Op
         gateway_ca: false,
         cost_function: false,
         breaker: None,
+        role_control: false,
     }
 }
 
@@ -1365,3 +1426,122 @@ async fn breaker_refusal_at_dispatch_retires_the_backend_reservation() {
 // one P that does not answer `/v1/loads` slows the progress poll of
 // every other P (the poll loop waits for all queries of a round).
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// A plain decode leg in its worker's in-flight count and in a role drain.
+// ---------------------------------------------------------------------------
+
+/// A streaming request whose D-leg holds its stream open.
+fn held_request(rid: &str) -> Value {
+    let mut body = request(rid, vec![1, 2, 3, 4]);
+    body["stream"] = json!(true);
+    body["hold_stream"] = json!(true);
+    body
+}
+
+/// The decode that serves a streaming answer under late D choose (the
+/// bound one, `x-sgl-decode-url`); `None` on the plain Split.
+fn bound_decode(res: &Response) -> Option<String> {
+    res.headers()
+        .get("x-sgl-decode-url")
+        .map(|v| v.to_str().unwrap().to_string())
+}
+
+/// With role control and retention, a streaming plain request through the
+/// route keeps its decode in the in-flight count (1 during the stream, 0
+/// on the other decodes) and holds a decode->prefill drain of that decode
+/// past its deadline until the stream ends. `late`: late D choose (the
+/// count moves from the arrival pick to the bound decode), else the plain
+/// Split.
+async fn stream_holds_the_drain(late: Option<LateDecodeRule>, decodes: usize) {
+    use sgl_router::backend::registry::RoleAssignment;
+    let f = fixture(Opts {
+        kv_sessions: true,
+        role_control: true,
+        ..opts(late, vec![None; decodes])
+    })
+    .await;
+    let spd = Arc::clone(f.ctx.symmetric_pd.as_ref().unwrap());
+    let res = f.post(held_request("hold-1"), None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let bound = bound_decode(&res);
+    assert_eq!(bound.is_some(), late.is_some());
+    let mut stream = res.into_body();
+    let first = stream.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(first.starts_with(b"data: {"), "{first:?}");
+    // The plain Split's decode is the one D-leg counted.
+    let bound = bound.unwrap_or_else(|| {
+        let counted: Vec<&String> = f
+            .d_urls
+            .iter()
+            .filter(|d| spd.decode_legs_in_flight(d) == 1)
+            .collect();
+        assert_eq!(counted.len(), 1, "one decode counts the D-leg");
+        counted[0].clone()
+    });
+    assert_eq!(spd.decode_legs_in_flight(&bound), 1, "the serving decode");
+    for d in f.d_urls.iter().filter(|d| **d != bound) {
+        assert_eq!(spd.decode_legs_in_flight(d), 0, "{d}");
+    }
+    let now = spd.role_assignments().unwrap();
+    let mut desired = now.roles.clone();
+    desired.insert(bound.clone(), RoleAssignment::Prefill);
+    let (after, _) = spd
+        .replace_role_assignments(&now.epoch, now.revision, &now.roles, &desired)
+        .unwrap();
+    let drain = tokio::spawn(sgl_router::scheduler::role_drain::drain_to_prefill(
+        Arc::clone(&spd),
+        Arc::clone(&f.ctx.executions),
+        reqwest::Client::new(),
+        bound.clone(),
+        after.revision,
+        Duration::from_millis(300),
+    ));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!drain.is_finished(), "the drain waits for the stream");
+    assert!(spd.role_drains().contains_key(&bound));
+    f.hold.send_replace(true);
+    let rest = tokio::time::timeout(Duration::from_secs(10), stream.collect())
+        .await
+        .unwrap()
+        .unwrap()
+        .to_bytes();
+    assert!(rest.ends_with(b"data: [DONE]\n\n"), "{rest:?}");
+    tokio::time::timeout(Duration::from_secs(10), drain)
+        .await
+        .expect("the drain ends after the stream")
+        .unwrap();
+    assert_eq!(spd.decode_legs_in_flight(&bound), 0);
+    assert!(spd.role_drains().is_empty());
+}
+
+#[tokio::test]
+async fn late_d_stream_holds_the_bound_decode_and_its_drain() {
+    stream_holds_the_drain(Some(LateDecodeRule::Keep), 2).await;
+}
+
+#[tokio::test]
+async fn plain_split_stream_holds_its_decode_and_its_drain() {
+    stream_holds_the_drain(None, 2).await;
+}
+
+/// A client that leaves a late-D stream ends the bound decode's count.
+#[tokio::test]
+async fn late_d_client_disconnect_ends_the_decode_count() {
+    let f = fixture(opts(Some(LateDecodeRule::Keep), vec![None, None])).await;
+    let spd = Arc::clone(f.ctx.symmetric_pd.as_ref().unwrap());
+    let res = f.post(held_request("hold-2"), None).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let bound = bound_decode(&res).expect("late D binds a decode");
+    let mut stream = res.into_body();
+    stream.frame().await.unwrap().unwrap();
+    assert_eq!(spd.decode_legs_in_flight(&bound), 1);
+    drop(stream);
+    assert!(
+        wait_until(Duration::from_secs(5), || spd.decode_legs_in_flight(&bound)
+            == 0)
+        .await,
+        "the count ends with the client"
+    );
+    assert!(f.d_urls.iter().all(|d| spd.decode_legs_in_flight(d) == 0));
+}

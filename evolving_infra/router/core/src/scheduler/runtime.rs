@@ -870,6 +870,18 @@ impl SymmetricPdRuntime {
         self.backend.state.lock().loads(workers)
     }
 
+    /// D-legs in flight on `worker` in the backend ledger: those of prepared
+    /// executions and those the router proxies itself. A decode->prefill
+    /// drain waits for them.
+    pub fn decode_legs_in_flight(&self, worker: &str) -> usize {
+        self.backend
+            .state
+            .lock()
+            .views([worker])
+            .get(worker)
+            .map_or(0, |v| v.active_decode_reqs as usize)
+    }
+
     /// Count one D-leg on `worker`'s in-flight decode count (the backend
     /// ledger) until the returned guard drops: a late-D bind moves the
     /// arrival pick's count to the bound candidate.

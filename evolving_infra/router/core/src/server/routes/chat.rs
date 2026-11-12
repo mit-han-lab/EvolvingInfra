@@ -309,6 +309,18 @@ pub async fn chat_completions(
                 },
             })
             .await?;
+        // Role control: the placement was made outside the role lock. A
+        // pair with a worker that has left its role since gets no leg
+        // (503: the client retries and is placed again). The reservations
+        // the placement made are already counted, so a drain that starts
+        // after this check waits for this request's D-leg.
+        if spd.config().external_role_control && !d.is_local() {
+            let current = spd.with_current_role_pair(&d.p_worker.url, &d.d_worker.url, || Ok(()));
+            if let Err(reason) = current {
+                d.ledger.retire();
+                return Err(ApiError::SymmetricPdNoPlacement(reason));
+            }
+        }
         let w = Arc::clone(&d.p_worker);
         spd_decision = Some(d);
         w
