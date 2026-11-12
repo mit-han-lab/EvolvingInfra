@@ -73,9 +73,10 @@ fn config(flex: Option<SymmetricPdConfig>) -> Config {
 }
 
 /// `(url, prefill_weight, decode_weight, bootstrap_port)`.
-fn build_ctx(
+fn build_ctx_with(
     flex: Option<SymmetricPdConfig>,
     workers: &[(&str, f64, f64, u16)],
+    count_workload: bool,
 ) -> Arc<AppContext> {
     let cfg = config(flex);
     let tokenizers = Arc::new(TokenizerRegistry::load_from_config(&cfg).unwrap());
@@ -104,7 +105,20 @@ fn build_ctx(
     }
     let policies = Arc::new(build_registry_with_defaults(&cfg).unwrap());
     let proxy = Arc::new(Proxy::new(Duration::from_secs(5)).unwrap());
-    Arc::new(AppContext::new(cfg, tokenizers, proxy, registry, policies))
+    let mut ctx = AppContext::new(cfg, tokenizers, proxy, registry, policies);
+    if count_workload {
+        // The sums an external role controller reads (`GET /symmetric_pd/roles`).
+        ctx.external_workload = Some(Arc::default());
+    }
+    Arc::new(ctx)
+}
+
+/// `(url, prefill_weight, decode_weight, bootstrap_port)`.
+fn build_ctx(
+    flex: Option<SymmetricPdConfig>,
+    workers: &[(&str, f64, f64, u16)],
+) -> Arc<AppContext> {
+    build_ctx_with(flex, workers, false)
 }
 
 fn post(uri: &str, body: Value) -> Request<Body> {
@@ -525,5 +539,60 @@ async fn decode_reservation_lasts_as_long_as_the_stream() {
     assert_eq!(
         during, 1,
         "the D-leg is decoding: it must count in its worker's in-flight decodes"
+    );
+}
+
+/// A streaming chat request on the plain path is added to the role
+/// controller's workload sums from its two replies: the prefill's cached
+/// prompt tokens, the decode's output tokens and verify steps. The client
+/// did not ask for usage, so its stream carries none.
+#[tokio::test]
+async fn plain_chat_request_counts_in_the_controller_workload() {
+    let p = MockWorker::start(vec![
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":1,\"prompt_tokens_details\":{\"cached_tokens\":768}}}\n\n",
+        "data: [DONE]\n\n",
+    ])
+    .await;
+    let d = MockWorker::start(vec![
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        "data: {\"choices\":[],\"sglext\":{\"spec_tokens_details\":{\"spec_verify_ct\":4}}}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":12}}\n\n",
+        "data: [DONE]\n\n",
+    ])
+    .await;
+    let ctx = build_ctx_with(
+        Some(SymmetricPdConfig::default()),
+        &[(&p.url, 1.0, 0.0, 9000), (&d.url, 0.0, 1.0, 9100)],
+        true,
+    );
+    let res = build_router(Arc::clone(&ctx))
+        .oneshot(post(
+            "/v1/chat/completions",
+            json!({"model": "tiny", "stream": true,
+                "messages": [{"role": "user", "content": "hello there"}]}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        std::str::from_utf8(&body).unwrap(),
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
+    );
+    // Both legs were asked to report.
+    for worker in [&p, &d] {
+        let sent: Value =
+            serde_json::from_slice(worker.captured.lock().unwrap().last_body.as_ref().unwrap())
+                .unwrap();
+        assert_eq!(sent["stream_options"]["include_usage"], true);
+        assert_eq!(sent["return_spec_tokens_details"], true);
+    }
+    // The prefill task reads its reply after the decode stream may have ended.
+    let workload = ctx.external_workload.as_ref().unwrap();
+    assert_eq!(workload.totals().requests, 1);
+    let sums = workload.totals();
+    assert_eq!(
+        (sums.input_tokens, sums.output_tokens, sums.verify_steps),
+        (1000, 12, 4)
     );
 }

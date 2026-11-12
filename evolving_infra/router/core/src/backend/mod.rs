@@ -5,6 +5,7 @@
 //! `crate::scheduler`; this module exposes their engine-facing dependencies.
 pub mod execution;
 pub mod kv_sessions;
+pub mod plain_usage;
 pub mod refresh;
 pub mod registry;
 pub mod sglang;

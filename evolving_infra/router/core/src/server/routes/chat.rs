@@ -179,6 +179,17 @@ pub async fn chat_completions(
         );
     }
     crate::server::routes::completions::ensure_progress_rid(&ctx, request_value.as_mut())?;
+    // External role control: the controller's workload sums count this
+    // request from its replies (see `backend::plain_usage`).
+    let usage_asked = match (ctx.external_workload.as_ref(), request_value.as_mut()) {
+        (Some(_), Some(value)) if ctx.symmetric_pd.is_some() => {
+            let asked = crate::backend::plain_usage::ask(value, streaming);
+            body =
+                Bytes::from(serde_json::to_vec(value).map_err(|e| ApiError::Internal(e.into()))?);
+            Some(asked)
+        }
+        _ => None,
+    };
 
     // The ids feed both the routing decision (cache-aware consumes them; other
     // policies ignore them) and — when engine-equivalent — the engine itself,
@@ -448,6 +459,15 @@ pub async fn chat_completions(
     // 0 here: the active-load registry's decode axis is reserved for a
     // future decode-side scheduler — current decode selection is
     // host-affinity only.
+    let plain_usage = match (usage_asked, ctx.external_workload.as_ref()) {
+        (Some(_), Some(workload)) => Some(crate::backend::plain_usage::PlainUsage::new(
+            Arc::clone(workload),
+            flex_decision
+                .as_ref()
+                .map_or(0, |d| d.prompt_len.saturating_sub(d.ledger.tokens())),
+        )),
+        _ => None,
+    };
     let guard = worker.load_guard();
     // Use the exact token count from the ingress tokenization when available;
     // fall back to the byte-count heuristic for load-only policies that don't
@@ -766,6 +786,7 @@ pub async fn chat_completions(
             .abort_decode_on_prefill_failure
             .then(PrefillFailure::new);
         let prefill_failure_p = prefill_failure.clone();
+        let usage_p = plain_usage.clone();
         let decode_url_p = decode_worker.url.clone();
         let rid_p = rid.clone();
         let body_for_rid = prefill_failure.as_ref().map(|_| prefill_body.clone());
@@ -797,7 +818,7 @@ pub async fn chat_completions(
                     return;
                 }
             }
-            let prefill_result = prefill_proxy
+            let mut prefill_result = prefill_proxy
                 .forward_json_to(
                     &prefill_url,
                     &prefill_breaker,
@@ -816,6 +837,7 @@ pub async fn chat_completions(
                 prefill_ledger,
                 &prefill_result,
             );
+            crate::backend::plain_usage::read_prefill(usage_p.as_ref(), &mut prefill_result).await;
             match prefill_result {
                 // Cancelled, not failed: the engine finished the P-leg
                 // because its reader left; the D-leg owns the outcome.
@@ -1031,6 +1053,7 @@ pub async fn chat_completions(
     // resolved). A malformed URL was already rejected at the
     // request-side parse — we only reach this branch when the URL was
     // header-valid, so the second parse is safe.
+    let result = crate::backend::plain_usage::count(result, plain_usage, usage_asked);
     match (result, decode_hint_url) {
         (Ok(mut response), Some(url)) => {
             match HeaderValue::from_str(&url) {

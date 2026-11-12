@@ -196,6 +196,20 @@ async fn dispatch(
         );
     }
     ensure_progress_rid(&ctx, request_value.as_mut())?;
+    // External role control: the controller's workload sums count this
+    // request from its replies (see `backend::plain_usage`). A native
+    // `/generate` reply has no OpenAI usage and is not counted.
+    let usage_asked = match (ctx.external_workload.as_ref(), request_value.as_mut()) {
+        (Some(_), Some(value))
+            if ctx.symmetric_pd.is_some() && !matches!(ingress, Ingress::Generate) =>
+        {
+            let asked = crate::backend::plain_usage::ask(value, streaming);
+            body =
+                Bytes::from(serde_json::to_vec(value).map_err(|e| ApiError::Internal(e.into()))?);
+            Some(asked)
+        }
+        _ => None,
+    };
     if ctx.late_bind.is_some() {
         super::late_d::prepare_request(request_value.as_mut())?;
     }
@@ -497,6 +511,15 @@ async fn dispatch(
     }
     let headers = request_headers;
 
+    let plain_usage = match (usage_asked, ctx.external_workload.as_ref()) {
+        (Some(_), Some(workload)) => Some(crate::backend::plain_usage::PlainUsage::new(
+            Arc::clone(workload),
+            flex_decision
+                .as_ref()
+                .map_or(0, |d| d.prompt_len.saturating_sub(d.ledger.tokens())),
+        )),
+        _ => None,
+    };
     let guard = worker.load_guard();
     let prefill_load = prompt_ids
         .as_ref()
@@ -872,6 +895,7 @@ async fn dispatch(
             .abort_decode_on_prefill_failure
             .then(PrefillFailure::new);
         let prefill_failure_p = prefill_failure.clone();
+        let usage_p = plain_usage.clone();
         let decode_url_p = decode_worker.url.clone();
         let rid_p = rid.clone();
         let body_for_rid = prefill_failure.as_ref().map(|_| prefill_body.clone());
@@ -898,7 +922,7 @@ async fn dispatch(
                     return;
                 }
             }
-            let prefill_result = prefill_proxy
+            let mut prefill_result = prefill_proxy
                 .forward_json_to(
                     &prefill_url,
                     &prefill_breaker,
@@ -913,6 +937,7 @@ async fn dispatch(
                 }
             }
             settle_prefill_leg(prefill_cost.as_mut(), prefill_ledger, &prefill_result);
+            crate::backend::plain_usage::read_prefill(usage_p.as_ref(), &mut prefill_result).await;
             match prefill_result {
                 // Cancelled, not failed: the engine finished the P-leg
                 // because its reader left; the D-leg owns the outcome.
@@ -1056,7 +1081,7 @@ async fn dispatch(
         "completions request",
     );
 
-    result
+    crate::backend::plain_usage::count(result, plain_usage, usage_asked)
 }
 
 /// Client request id from the body (`rid` — the strict-replay client sends
