@@ -269,15 +269,6 @@ pub enum PolicyKind {
     /// `ModelConfig::sticky`.
     #[value(name = "sticky")]
     Sticky,
-    /// Co-scheduled routing + KV movement: prefer the max-cache-hit worker
-    /// unless its pending uncached-prefill backlog exceeds a threshold, in
-    /// which case either detour to an under-threshold worker (pulling the
-    /// KV from the owner via `kv_pull_hint`) or hold the request in a
-    /// router-side admission queue until capacity frees. Tuning lives on
-    /// `ModelConfig::co_schedule`; requires the kv-hint indexer flags
-    /// (`--kv-indexer-url`, `--kv-worker-map`).
-    #[value(name = "co_schedule")]
-    CoSchedule,
     /// symmetric P/D placement: every request goes through
     /// `crate::scheduler::placement::place()` over the PD workers (legacy
     /// Prefill/Decode plus `Symmetric` engines with weights); Split
@@ -296,19 +287,6 @@ pub enum PolicyKind {
     /// KV-event policy `cache_aware_zmq`.
     #[value(name = "gateway_cache_aware")]
     GatewayCacheAware,
-}
-
-/// When the co-schedule policy may attach a `kv_pull_hint` to a dispatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum KvPullScope {
-    /// Attach on ANY dispatch whose best source beats the target by the
-    /// incremental gate (routing and pulling fully decoupled).
-    #[value(name = "any")]
-    Any,
-    /// Attach only on the step-3 detour (routed away from the max-hit
-    /// worker) — the literal three-step rule, kept for ablation.
-    #[value(name = "detour-only")]
-    DetourOnly,
 }
 
 /// Decode-peer selection rule for PD-mode dispatches. Orthogonal to
@@ -384,81 +362,6 @@ impl Default for PdDecodeTokensConfig {
             normalize_by_capacity: false,
         }
     }
-}
-
-/// Tuning for the co-schedule policy. Ignored unless
-/// `policy = "co_schedule"`.
-#[derive(Debug, Clone)]
-pub struct CoScheduleConfig {
-    /// Query stale progress on request arrival instead of unconditional polling.
-    /// Only supported with the request-level uncached-work ledger.
-    pub on_demand_load_refresh: bool,
-    /// Immediately balance remaining uncached work, with engine RID progress.
-    pub uncached_balance: bool,
-    /// Retain a cache owner at or below this existing workload (not a cap).
-    pub owner_threshold_tokens: u64,
-    pub detour_margin_tokens: u64,
-    /// Optional measured ratio D: cost = D * uncached + pending restore tokens.
-    /// Enables immediate minimum-finish-work placement; never creates a gate.
-    pub restore_cost_divisor: Option<u64>,
-    /// `--co-schedule-trade`: the TRADE P-selection cost model on the
-    /// uncached ledger (`Some` only with `uncached_balance`). `None` keeps
-    /// the owner-threshold selection unchanged.
-    pub trade: Option<crate::scheduler::co_schedule::TradeParams>,
-    /// `--co-schedule-trade-eft-model`: the frozen step-time model of
-    /// `--co-schedule-trade-wait eft` (`Some` only then).
-    pub trade_eft_model: Option<std::sync::Arc<crate::eft_cheap::EftModel>>,
-    /// `--co-schedule-global-queue sjf|hrrn` (`Some` only with `trade`, wait
-    /// ledger): the router-side global waiting queue of the TRADE placement.
-    /// `None` (default, `off`): TRADE
-    /// dispatches every request at arrival, unchanged.
-    pub global_queue: Option<crate::global_queue::GlobalQueueConfig>,
-    /// `--co-schedule-trade-e3-bound-table` and the other `wait = e3`
-    /// settings that are not in [`crate::scheduler::co_schedule::TradeParams`]
-    /// (`Some` only with `--co-schedule-trade-wait e3`).
-    pub trade_e3: Option<std::sync::Arc<crate::trade_e3::TradeE3Config>>,
-    /// Prefer GPU-resident prefixes when total cache hits tie in capped mode.
-    pub prefer_gpu_hit: bool,
-    /// Bypass the cap, keeping the GPU-local owner unless a detour reduces
-    /// outstanding expected uncached work by more than this token margin.
-    pub locality_margin_tokens: Option<u64>,
-    /// Minimize the post-dispatch spread of input_tokens * expected_uncached.
-    /// This mode bypasses the legacy uncached-token admission cap.
-    pub cost_balance: bool,
-    /// Append-only per-request cost events and one-second snapshots.
-    pub cost_trace: Option<std::path::PathBuf>,
-    /// Dispatch to a worker only while its pending uncached-prefill tokens
-    /// (engine-reported baseline + router in-flight ledger) stay below this
-    /// (CLI default 32768).
-    pub max_uncached_tokens: u64,
-    /// A request queued longer than this is force-dispatched to the
-    /// min-backlog worker (starvation guard).
-    pub max_queue_wait_ms: u64,
-    /// Interval for polling each mapped worker's `/v1/loads`.
-    pub load_poll_ms: u64,
-    /// Dispatcher fallback wake period (ms). The loop also wakes on
-    /// arrival, ledger retire, poll, and exactly at the oldest queued
-    /// entry's starvation deadline. Must be > 0. CLI default 500.
-    pub tick_ms: u64,
-    /// While the queue is holding, re-poll `/v1/loads` this many ms after
-    /// the previous round instead of waiting `load_poll_ms`; 0 disables
-    /// (ledger-only between periodic polls). CLI default 100.
-    pub poll_on_hold_ms: u64,
-    /// When every pool worker is over the cap but the backlog spread
-    /// (max − min, tokens) exceeds this, the queue head is dispatched to
-    /// the min-backlog worker anyway (branch `imbalance`) instead of
-    /// holding; 0 disables. CLI default 131072.
-    pub imbalance_spread_tokens: u64,
-    /// See [`KvPullScope`].
-    pub pull_scope: KvPullScope,
-    /// `--kv-session-retention`: session KV retention on the PD path (the
-    /// engine session protocol). A PD request with an
-    /// `x-kv-session-context` header registers its prefill worker, and only
-    /// the prefill-leg body carries `kv_session`. Does not change placement.
-    pub kv_session_retention: bool,
-    /// `--kv-session-key-file`: the engine API/admin key file for the
-    /// background retention controls.
-    pub kv_session_key_file: Option<std::path::PathBuf>,
 }
 
 /// Tuning for `--policy gateway_cache_aware`. `Some` exactly when that policy
@@ -580,10 +483,6 @@ pub struct ModelConfig {
     ///
     /// [`AppContext`]: crate::server::app_context::AppContext
     pub kv_hint: Option<crate::kv_hint::KvHintConfig>,
-    /// Co-schedule tuning. `Some` exactly when `policy = "co_schedule"`;
-    /// `kv_hint` is also always `Some` then (the policy needs the indexer
-    /// for per-worker cache hits and reuses the hint machinery for pulls).
-    pub co_schedule: Option<CoScheduleConfig>,
     /// Decode-peer selection for PD-mode dispatches. See [`PdDecodePolicy`].
     pub pd_decode_policy: PdDecodePolicy,
     /// Token-charged decode tuning. `Some` exactly when `pd_decode_policy`
@@ -608,12 +507,9 @@ pub struct ModelConfig {
 
 impl ModelConfig {
     /// Session KV retention on the PD path (`--kv-session-retention`, with
-    /// `--policy co_schedule` or `--policy gateway_cache_aware`): `Some(key
+    /// `--policy gateway_cache_aware`): `Some(key
     /// file)` when on, `None` when off. symmetric_pd keeps its own flag.
     pub fn pd_kv_session_retention(&self) -> Option<Option<&std::path::Path>> {
-        if let Some(c) = self.co_schedule.as_ref().filter(|c| c.kv_session_retention) {
-            return Some(c.kv_session_key_file.as_deref());
-        }
         self.gateway_cache_aware
             .as_ref()
             .filter(|g| g.kv_session_retention)
@@ -798,12 +694,12 @@ impl From<SymmetricPdPSelect> for crate::scheduler::placement::PSelect {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymmetricPdCostFunctionConfig {
     /// The `--co-schedule-trade*` parameters (lambda fixed or auto).
-    pub trade: crate::scheduler::co_schedule::TradeParams,
-    /// `--co-schedule-cost-trace`: a new JSONL file (an existing file stops
+    pub trade: crate::scheduler::trade::TradeParams,
+    /// `--trade-cost-trace`: a new JSONL file (an existing file stops
     /// the start). Every row has `"policy": "symmetric_pd_cost_function"`.
     /// None: no trace.
     pub cost_trace: Option<std::path::PathBuf>,
-    /// `--co-schedule-load-poll-ms` (default 100): the period of the
+    /// `--trade-load-poll-ms` (default 100): the period of the
     /// per-RID progress poll of each P-role worker.
     pub load_poll_ms: u64,
     /// `--symmetric-pd-unknown-expire-secs` (default 60): an unknown reservation
@@ -825,8 +721,8 @@ pub struct SymmetricPdCostFunctionConfig {
     /// event with a session identity gets a `session_move` record (the P of
     /// the session's last decision, the hits, the pull). Trace only.
     pub trace_session_moves: bool,
-    /// The E3 forecast state (`--co-schedule-trade-e3-*`): `Some` with
-    /// `--co-schedule-trade-wait e3` (the step-time-model predictor in the P
+    /// The E3 forecast state (`--trade-e3-*`): `Some` with
+    /// `--trade-wait e3` (the step-time-model predictor in the P
     /// selection, with the prediction gate) or `--symmetric-pd-gwq-room
     /// predicted` (the drain of the global waiting queue). None otherwise.
     pub trade_e3: Option<SymmetricPdTradeE3>,
@@ -837,13 +733,7 @@ pub struct SymmetricPdCostFunctionConfig {
     /// role switch). The targets stay the healthy P-role workers. Off: every
     /// hit and every pull source is a P-role worker.
     pub pull_from_any_holder: bool,
-    /// `--co-schedule-trade-wait olp` or `--co-schedule-trade-olp-shadow`:
-    /// the online latency predictor of the cost book ([`crate::olp`]), with
-    /// its parameters (the defaults or `--co-schedule-trade-olp-params`),
-    /// whether it only traces (shadow) and the parameter file's sha256.
-    /// None (default): no OLP state; decisions and trace are unchanged.
-    pub olp: Option<crate::olp::OlpConfig>,
-    /// `--co-schedule-cost-trace-async`: the cost trace is written by a
+    /// `--trade-cost-trace-async`: the cost trace is written by a
     /// background thread ([`crate::cost_balance::CostBook::enable_async_trace`]).
     /// Off (default): each row is written and flushed under the cost-book
     /// lock.

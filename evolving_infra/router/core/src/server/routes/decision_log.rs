@@ -198,14 +198,12 @@ pub(crate) fn log_routing_decision(r: &RoutingDecision<'_>) {
 /// `retire()` marks the prefill work done (idempotent on both).
 #[derive(Clone)]
 pub(crate) enum AdmissionLedger {
-    Co(crate::co_schedule::LedgerHandle),
     Flex(crate::scheduler::LedgerHandle),
 }
 
 impl AdmissionLedger {
     pub(crate) fn retire(&self) {
         match self {
-            AdmissionLedger::Co(l) => l.retire(),
             AdmissionLedger::Flex(l) => l.retire(),
         }
     }

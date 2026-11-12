@@ -40,7 +40,7 @@ use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
 use sgl_router::kv_hint::{KvHintConfig, KvWorkerMapEntry};
 use sgl_router::policies::factory::build_registry_with_defaults;
 use sgl_router::proxy::Proxy;
-use sgl_router::scheduler::co_schedule::TradeParams;
+use sgl_router::scheduler::trade::TradeParams;
 use sgl_router::scheduler::{DSelect, PSelect, RoleWeight};
 use sgl_router::server::app::build_router;
 use sgl_router::server::app_context::AppContext;
@@ -534,7 +534,6 @@ async fn fixture(opts: Opts) -> Fixture {
             trace_session_moves: false,
             trade_e3: None,
             pull_from_any_holder: false,
-            olp: None,
             trace_async: false,
         });
         let kv = KvHintConfig {
@@ -581,7 +580,6 @@ async fn fixture(opts: Opts) -> Fixture {
             cache_aware: None,
             sticky: None,
             kv_hint,
-            co_schedule: None,
             pd_decode_policy: PdDecodePolicy::AffinityMinLoad,
             pd_decode_tokens: Some(PdDecodeTokensConfig::default()),
             pd_decision_replay: None,

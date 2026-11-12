@@ -42,7 +42,6 @@ fn build_ctx(prefill_url: &str, decode_urls: &[&str], policy: PdDecodePolicy) ->
             cache_aware: None,
             sticky: None,
             kv_hint: None,
-            co_schedule: None,
             pd_decode_policy: policy,
             pd_decode_tokens: None,
             pd_decision_replay: None,

@@ -71,7 +71,7 @@ pub async fn plan(
             "prepared request_id conflicts with trajectory identity".into(),
         ));
     }
-    // `--co-schedule-trade-wait e3`: the session key of the forecast target's
+    // `--trade-wait e3`: the session key of the forecast target's
     // host rule (the agent identity, else `x-smg-routing-key`), as the
     // completions route passes it.
     if flex.cost_function_wants_e3_session() {

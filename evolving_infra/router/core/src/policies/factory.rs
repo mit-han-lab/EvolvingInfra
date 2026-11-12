@@ -31,7 +31,6 @@ fn build_sticky_fallback(kind: PolicyKind) -> Arc<dyn Policy> {
         PolicyKind::LoadBased => Arc::new(LoadBasedPolicy::new()),
         PolicyKind::CacheAwareZmq
         | PolicyKind::Sticky
-        | PolicyKind::CoSchedule
         | PolicyKind::SymmetricPd
         | PolicyKind::GatewayCacheAware => {
             unreachable!("sticky fallback is validated to be dependency-free in Cli::into_config")
@@ -88,7 +87,7 @@ pub fn build_policy(
         // registry entry is only a safety net for the impossible case of
         // the co-scheduler being unavailable at request time; least-loaded
         // is the closest degradation.
-        PolicyKind::CoSchedule | PolicyKind::SymmetricPd => Arc::new(LoadBasedPolicy::new()),
+        PolicyKind::SymmetricPd => Arc::new(LoadBasedPolicy::new()),
     }
 }
 
@@ -131,7 +130,7 @@ pub fn build_policy_kind_only(kind: PolicyKind) -> Arc<dyn Policy> {
         )),
         // Same fallback as `build_policy`: co-schedule selection lives in
         // the routes, not the sync Policy trait.
-        PolicyKind::CoSchedule | PolicyKind::SymmetricPd => Arc::new(LoadBasedPolicy::new()),
+        PolicyKind::SymmetricPd => Arc::new(LoadBasedPolicy::new()),
     }
 }
 
@@ -197,7 +196,6 @@ mod tests {
                 cache_aware: None,
                 sticky: None,
                 kv_hint: None,
-                co_schedule: None,
                 pd_decode_policy: crate::config::PdDecodePolicy::AffinityMinLoad,
                 pd_decision_replay: None,
                 pd_decode_tokens: None,

@@ -199,7 +199,7 @@ pub struct Params {
     pub arrivals: Option<Arrivals>,
     /// Result of a target whose last pass leaves no known work on a busy P.
     /// Off (the reference): the bare result lag `lag_none_s`. On
-    /// (`--co-schedule-trade-e3-next-pass-lag`, fitted on Kimi-K2.6): the
+    /// (`--trade-e3-next-pass-lag`, fitted on Kimi-K2.6): the
     /// expected arrivals form the next pass, and the target's result is
     /// processed after that pass launches (`lag_next`), as on an engine that
     /// processes a pass's results after launching the next one.

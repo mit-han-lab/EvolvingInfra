@@ -449,7 +449,7 @@ pub struct PlacementConfig {
     #[serde(default)]
     pub p_select: PSelect,
     #[serde(default)]
-    pub co_schedule: super::co_schedule::CoScheduleConfig,
+    pub co_schedule: super::trade::CoScheduleConfig,
     #[serde(default)]
     pub d_select: DSelect,
     /// `cache_first`: best `reuse_gain` must exceed this to win on cache
@@ -575,7 +575,7 @@ impl Default for PlacementConfig {
             weights: ScoreWeights::default(),
             force_split: false,
             p_select: PSelect::default(),
-            co_schedule: super::co_schedule::CoScheduleConfig::default(),
+            co_schedule: super::trade::CoScheduleConfig::default(),
             d_select: DSelect::default(),
             cache_threshold: default_cache_threshold(),
             balance_abs_reqs: default_balance_abs_reqs(),
@@ -1007,7 +1007,7 @@ pub fn place_with_cost<C: CostModel + ?Sized>(
                                 };
                                 (lo.min(cost), hi.max(cost))
                             });
-                    super::co_schedule::Evaluation {
+                    super::trade::Evaluation {
                         worker: candidate.id,
                         local_hit: candidate.hit_tokens as u64,
                         gpu_hit: candidate.gpu_hit,
@@ -1019,7 +1019,7 @@ pub fn place_with_cost<C: CostModel + ?Sized>(
                     }
                 })
                 .collect();
-            let selected = super::co_schedule::select(
+            let selected = super::trade::select(
                 &costs,
                 cfg.co_schedule.owner_threshold_tokens,
                 model.detour_margin(cfg.co_schedule.detour_margin_tokens),
@@ -2314,7 +2314,7 @@ mod tests {
             let cfg = PlacementConfig {
                 p_select: PSelect::CoSchedule,
                 d_select: DSelect::RoundRobin,
-                co_schedule: super::super::co_schedule::CoScheduleConfig {
+                co_schedule: super::super::trade::CoScheduleConfig {
                     owner_threshold_tokens: 12288,
                     detour_margin_tokens: margin,
                 },

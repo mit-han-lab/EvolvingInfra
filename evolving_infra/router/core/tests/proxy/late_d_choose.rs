@@ -568,7 +568,6 @@ async fn fixture(n: usize, opts: Opts) -> Fixture {
             cache_aware: None,
             sticky: None,
             kv_hint,
-            co_schedule: None,
             pd_decode_policy: PdDecodePolicy::PowerOfTwoSmg,
             pd_decode_tokens: d1.then(PdDecodeTokensConfig::default),
             pd_decision_replay: None,

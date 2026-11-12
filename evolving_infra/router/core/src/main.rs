@@ -119,6 +119,12 @@ fn install_signal_handlers() -> Result<(Signal, Signal)> {
 /// and joins the cleanup task. Dependency constructors may panic on invalid
 /// configuration; argument parsing can exit before initialization completes.
 async fn main() -> Result<()> {
+    for arg in std::env::args().skip(1) {
+        if let Some(hint) = sgl_router::config::cli::renamed_flag(&arg) {
+            eprintln!("error: {} is {hint}", arg.split('=').next().unwrap_or(&arg));
+            std::process::exit(2);
+        }
+    }
     let cli = Cli::parse();
     // Bootstrap subscriber so a config-resolution error has structured
     // output. The configured-format subscriber installs after this and

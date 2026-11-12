@@ -22,7 +22,7 @@ The Rust router (`sgl-router`). [`README.md`](README.md) has the build;
 - **Role control with KV session retention needs the prepared path.** With
   `--symmetric-pd-external-role-control` and retention on, a plain `/v1/completions` request is
   refused: the router needs the frontend's lifecycle callbacks to count work per session.
-- **Placement constants** are named in `src/scheduler/co_schedule.rs`
+- **Placement constants** are named in `src/scheduler/trade.rs`
   (`DEFAULT_TRADE_COPY_LAMBDA`); [`docs/paper.md`](../../../docs/paper.md) points at them. Change
   the doc with the constant.
 - **A flag that only makes sense with `--policy symmetric_pd`** is listed in the check that

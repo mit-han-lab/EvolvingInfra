@@ -57,7 +57,6 @@ fn config(kv_session_retention: bool) -> Config {
             cache_aware: None,
             sticky: None,
             kv_hint: None,
-            co_schedule: None,
             pd_decode_policy: PdDecodePolicy::AffinityMinLoad,
             pd_decision_replay: None,
             pd_decode_tokens: None,

@@ -54,21 +54,20 @@ frontend:
   ttl_seconds: 3600
   request_timeout_seconds: 3600
 router_args:                   # the e3 wait model with measured copy price and prefill rate
-  - --co-schedule-trade
-  - --co-schedule-trade-copy-lambda=auto
-  - --co-schedule-trade-copy-lambda-q=sat
-  - --co-schedule-trade-copy-lambda-mu=1
-  - --co-schedule-trade-copy-lambda-min=0
-  - --co-schedule-trade-copy-lambda-max=1000000000
-  - --co-schedule-trade-copy-lambda-fallback=18.4
-  - --co-schedule-trade-rate-tokens-per-s=auto
-  - --co-schedule-trade-wait=e3
-  - --co-schedule-trade-e3-bound-table=examples/gb300/e3/bound-params.json
-  - --co-schedule-trade-e3-frozen-fit=examples/gb300/e3/kimi-k26-frozen-fit.json
-  - --co-schedule-trade-e3-push-port=26648
-  - --co-schedule-trade-e3-next-pass-lag
-  - --co-schedule-trade-gate-m=0
-  - --co-schedule-trade-eft-max-view-age-ms=5000
+  - --trade-copy-lambda=auto
+  - --trade-copy-lambda-q=sat
+  - --trade-copy-lambda-mu=1
+  - --trade-copy-lambda-min=0
+  - --trade-copy-lambda-max=1000000000
+  - --trade-copy-lambda-fallback=18.4
+  - --trade-rate-tokens-per-s=auto
+  - --trade-wait=e3
+  - --trade-e3-bound-table=examples/gb300/e3/bound-params.json
+  - --trade-e3-frozen-fit=examples/gb300/e3/kimi-k26-frozen-fit.json
+  - --trade-e3-push-port=26648
+  - --trade-e3-next-pass-lag
+  - --trade-gate-m=0
+  - --trade-e3-max-view-age-ms=5000
   - --symmetric-pd-gwq-auto
   - --symmetric-pd-gwq-room=predicted
   - --symmetric-pd-trace-session-moves

@@ -7,7 +7,7 @@
 //! The cost function keeps its own [`CostBook`] (the uncached ledger with the
 //! TRADE cost, lambda and R fixed or auto) and its own per-RID progress poll
 //! of the P-role workers: `GET /v1/loads?include=core,queues,prefill_work`
-//! every `--co-schedule-load-poll-ms`, with one query per worker in flight.
+//! every `--trade-load-poll-ms`, with one query per worker in flight.
 //! It does not read the symmetric_pd Backend load view. Each request makes one
 //! cost-book transaction: it selects the P-leg among the healthy P-role
 //! workers, decides the pull (the P-leg's `kv_pull_hint`) and reserves the
@@ -38,12 +38,12 @@
 //! to run out of queued work; a request bound to its cache owner is reserved
 //! at arrival as without the queue.
 //!
-//! With `--co-schedule-trade-wait e3` the TRADE decisions price each
+//! With `--trade-wait e3` the TRADE decisions price each
 //! candidate with the E3 step-time-model P completion forecast and its
 //! prediction gate; with `--symmetric-pd-gwq-room predicted` the queue also gives
 //! a P room while its forecast drain is within its lead. Both read the
 //! engine `prefill_routing` snapshot of the progress poll and, with
-//! `--co-schedule-trade-e3-push-port`, the engines' state push ([`e3`]).
+//! `--trade-e3-push-port`, the engines' state push ([`e3`]).
 //!
 //! With `--symmetric-pd-pull-from-any-holder` the targets and their hits stay the
 //! P-role pool's, but the pull source may be any holder of the indexer answer
@@ -59,14 +59,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::co_schedule::{
+use super::trade::{
     trade_pull_tokens, TradeLambdaMode, TradePullPrice, TradeWait, TRADE_MIN_PULL_TOKENS,
 };
 use super::{PlaceInput, SymmetricPdError};
-use crate::co_schedule::{fetch_progress_poll, include_rejected};
 use crate::config::SymmetricPdCostFunctionConfig;
 use crate::cost_balance::{Candidate, CostBook, Reservation};
 use crate::kv_hint::{HintCandidate, IndexerAnswer, KvHintConfig, KvHintInjector};
+use crate::load_refresh::{fetch_progress_poll, include_rejected};
 use crate::load_refresh::{LoadRefresh, Query};
 use crate::workers::Worker;
 use tokio::task::JoinHandle;
@@ -104,7 +104,7 @@ pub struct CostFunction {
     host_room_rejections: parking_lot::Mutex<HashMap<String, Instant>>,
     /// `--symmetric-pd-gwq-auto` (None: off): the global waiting queue.
     gwq: Option<gwq_auto::GwqAuto>,
-    /// `--co-schedule-trade-wait e3` or `--symmetric-pd-gwq-room predicted`
+    /// `--trade-wait e3` or `--symmetric-pd-gwq-room predicted`
     /// (None: neither): the E3 forecast state.
     e3: Option<e3::FlexE3>,
 }
@@ -138,9 +138,6 @@ impl CostFunction {
         let expire = (secs > 0).then_some(Duration::from_secs(secs));
         let book = CostBook::new_uncached_with_policy(trace, TRACE_POLICY, expire)
             .expect("create new cost trace before serving requests");
-        if let Some(olp) = &cfg.olp {
-            book.enable_olp(olp.clone());
-        }
         if cfg.trace_async {
             book.enable_async_trace()
                 .expect("start the background cost trace writer before serving requests");
@@ -293,13 +290,13 @@ impl CostFunction {
     }
 
     /// The routes pass the E3 session key ([`PlaceInput::e3_session`], the
-    /// host rule of the forecast target): `--co-schedule-trade-wait e3`.
+    /// host rule of the forecast target): `--trade-wait e3`.
     pub fn wants_e3_session(&self) -> bool {
         self.e3.as_ref().is_some_and(|e3| e3.decides)
     }
 
     /// The client ended `session` (`POST /kv_sessions/end`; the identity of
-    /// [`crate::scheduler::co_schedule::trade_session_key`]): it leaves
+    /// [`crate::scheduler::trade::trade_session_key`]): it leaves
     /// N_active of the copy price `auto` at once. Returns whether it was
     /// counted (always false with both TRADE modes fixed).
     pub fn session_end(&self, session: &str) -> bool {
@@ -475,7 +472,7 @@ impl CostFunction {
     }
 
     /// One TRADE reservation of `candidates` (one cost-book transaction).
-    /// With `--co-schedule-trade-wait e3` the E3 inputs are built before the
+    /// With `--trade-wait e3` the E3 inputs are built before the
     /// lock and the routed request is recorded after it (shadow line, online
     /// state); otherwise the ledger or copy-price terms of the parameters.
     /// `gwq_note`: the `gwq` object of the reserve event (a request that the
@@ -495,7 +492,6 @@ impl CostFunction {
                     input.rid.clone(),
                     candidates,
                     self.cfg.trade,
-                    None,
                     input.trade_session.as_deref(),
                     gwq_note,
                 )
@@ -858,38 +854,6 @@ fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_
              noise margin = keep owner unless gain_s > k*sqrt(B_o^2 + B_best^2)",
         );
     }
-    if let Some(olp) = &cfg.olp {
-        let p = &olp.params;
-        let mode = if olp.shadow { "shadow" } else { "olp" };
-        let scale = p.scale_source.as_str();
-        let sha256 = olp.params_sha256.as_deref().unwrap_or("defaults");
-        let params = serde_json::to_string(p).unwrap_or_default();
-        let queue = if olp.incremental {
-            "incremental"
-        } else {
-            "walk"
-        };
-        let trace = if olp.compact_trace { "compact" } else { "full" };
-        tracing::info!(
-            target: "symmetric_pd",
-            mode,
-            queue,
-            trace,
-            scale_source = scale,
-            risk_residual = p.risk_residual,
-            params_sha256 = sha256,
-            params = %params,
-            "symmetric_pd cost_function: online latency predictor (OLP, {mode}): per P, wait = \
-             scale(work of its live ledger rows), service = scale(own work), work(u, h, first) \
-             = c0*ceil(u/chunk) + c1*u + c2*(u*h + u*(u+1)/2) + first*c3*rr*h; scale {scale} \
-             (label: a + bq*q and bo*o refit each step on completion labels; busy: per-P \
-             busy-counter scale k; none: 1). Gate (wait olp): warm, fresh progress, enough \
-             label pairs and pair concordance not below the cost function's, else the cost \
-             function's decision. Shadow: traced only; params sha256 {sha256}; queue {queue} \
-             (incremental: per-P integer sums of the live rows' work terms, O(1) per \
-             candidate); OLP trace keys {trace}",
-        );
-    }
     if cfg.trace_async {
         tracing::info!(
             target: "symmetric_pd",
@@ -925,7 +889,7 @@ fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_
             tau_s = trade.auto_tau_s,
             lambda_min = floor,
             "symmetric_pd cost_function: TRADE pull price phi: lambda_P = max(min, lambda_q * phi_P) \
-             for the target P with min = {floor} (--co-schedule-trade-copy-lambda-min; the max \
+             for the target P with min = {floor} (--trade-copy-lambda-min; the max \
              does not apply); lambda_q = mu*q*R/R_hat before the clamp (the fallback lambda \
              while the auto price falls back); phi_P = live share (class 1) of the host tokens \
              that P evicted, EWMA (tau = {} s) of the host_room counter increments, 0 without \
@@ -1039,7 +1003,7 @@ fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_
 }
 
 /// The startup lines of the E3 forecast state (target `symmetric_pd`): the
-/// decisions with `--co-schedule-trade-wait e3`, the queue drain with
+/// decisions with `--trade-wait e3`, the queue drain with
 /// `--symmetric-pd-gwq-room predicted`, the state push.
 fn log_e3(cfg: &SymmetricPdCostFunctionConfig) {
     let trade = cfg.trade;
@@ -1053,7 +1017,7 @@ fn log_e3(cfg: &SymmetricPdCostFunctionConfig) {
             tracing::error!(
                 target: "symmetric_pd",
                 "symmetric_pd cost_function: wait e3 or GWQ room predicted without the E3 forecast \
-                 state (--co-schedule-trade-e3-bound-table): every P uses the ledger terms \
+                 state (--trade-e3-bound-table): every P uses the ledger terms \
                  (fallback no_context) and the queue keeps the token rule"
             );
         }
@@ -1145,7 +1109,7 @@ mod tests {
     use super::*;
     use crate::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
     use crate::kv_hint::KvWorkerMapEntry;
-    use crate::scheduler::co_schedule::{TradeAutoQ, TradeLambdaMode, TradeParams, TradeWait};
+    use crate::scheduler::trade::{TradeAutoQ, TradeLambdaMode, TradeParams, TradeWait};
     use serde_json::json;
 
     const P1: &str = "http://p1:30000";
@@ -1214,7 +1178,6 @@ mod tests {
                 trace_session_moves: false,
                 trade_e3: None,
                 pull_from_any_holder,
-                olp: None,
                 trace_async: false,
             },
             kv,
@@ -1466,7 +1429,6 @@ mod tests {
                 input.rid.clone(),
                 candidates,
                 cf.cfg.trade,
-                None,
                 input.trade_session.as_deref(),
             )
             .unwrap()
@@ -1590,61 +1552,6 @@ mod tests {
         }
     }
 
-    /// `--co-schedule-trade-olp-shadow`: the cost function enables OLP in its
-    /// book; every selection and decision equals the one without OLP apart
-    /// from the OLP keys (`olp` and 11 `olp_*` keys per candidate).
-    #[test]
-    fn olp_shadow_keeps_every_selection() {
-        let kv = kv(512, &[P1, P2, P3]);
-        let ix = KvHintInjector::new(&kv);
-        let (dir_off, dir_on) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let off = cost_function(&dir_off, TradeParams::default(), &kv);
-        let on = CostFunction::new(
-            SymmetricPdCostFunctionConfig {
-                trade: TradeParams::default(),
-                cost_trace: Some(dir_on.path().join("cost.jsonl")),
-                load_poll_ms: 100,
-                unknown_expire_secs: 60,
-                loads_host_room: false,
-                gwq_auto: None,
-                trace_session_moves: false,
-                trade_e3: None,
-                pull_from_any_holder: false,
-                olp: Some(crate::olp::OlpConfig {
-                    shadow: true,
-                    ..Default::default()
-                }),
-                trace_async: false,
-            },
-            &kv,
-        );
-        // Worker ids follow kv(): P1 = 1, P2 = 2, P3 = 3.
-        let replies = [
-            Some(reply(&[(1, 18_000, 9_000), (3, 300, 0)])),
-            None,
-            Some(reply(&[(2, 12_000, 12_000), (1, 30_000, 0)])),
-        ];
-        let mut keep = Vec::new();
-        for (i, r) in replies.iter().enumerate() {
-            let input = PlaceInput {
-                prompt_len: 60_000,
-                rid: Some(format!("r{i}")),
-                ..Default::default()
-            };
-            let (sel_off, res_off, dec_off) = off
-                .reserve(&ix, &input, 60_000, r.as_ref(), 1.0, &pool(), &[])
-                .unwrap();
-            let (sel_on, res_on, mut dec_on) = on
-                .reserve(&ix, &input, 60_000, r.as_ref(), 1.0, &pool(), &[])
-                .unwrap();
-            assert_eq!(format!("{sel_on:?}"), format!("{sel_off:?}"), "request {i}");
-            assert_eq!(dec_on["olp"]["mode"], "shadow");
-            assert_eq!(crate::olp::strip_olp_keys(&mut dec_on), 1 + 3 * 11);
-            assert_eq!(dec_on, dec_off, "request {i}");
-            keep.push((res_off, res_on));
-        }
-    }
-
     // ---- --symmetric-pd-gwq-auto ----
 
     fn cand(url: &str, hit: u64) -> Candidate {
@@ -1720,7 +1627,6 @@ mod tests {
                 trace_session_moves: false,
                 trade_e3: None,
                 pull_from_any_holder,
-                olp: None,
                 trace_async: false,
             },
             &kv,
@@ -2020,7 +1926,6 @@ mod tests {
                 trace_session_moves: false,
                 trade_e3: None,
                 pull_from_any_holder: false,
-                olp: None,
                 trace_async: false,
             },
             &kv,
@@ -2142,7 +2047,6 @@ mod tests {
                 trace_session_moves: false,
                 trade_e3: None,
                 pull_from_any_holder: false,
-                olp: None,
                 trace_async: false,
             },
             kv,
@@ -2321,14 +2225,13 @@ mod tests {
                 trace_session_moves: false,
                 trade_e3: Some(e3_state()),
                 pull_from_any_holder: false,
-                olp: None,
                 trace_async: false,
             },
             kv,
         )
     }
 
-    /// `--co-schedule-trade-wait e3` (gate m 0): the TRADE decision has the
+    /// `--trade-wait e3` (gate m 0): the TRADE decision has the
     /// e3 terms, the routed request an `e3_shadow` line, and the routes are
     /// asked for the E3 session key. With the ledger wait and no predicted
     /// room the bound table alone turns nothing on.
@@ -2397,7 +2300,7 @@ mod tests {
         drop(reservation);
     }
 
-    /// `--co-schedule-trade-e3-frozen-fit`: P1 and P2 have a polled view but
+    /// `--trade-e3-frozen-fit`: P1 and P2 have a polled view but
     /// no timeline sample. With the file both are priced by the forecast
     /// (wait_source e3, a pred_s, e3_fit sources frozen); without it both
     /// fall back (no_fit).
@@ -2431,7 +2334,6 @@ mod tests {
                     trace_session_moves: false,
                     trade_e3: Some(crate::config::SymmetricPdTradeE3(Arc::new(cfg))),
                     pull_from_any_holder: false,
-                    olp: None,
                     trace_async: false,
                 },
                 &kv,
@@ -2523,7 +2425,7 @@ mod tests {
         (url, includes)
     }
 
-    /// E3 (`--co-schedule-trade-wait e3`) with `--symmetric-pd-loads-host-room`:
+    /// E3 (`--trade-wait e3`) with `--symmetric-pd-loads-host-room`:
     /// the engine rejects the combined include without naming the section.
     /// The routing snapshot alone tells which one: an engine without the
     /// host_room section keeps its E3 view (rather than losing it at
@@ -2569,7 +2471,6 @@ mod tests {
                     trace_session_moves: false,
                     trade_e3: Some(e3_state()),
                     pull_from_any_holder: false,
-                    olp: None,
                     trace_async: false,
                 },
                 &kv,

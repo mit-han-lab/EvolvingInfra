@@ -86,9 +86,9 @@ ROUTER_ARGS = [
     "--symmetric-pd-import-cache-policy", "retain",
     "--symmetric-pd-load-poll-ms", "100", "--symmetric-pd-pull-hint", "--kv-indexer-timeout-ms", "200",
     "--request-timeout-secs", "3600", "--stale-request-timeout-secs", "3600", "--cb-threshold", "4294967295",
-    "--co-schedule-trade", "--co-schedule-trade-copy-lambda", "4.6", "--co-schedule-trade-count-inflight",
-    "--co-schedule-uncached-balance", "--co-schedule-load-poll-ms", "100",
-    "--kv-pull-hint-min-tokens", "256", "--kv-pull-hint-min-incremental-tokens", "512", "--kv-pull-scope", "any",
+    "--trade-copy-lambda", "4.6", "--trade-count-inflight",
+    "--trade-load-poll-ms", "100",
+    "--kv-pull-hint-min-tokens", "256", "--kv-pull-hint-min-incremental-tokens", "512",
     "--symmetric-pd-unknown-expire-secs", "60", "--symmetric-pd-pull-from-any-holder",
     # Late D: the D is chosen at the P leg's first chunk by fit_req over every D.
     "--pd-native-decode-state", "--pd-late-decode", "choose", "--pd-late-decode-rule", "fit_req",
@@ -218,7 +218,7 @@ def router_command(cfg: dict, ips: list, rundir: str, query_url: str) -> list[st
     ws = workers(len(ips))
     cmd = [ROUTER_BIN, "--host", "0.0.0.0", "--port", str(ROUTER_PORT), "--model-id", SERVED,
            "--tokenizer-path", f"{MODEL}/tokenizer.json", *ROUTER_ARGS,
-           "--kv-indexer-url", query_url, "--co-schedule-cost-trace", f"{rundir}/router-cost.jsonl"]
+           "--kv-indexer-url", query_url, "--trade-cost-trace", f"{rundir}/router-cost.jsonl"]
     # DSV4's FULL+SWA cache tree has no KV session retention; the router's paper preset would turn it on.
     cmd += ["--symmetric-pd-no-kv-session-retention"]
     if c := cfg.get("controller"):

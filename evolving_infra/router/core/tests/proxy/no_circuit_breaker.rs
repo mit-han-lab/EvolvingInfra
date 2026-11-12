@@ -40,7 +40,6 @@ fn build_ctx(prefill_url: &str, decode_url: &str, disable: bool) -> Arc<AppConte
             cache_aware: None,
             sticky: None,
             kv_hint: None,
-            co_schedule: None,
             pd_decode_policy: PdDecodePolicy::AffinityMinLoad,
             pd_decode_tokens: None,
             pd_decision_replay: None,

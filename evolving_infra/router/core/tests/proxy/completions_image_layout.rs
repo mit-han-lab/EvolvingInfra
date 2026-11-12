@@ -54,7 +54,6 @@ fn build_ctx(url: String, body_mib: usize, layout: bool) -> Arc<AppContext> {
             cache_aware: None,
             sticky: None,
             kv_hint: None,
-            co_schedule: None,
             pd_decode_policy: sgl_router::config::PdDecodePolicy::AffinityMinLoad,
             pd_decision_replay: None,
             pd_decode_tokens: None,

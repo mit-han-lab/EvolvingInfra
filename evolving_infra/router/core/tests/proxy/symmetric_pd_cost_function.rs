@@ -29,7 +29,7 @@ use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
 use sgl_router::kv_hint::{KvHintConfig, KvWorkerMapEntry};
 use sgl_router::policies::factory::build_registry_with_defaults;
 use sgl_router::proxy::Proxy;
-use sgl_router::scheduler::co_schedule::TradeParams;
+use sgl_router::scheduler::trade::TradeParams;
 use sgl_router::scheduler::{PSelect, RoleWeight};
 use sgl_router::server::app::build_router;
 use sgl_router::server::app_context::AppContext;
@@ -341,7 +341,6 @@ async fn fixture_full(
             trace_session_moves: extra.1,
             trade_e3: None,
             pull_from_any_holder: any_holder.unwrap_or(false),
-            olp: None,
             trace_async: false,
         }),
         ..SymmetricPdConfig::default()
@@ -370,7 +369,6 @@ async fn fixture_full(
                 indexer_timeout_ms: 500,
                 worker_map,
             }),
-            co_schedule: None,
             pd_decode_policy: PdDecodePolicy::AffinityMinLoad,
             pd_decision_replay: None,
             pd_decode_tokens: None,
@@ -617,7 +615,7 @@ async fn flex_trade_three_p(lambda: f64, gate: u32) {
     );
 }
 
-/// `--co-schedule-trade-copy-lambda auto` on symmetric_pd
+/// `--trade-copy-lambda auto` on symmetric_pd
 /// (`kv_hint_injection.rs`
 /// `trade_copy_lambda_auto_counts_sessions_and_traces_its_inputs`): the
 /// fallback lambda before tau, N_active from the session header, and
@@ -625,7 +623,7 @@ async fn flex_trade_three_p(lambda: f64, gate: u32) {
 /// retention-off 400).
 #[tokio::test]
 async fn flex_cost_function_copy_lambda_auto_counts_sessions() {
-    use sgl_router::scheduler::co_schedule::{TradeAutoQ, TradeLambdaMode};
+    use sgl_router::scheduler::trade::{TradeAutoQ, TradeLambdaMode};
     let trade = TradeParams {
         copy_lambda: 18.4,
         copy_lambda_mode: TradeLambdaMode::Auto {
@@ -885,7 +883,7 @@ async fn flex_cost_function_traces_the_engine_host_room_only_with_the_flag() {
     assert_eq!(picks[0].0, 0, "P1 holds 3,000 of the 4,000 tokens");
 }
 
-/// `--co-schedule-trade-pull-price phi` end to end, with the lambda = q
+/// `--trade-pull-price phi` end to end, with the lambda = q
 /// words (copy price auto, mu 1, no clamp, rate auto) during start-up, so
 /// lambda_q = the fallback 18.4. P1 owns 18,000 of the 20,000-token prompt
 /// and holds `busy` (20,000 tokens of backlog). P1 and P2 answer a
@@ -898,7 +896,7 @@ async fn flex_cost_function_traces_the_engine_host_room_only_with_the_flag() {
 /// omitted section is counted (host_room_missing).
 #[tokio::test]
 async fn flex_cost_function_phi_price_moves_off_a_loaded_owner() {
-    use sgl_router::scheduler::co_schedule::{
+    use sgl_router::scheduler::trade::{
         TradeAutoQ, TradeLambdaMode, TradePullPrice, TradeRateMode,
     };
     let room = json!({"total_tokens": 1_000, "free_tokens": 0, "class0_tokens": 600,

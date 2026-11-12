@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! `--kv-session-retention` on the PD path (the co_schedule port of the
-//! session protocol), end to end at the HTTP layer with mock
+//! `--kv-session-retention` on the PD path (the session protocol), end to
+//! end at the HTTP layer with mock
 //! engines. The choose-mode (late D) case is in `late_d_choose.rs`.
 //!
 //! * Only the prefill-leg body carries `kv_session`; a decode body never.
@@ -13,12 +13,10 @@
 //!   leg leaves. A registration error sends the request untagged.
 //! * With the flag off the header is ignored and the bodies do not change.
 //! * `POST /kv_sessions/end` works with the flag and is refused without it.
-//! * The real co_schedule config builds the registry, and a registration
-//!   error leaves the co-schedule reservations balanced.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::routing::{get, post};
+use axum::routing::post;
 use axum::Json;
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -26,9 +24,8 @@ use serde_json::{json, Value};
 use sgl_router::agent_identity::KV_SESSION_HEADER;
 use sgl_router::backend::kv_sessions::{KvSessionStats, KvSessions};
 use sgl_router::config::{
-    ActiveLoadConfig, CoScheduleConfig, Config, DiscoveryBackend, KvPullScope, ModelConfig,
-    ObservabilityConfig, PdDecodePolicy, PolicyKind, ProxyConfig, ServerConfig,
-    StaticUrlsDiscoveryConfig,
+    ActiveLoadConfig, Config, DiscoveryBackend, ModelConfig, ObservabilityConfig, PdDecodePolicy,
+    PolicyKind, ProxyConfig, ServerConfig, StaticUrlsDiscoveryConfig,
 };
 use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
 use sgl_router::kv_hint::{KvHintConfig, KvWorkerMapEntry};
@@ -39,7 +36,7 @@ use sgl_router::server::app_context::AppContext;
 use sgl_router::tokenizer::TokenizerRegistry;
 use sgl_router::workers::WorkerRegistry;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tower::ServiceExt;
 
@@ -62,7 +59,6 @@ fn config(kv_hint: Option<KvHintConfig>) -> Config {
             cache_aware: None,
             sticky: None,
             kv_hint,
-            co_schedule: None,
             pd_decode_policy: PdDecodePolicy::AffinityMinLoad,
             pd_decision_replay: None,
             pd_decode_tokens: None,
@@ -404,127 +400,4 @@ async fn end_route_ends_a_known_session_and_refuses_an_unknown_one() {
     assert!(p.get("kv_session").is_none(), "ended");
     next_body(&decode, "decode").await;
     assert_eq!(stat(&ctx, |s| &s.register_ended), 1);
-}
-
-/// The real co_schedule config (uncached balance with a cost trace) builds
-/// the registry from `kv_session_retention`. The first step is tagged on P
-/// only; a stale second step goes out untagged. Both reservations finish:
-/// the registration error leaves the co-schedule ledger balanced.
-#[tokio::test]
-async fn co_schedule_config_tags_p_only_and_keeps_reservations_balanced() {
-    let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
-    let sequence = Arc::new(AtomicU64::new(0));
-    let p_app = axum::Router::new()
-        .route(
-            COMPLETIONS,
-            post({
-                let seen = Arc::clone(&seen);
-                move |Json(body): Json<Value>| {
-                    let seen = Arc::clone(&seen);
-                    async move {
-                        seen.lock().unwrap().push(body);
-                        Json(json!({"choices": []}))
-                    }
-                }
-            }),
-        )
-        .route(
-            "/v1/loads",
-            get(move || {
-                let n = sequence.fetch_add(1, Ordering::SeqCst);
-                async move {
-                    Json(json!({"loads": [{"num_running_reqs": 0, "prefill_work":
-                        {"epoch": "p1", "sequence": n, "remaining": {}}}]}))
-                }
-            }),
-        );
-    let p_url = serve(p_app).await;
-    let decode = MockWorker::start(vec![]).await;
-    let indexer = mock_indexer(json!({"instances": {}})).await;
-    let tmp = tempfile::tempdir().unwrap();
-    let trace = tmp.path().join("work.jsonl");
-    let map = vec![KvWorkerMapEntry {
-        id: 1,
-        url: p_url.clone(),
-        servicer: "p1:18100".into(),
-    }];
-    let mut cfg = config(Some(hint_config(indexer, map)));
-    cfg.model.policy = PolicyKind::CoSchedule;
-    cfg.model.co_schedule = Some(CoScheduleConfig {
-        on_demand_load_refresh: false,
-        uncached_balance: true,
-        owner_threshold_tokens: 12288,
-        detour_margin_tokens: 0,
-        restore_cost_divisor: None,
-        trade: None,
-        trade_eft_model: None,
-        global_queue: None,
-        trade_e3: None,
-        prefer_gpu_hit: false,
-        locality_margin_tokens: None,
-        cost_balance: false,
-        cost_trace: Some(trace.clone()),
-        max_uncached_tokens: 1,
-        max_queue_wait_ms: 30000,
-        load_poll_ms: 10,
-        tick_ms: 30000,
-        poll_on_hold_ms: 0,
-        imbalance_spread_tokens: 0,
-        pull_scope: KvPullScope::Any,
-        kv_session_retention: true,
-        kv_session_key_file: None,
-    });
-    let (app, ctx) = router(cfg, pd_specs(&p_url, &decode.url), false);
-    assert!(ctx.co_schedule.is_some());
-    assert!(ctx.kv_sessions.is_some(), "the config builds the registry");
-    for (rid, step) in [("first", 2), ("second", 1)] {
-        let header = identity("agent-7", step);
-        let req = post_to(COMPLETIONS, Some(&header), &completion(rid));
-        let res = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::OK, "{rid}");
-        let d = next_body(&decode, rid).await;
-        assert!(d.get("kv_session").is_none(), "{rid}");
-        assert_eq!(d["rid"], rid);
-    }
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while seen.lock().unwrap().len() < 2 {
-        assert!(Instant::now() < deadline, "the P legs did not arrive");
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    let bodies = seen.lock().unwrap().clone();
-    let p_of = |rid: &str| bodies.iter().find(|b| b["rid"] == rid).cloned().unwrap();
-    assert_eq!(p_of("first")["kv_session"]["version"], 1);
-    assert!(p_of("second").get("kv_session").is_none());
-    assert_eq!(stat(&ctx, |s| &s.tagged), 1);
-    assert_eq!(stat(&ctx, |s| &s.register_stale), 1);
-
-    // Every reservation reaches `finished`; none is rolled back or unknown.
-    let read_events = || -> Vec<Value> {
-        std::fs::read_to_string(&trace)
-            .unwrap_or_default()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    };
-    let finished = |events: &[Value], rid: &str| {
-        events
-            .iter()
-            .any(|e| e["event"] == "finished" && e["entry"]["rid"] == rid)
-    };
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let events = read_events();
-        if finished(&events, "first") && finished(&events, "second") {
-            for rid in ["first", "second"] {
-                let bad = events.iter().any(|e| {
-                    matches!(e["event"].as_str(), Some("rolled_back" | "unknown"))
-                        && e["entry"]["rid"] == rid
-                });
-                assert!(!bad, "{rid}: the reservation did not finish cleanly");
-            }
-            break;
-        }
-        assert!(Instant::now() < deadline, "reservations did not finish");
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
 }

@@ -41,7 +41,6 @@ fn config(policy: PdDecodePolicy) -> Config {
             cache_aware: None,
             sticky: None,
             kv_hint: None,
-            co_schedule: None,
             pd_decode_policy: policy,
             // None with a token-charged policy = defaults (output cap 8192).
             pd_decode_tokens: None,

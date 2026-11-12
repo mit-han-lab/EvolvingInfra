@@ -43,11 +43,11 @@ cost(P) = backlog(P) + uncached(P) + R · max(0, pull_time − backlog(P) / R) +
   `--kv-pull-hint-min-incremental-tokens` there is no pull.
 - The pull time is charged only where P's queue does not hide it. `R` converts seconds to tokens
   (default 13,500 tokens/s).
-- `λ` (`--co-schedule-trade-copy-lambda`) prices the second copy the pull leaves in P's host
+- `λ` (`--trade-copy-lambda`) prices the second copy the pull leaves in P's host
   memory, which takes space other prefixes could use.
 
 Ties go to the worker with the longest own prefix. The router writes every decision, with each
-candidate's terms, to the `--co-schedule-cost-trace` file.
+candidate's terms, to the `--trade-cost-trace` file.
 
 ## Peer pulls
 

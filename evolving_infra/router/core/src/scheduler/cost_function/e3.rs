@@ -4,9 +4,9 @@
 //! The E3 step-time-model P completion forecast ([`crate::trade_e3`]) on the
 //! symmetric_pd cost function, with the CoScheduler's inputs:
 //!
-//! - `--co-schedule-trade-wait e3`: each TRADE decision of the cost function
+//! - `--trade-wait e3`: each TRADE decision of the cost function
 //!   prices its candidates with the forecast and the prediction gate
-//!   ([`crate::scheduler::co_schedule::select_trade_e3`]); the cost book does
+//!   ([`crate::scheduler::trade::select_trade_e3`]); the cost book does
 //!   the forecast under its lock ([`CostBook::reserve_trade_e3_session_noted`]).
 //! - `--symmetric-pd-gwq-room predicted`: the global waiting queue of
 //!   `--symmetric-pd-gwq-auto` gives a P room while the forecast drain of a cold
@@ -18,11 +18,11 @@
 //! `SGLANG_SYMMETRIC_ROUTING_SNAPSHOT=1`; an engine that rejects the include
 //! is polled without it and asked again after [`ROUTING_REPROBE`]); its
 //! timeline samples feed the online fits ([`E3Online`]) and its view the
-//! forecast. With `--co-schedule-trade-e3-push-port` one state-push
+//! forecast. With `--trade-e3-push-port` one state-push
 //! subscriber per P-role worker ([`PushHub`]; the engine side is
 //! `SGLANG_PREFILL_STATE_PUSH_PORT`) gives a fresher state. Every routed
 //! request with a forecast gets an `e3_shadow` line, and its completion an
-//! `e3_label` line, in the cost trace (or `--co-schedule-trade-e3-shadow`).
+//! `e3_label` line, in the cost trace (or `--trade-e3-shadow`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -50,7 +50,7 @@ const PUSH_SUPERVISE: Duration = Duration::from_secs(1);
 /// The E3 forecast state of one cost function.
 pub(super) struct FlexE3 {
     pub(super) cfg: Arc<TradeE3Config>,
-    /// `--co-schedule-trade-wait e3`: the forecast prices the TRADE
+    /// `--trade-wait e3`: the forecast prices the TRADE
     /// decisions. False: it gives the queue drain only
     /// (`--symmetric-pd-gwq-room predicted` with the ledger wait).
     pub(super) decides: bool,
@@ -65,7 +65,7 @@ pub(super) struct FlexE3 {
 
 impl FlexE3 {
     /// The forecast state with its shadow log (a new file, or the cost
-    /// trace of `book`) and, with `--co-schedule-trade-e3-push-port`, the
+    /// trace of `book`) and, with `--trade-e3-push-port`, the
     /// push hub (subscribers start with [`push_supervisor_loop`]). Panics
     /// when the shadow file exists or cannot be created.
     pub(super) fn new(cfg: Arc<TradeE3Config>, decides: bool, book: &Arc<CostBook>) -> Self {
@@ -161,7 +161,7 @@ impl FlexE3 {
     /// snapshot. An older snapshot (same engine epoch and a sequence that is
     /// not newer, or an older poll) is dropped; a new epoch replaces it.
     pub(super) fn observe(&self, worker: &str, raw: &Value, sent: Instant, received: Instant) {
-        let view = crate::eft_cheap::SnapshotView::parse(raw, 1, None);
+        let view = crate::prefill_snapshot::SnapshotView::parse(raw, 1, None);
         let mut e3 = E3View::parse(raw);
         let labels = self.online.observe(worker, &e3, sent, received);
         if let Some(sink) = &self.shadow {
@@ -322,7 +322,7 @@ impl FlexE3 {
     }
 }
 
-/// With `--co-schedule-trade-e3-push-port`: every [`PUSH_SUPERVISE`], keep
+/// With `--trade-e3-push-port`: every [`PUSH_SUPERVISE`], keep
 /// one push subscriber per P-role worker of `members` (new workers get one,
 /// gone ones lose theirs) and write the push statistics when they are due.
 pub(super) async fn push_supervisor_loop(

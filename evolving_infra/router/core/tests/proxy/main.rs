@@ -19,7 +19,6 @@ mod decode_token_balance;
 mod external_indexer_routing;
 mod failover;
 mod gateway_ca_port;
-mod global_queue;
 mod graceful_shutdown;
 mod header_forwarding;
 mod kv_hint_injection;

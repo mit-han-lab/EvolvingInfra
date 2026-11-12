@@ -101,7 +101,7 @@ pub struct PlaceInput {
     /// ([`crate::agent_identity::trade_session_key`]), counted in N_active.
     /// `None` otherwise.
     pub trade_session: Option<String>,
-    /// `--co-schedule-trade-wait e3` on the cost function: the session key
+    /// `--trade-wait e3` on the cost function: the session key
     /// of the E3 host rule ([`crate::trade_e3::session_key`]: the
     /// `x-kv-session-context` agent, else the `x-smg-routing-key` header).
     /// `None` otherwise.
@@ -699,7 +699,7 @@ impl SymmetricPdRuntime {
     }
 
     /// The routes pass the E3 session key ([`PlaceInput::e3_session`]):
-    /// the cost function decides with `--co-schedule-trade-wait e3`.
+    /// the cost function decides with `--trade-wait e3`.
     pub fn cost_function_wants_e3_session(&self) -> bool {
         self.cost_function
             .as_ref()
@@ -716,7 +716,7 @@ impl SymmetricPdRuntime {
     }
 
     /// The client ended `session` (`POST /kv_sessions/end`; the identity of
-    /// [`crate::scheduler::co_schedule::trade_session_key`]): it leaves
+    /// [`crate::scheduler::trade::trade_session_key`]): it leaves
     /// N_active of the cost function's copy price `auto` at once. Returns
     /// whether it was counted.
     pub fn cost_function_session_end(&self, session: &str) -> bool {
@@ -3669,7 +3669,7 @@ mod tests {
     fn cost_function_runtime(
         dir: &Path,
         indexer_url: &str,
-        trade: crate::scheduler::co_schedule::TradeParams,
+        trade: crate::scheduler::trade::TradeParams,
         tune: impl FnOnce(&mut SymmetricPdConfig),
     ) -> Arc<SymmetricPdRuntime> {
         let reg = registry_with(vec![
@@ -3707,7 +3707,6 @@ mod tests {
             trace_session_moves: false,
             trade_e3: None,
             pull_from_any_holder: false,
-            olp: None,
             trace_async: false,
         });
         tune(&mut cfg);
@@ -3758,7 +3757,7 @@ mod tests {
     /// # Outputs
     /// No return value; each admit returns at once, unforced.
     async fn cost_function_never_holds() {
-        use crate::scheduler::co_schedule::TradeParams;
+        use crate::scheduler::trade::TradeParams;
         let dir = tempfile::tempdir().unwrap();
         let rt = cost_function_runtime(dir.path(), DEAD_INDEXER, TradeParams::default(), |cfg| {
             cfg.max_uncached_tokens = 1;
@@ -3791,7 +3790,7 @@ mod tests {
     /// No return value; `a` takes P1 (idle tie, lowest URL), `b` takes P2,
     /// and the trace has one labelled `reserve` row per request.
     async fn cost_function_reserves_once_per_request() {
-        use crate::scheduler::co_schedule::TradeParams;
+        use crate::scheduler::trade::TradeParams;
         let dir = tempfile::tempdir().unwrap();
         let rt = cost_function_runtime(dir.path(), DEAD_INDEXER, TradeParams::default(), |_| {});
         let a = admit_tokens(&rt, Some("a"), 4096).await.unwrap();
@@ -3827,7 +3826,7 @@ mod tests {
     /// # Outputs
     /// No return value; the trace has a `rolled_back` row for the rid.
     async fn cost_function_rolls_back_when_dropped_before_dispatch() {
-        use crate::scheduler::co_schedule::TradeParams;
+        use crate::scheduler::trade::TradeParams;
         let dir = tempfile::tempdir().unwrap();
         let rt = cost_function_runtime(dir.path(), DEAD_INDEXER, TradeParams::default(), |_| {});
         let d = admit_tokens(&rt, Some("gone"), 4096).await.unwrap();
@@ -3849,7 +3848,7 @@ mod tests {
     /// # Outputs
     /// No return value; `SymmetricPdError::CostFunction` names the rid rule.
     async fn cost_function_refuses_a_missing_rid() {
-        use crate::scheduler::co_schedule::TradeParams;
+        use crate::scheduler::trade::TradeParams;
         let dir = tempfile::tempdir().unwrap();
         let rt = cost_function_runtime(dir.path(), DEAD_INDEXER, TradeParams::default(), |_| {});
         match admit_tokens(&rt, None, 4096).await {
@@ -3879,7 +3878,7 @@ mod tests {
     /// # Outputs
     /// No return value; P2 is charged 5,192 tokens, not its local 8,192.
     async fn cost_function_accounts_the_trade_expected_hit() {
-        use crate::scheduler::co_schedule::TradeParams;
+        use crate::scheduler::trade::TradeParams;
         let reply = json!({"instances": {"1": {"cpu": 3000}}});
         let app = axum::Router::new().route(
             "/query",
@@ -3951,7 +3950,7 @@ mod tests {
         cfg.external_role_control = true;
         cfg.role_drain_timeout = Some(Duration::from_secs(5));
         cfg.cost_function = Some(crate::config::SymmetricPdCostFunctionConfig {
-            trade: crate::scheduler::co_schedule::TradeParams::default(),
+            trade: crate::scheduler::trade::TradeParams::default(),
             cost_trace: Some(dir.join("cost.jsonl")),
             load_poll_ms: 100,
             unknown_expire_secs: 60,
@@ -3963,19 +3962,18 @@ mod tests {
             trace_session_moves: false,
             trade_e3: None,
             pull_from_any_holder: false,
-            olp: None,
             trace_async: false,
         });
         SymmetricPdRuntime::spawn(cfg, Some(&kv), reg, model())
     }
 
-    /// The cost function with `--co-schedule-trade-wait e3` (gate m 0, the
+    /// The cost function with `--trade-wait e3` (gate m 0, the
     /// shipped bound table of tests/fixtures/e3) under external role control:
     /// P1 and P2 P-role, D and D2 D-role, every request cold (closed indexer
     /// port), no state push and no engine snapshot (each P keeps the ledger
     /// terms, fallback `no_view`).
     fn e3_role_runtime(dir: &Path) -> Arc<SymmetricPdRuntime> {
-        use crate::scheduler::co_schedule::{TradeParams, TradeWait};
+        use crate::scheduler::trade::{TradeParams, TradeWait};
         let table = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/e3/bound-params.json"
@@ -4030,7 +4028,6 @@ mod tests {
             trace_session_moves: false,
             trade_e3: Some(crate::config::SymmetricPdTradeE3(Arc::new(e3))),
             pull_from_any_holder: false,
-            olp: None,
             trace_async: false,
         });
         SymmetricPdRuntime::spawn(cfg, Some(&kv), reg, model())
@@ -4070,7 +4067,7 @@ mod tests {
     }
 
     #[tokio::test]
-    /// `--co-schedule-trade-wait e3` under external role control (the CUA
+    /// `--trade-wait e3` under external role control (the CUA
     /// dynamic router): every decision carries the e3 terms and one e3 row
     /// per candidate, the candidates are the current P-role pool, the E3
     /// session key reaches the host rule (the second request of a session

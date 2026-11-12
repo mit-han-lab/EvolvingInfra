@@ -87,7 +87,7 @@ that is given wins.
 
 | Feature | Flags it sets |
 |---|---|
-| Prefill placement by predicted time to first token, with peer pulls | `--symmetric-pd-p-select cost-function`, `--co-schedule-trade`, `--co-schedule-uncached-balance`, `--symmetric-pd-pull-hint`, `--symmetric-pd-pull-from-any-holder`, `--kv-pull-scope any`, `--kv-pull-hint-min-incremental-tokens 512`, `--co-schedule-load-poll-ms 100`. On when `--kv-indexer-url` is set and `--kv-worker-map` names the servicers; otherwise `cache-first` |
+| Prefill placement by predicted time to first token, with peer pulls | `--symmetric-pd-p-select cost-function`, `--symmetric-pd-pull-hint`, `--symmetric-pd-pull-from-any-holder`, `--kv-pull-hint-min-incremental-tokens 512`, `--trade-load-poll-ms 100`. On when `--kv-indexer-url` is set and `--kv-worker-map` names the servicers; otherwise `cache-first` |
 | Late decode choice | `--pd-late-decode choose --pd-late-decode-rule fit_req --pd-late-decode-candidates all --pd-late-decode-local off --pd-late-decode-fit-native --pd-native-decode-state` |
 | KV session retention | `--symmetric-pd-kv-session-retention`; `--symmetric-pd-no-kv-session-retention` keeps it off for a model whose engine does not support it (DeepSeek-V4) |
 | Placement basics | `--symmetric-pd-force-split`, `--symmetric-pd-d-select round-robin`, `--symmetric-pd-load-poll-ms 100`, `--symmetric-pd-import-cache-policy retain` (a D may become a P later, so imported KV follows the host write policy), `--kv-indexer-timeout-ms 200` |
@@ -96,8 +96,14 @@ that is given wins.
 
 | Flag | Description |
 |---|---|
-| `--co-schedule-trade-copy-lambda X` | Price per pulled token of the second copy a pull creates (default 4.6). |
-| `--co-schedule-cost-trace FILE` | Write every placement decision to a new JSONL file. |
+| `--trade-copy-lambda X\|auto` | Price per pulled token of the second copy a pull creates (default 4.6). `auto` measures it while serving; `--trade-copy-lambda-min`, `-max` and `-fallback` bound it and give the value before the first measurement. |
+| `--trade-rate-tokens-per-s R\|auto` | Prefill tokens one P computes per second, which turns pull time into tokens (default 13500). `auto` measures it. |
+| `--trade-pull-fixed-ms N`, `--trade-pull-ms-per-100k N` | Time of one KV pull: a fixed part (default 450 ms) and a part per 100k pulled tokens (default 100 ms). |
+| `--trade-wait ledger\|e3` | Where a P's wait comes from. `ledger` (default): the router's count of uncached tokens routed to it. `e3`: a forecast from the engine's state, for a model whose prefill time is not proportional to tokens (images); needs `--trade-e3-bound-table FILE`. |
+| `--trade-e3-frozen-fit FILE`, `--trade-e3-push-port PORT`, `--trade-e3-next-pass-lag`, `--trade-e3-max-view-age-ms N`, `--trade-gate-m M` | With `--trade-wait e3`: the offline constants of the forecast, the port of the engines' state push, the lag of a request's next pass, the oldest engine state the forecast uses (default 1500 ms), and how far a gain must exceed the forecast's error bound before a request leaves the worker that holds its cache. |
+| `--symmetric-pd-gwq-auto`, `--symmetric-pd-gwq-room tokens\|predicted` | Hold a request that no P is bound to in a router queue until its P has room, by queued tokens or by the forecast drain time. |
+| `--trade-load-poll-ms N` | How often the router reads each P's prefill progress (default 100). |
+| `--trade-cost-trace FILE` | Write every placement decision to a new JSONL file. |
 | `--symmetric-pd-p-select cache-first\|cost-function` | `cache-first`: the worker with the best cache hit unless it is overloaded. `cost-function`: the lowest predicted wait plus compute plus pull cost. See [Placement](placement.md). |
 | `--pd-late-decode-rule fit_req\|d1` | How late decode choice picks D. Late decode choice applies to `/v1/completions` and `/v1/chat/completions`; a native `/generate` request gets its D at arrival. A chat request with `n` above 1 is refused, as a batch prompt is. |
 | `--chat-tools-tokenize` | A chat request with `tools` is placed on token ids from an engine's `/v1/tokenize` (prompt length, KV directory query, pull hint). The router's chat encoder renders messages only, so without the flag such a request matches no cached prefix. The ids are not forwarded to the engine; a tokenize that fails or takes over 3 s leaves the request placed as without the flag. Off by default; the configs in `examples/agents` turn it on. |

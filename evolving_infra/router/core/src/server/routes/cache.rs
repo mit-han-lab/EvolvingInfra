@@ -35,14 +35,11 @@ pub async fn end_kv_session(
     // also when session KV retention is off (the reply below is unchanged).
     // The symmetric_pd cost function keeps the same count.
     let trade_session =
-        crate::scheduler::co_schedule::trade_session_key(&request.agent_id, request.subagent_id);
-    if let Some(cs) = ctx.co_schedule.as_ref() {
-        cs.trade_auto_session_end(&trade_session);
-    }
+        crate::scheduler::trade::trade_session_key(&request.agent_id, request.subagent_id);
     if let Some(flex) = ctx.symmetric_pd.as_ref() {
         flex.cost_function_session_end(&trade_session);
     }
-    // symmetric_pd's Backend registry, else the co_schedule one (--kv-session-retention).
+    // symmetric_pd's Backend registry, else the gateway_cache_aware one (--kv-session-retention).
     let sessions = ctx
         .symmetric_pd
         .as_ref()

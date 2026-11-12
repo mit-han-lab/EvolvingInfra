@@ -1,5 +1,6 @@
 //! Per-worker single-flight progress queries, shared by periodic and demand triggers.
 use parking_lot::Mutex;
+use serde_json::Value;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -162,6 +163,83 @@ pub(crate) fn log_progress_result<T>(worker: &str, result: &anyhow::Result<T>, e
         tracing::debug!(target: "load_refresh", worker = %worker, elapsed_ms,
             "progress query applied");
     }
+}
+
+/// A `/v1/loads` poll that the engine answered with HTTP 4xx or 500. An
+/// engine without the `prefill_routing` section (an older
+/// engine) answers `include=...,prefill_routing` this way: its load-snapshot
+/// section check raises ValueError (400 or 500). The same holds for an
+/// engine without the `host_room` section.
+pub(crate) fn include_rejected(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<reqwest::Error>()
+        .and_then(reqwest::Error::status)
+        .is_some_and(|status| {
+            status.is_client_error() || status == reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+/// The fields of one `/v1/loads` progress poll ([`fetch_progress_poll`]):
+/// the prefill-work progress, the rest of the load row (the trace's
+/// `engine_load`), the raw `prefill_routing` snapshot and the raw `host_room`
+/// section.
+pub(crate) type ProgressPoll = (
+    crate::cost_balance::PrefillProgress,
+    Value,
+    Option<Value>,
+    Option<Value>,
+);
+
+/// One `/v1/loads` poll: the prefill-work progress, the rest of the load row
+/// for the trace, with `routing` the raw `prefill_routing` snapshot and with
+/// `host_room` the engine's `host_room` section (its host pool by retention
+/// class). Both sections are removed from the load row, so the trace's
+/// `engine_load` keeps its size.
+pub(crate) async fn fetch_progress_poll(
+    client: &reqwest::Client,
+    base: &str,
+    routing: bool,
+    host_room: bool,
+) -> anyhow::Result<ProgressPoll> {
+    let include = match (routing, host_room) {
+        (false, false) => "core,queues,prefill_work",
+        (true, false) => "core,queues,prefill_work,prefill_routing",
+        (false, true) => "core,queues,prefill_work,host_room",
+        (true, true) => "core,queues,prefill_work,prefill_routing,host_room",
+    };
+    let mut value: Value = client
+        .get(format!("{}/v1/loads", base.trim_end_matches('/')))
+        .query(&[("include", include)])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let loads = value
+        .get_mut("loads")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("missing loads[]"))?;
+    // TP shares one scheduler RID namespace. Supporting DP requires explicit
+    // per-rank cursors and routing; never silently take an arbitrary rank.
+    anyhow::ensure!(
+        loads.len() == 1,
+        "uncached balance requires DP=1 per worker"
+    );
+    let mut load = loads.swap_remove(0);
+    let progress = load
+        .as_object_mut()
+        .and_then(|row| row.remove("prefill_work"))
+        .ok_or_else(|| anyhow::anyhow!("engine must enable --enable-prefill-work-snapshot"))?;
+    let snapshot = load
+        .as_object_mut()
+        .and_then(|row| row.remove("prefill_routing"))
+        .filter(|_| routing);
+    let room = if host_room {
+        load.as_object_mut().and_then(|row| row.remove("host_room"))
+    } else {
+        None
+    };
+    Ok((serde_json::from_value(progress)?, load, snapshot, room))
 }
 
 #[cfg(test)]

@@ -176,7 +176,6 @@ async fn dispatch(
         || policy.needs_request_tokens()
         || ctx.decode_tokens.is_some()
         || ctx.kv_hint.is_some()
-        || ctx.co_schedule.is_some()
         || ctx.symmetric_pd.is_some()
         || ctx.late_bind.is_some()
         || ctx.kv_sessions.is_some()
@@ -311,7 +310,6 @@ async fn dispatch(
     // cap + co-decided pull) when configured, `Policy::select` otherwise.
     // The co-scheduler may HOLD the request here until capacity frees or
     // its starvation guard fires.
-    let mut co_dispatch: Option<crate::co_schedule::Dispatch> = None;
     let mut flex_decision: Option<crate::scheduler::Decision> = None;
     let mut pd_replay_decode: Option<Arc<Worker>> = None;
     // A policy's per-request note (`--policy gateway_cache_aware`), logged
@@ -357,40 +355,6 @@ async fn dispatch(
             .await?;
         let w = Arc::clone(&d.p_worker);
         flex_decision = Some(d);
-        w
-    } else if let Some(cs) = ctx.co_schedule.as_ref() {
-        let est_tokens = prompt_ids
-            .as_ref()
-            .map(|ids| ids.len().max(1))
-            .unwrap_or_else(|| estimate_prefill_tokens(&body));
-        // TRADE copy price auto: the session identity counts in N_active.
-        let session = if cs.trade_auto() {
-            crate::agent_identity::trade_session_key(&headers)
-        } else {
-            None
-        };
-        // TRADE wait e3: the session key of the target host rule.
-        let e3_session = if cs.wants_session() {
-            crate::trade_e3::session_key(&headers, kv_session_identity.as_ref())
-        } else {
-            None
-        };
-        let d = cs
-            .admit_session(
-                cs,
-                prompt_ids.as_deref(),
-                est_tokens,
-                route_cache_salt,
-                extract_rid(request_value.as_ref()),
-                session,
-                e3_session,
-            )
-            .await
-            .map_err(|_| ApiError::NoHealthyWorkers {
-                model: model_str.clone(),
-            })?;
-        let w = Arc::clone(&d.worker);
-        co_dispatch = Some(d);
         w
     } else {
         let pinned = ctx.pd_replay.as_ref().and_then(|replay| {
@@ -527,16 +491,8 @@ async fn dispatch(
         })
     };
 
-    let admission_queue_wait_ms = co_dispatch
-        .as_ref()
-        .map(|d| d.queue_wait_ms)
-        .or_else(|| flex_decision.as_ref().map(|d| d.queue_wait_ms))
-        .unwrap_or(0);
-    let admission_branch = co_dispatch
-        .as_ref()
-        .map(|d| d.branch.as_str())
-        .or_else(|| flex_decision.as_ref().map(|d| d.branch()))
-        .unwrap_or("policy");
+    let admission_queue_wait_ms = flex_decision.as_ref().map_or(0, |d| d.queue_wait_ms);
+    let admission_branch = flex_decision.as_ref().map_or("policy", |d| d.branch());
 
     // kv-p2p pull hint. Co-scheduled requests already carry their co-decided
     // hint (one indexer answer drove BOTH the routing and the pull — they can
@@ -556,14 +512,6 @@ async fn dispatch(
             Some(AdmissionLedger::Flex(d.ledger.clone())),
             d.cost_reservation.take(),
         )
-    } else if let Some(d) = co_dispatch.take() {
-        let crate::co_schedule::Dispatch {
-            hint,
-            ledger,
-            cost_reservation,
-            ..
-        } = d;
-        (hint, Some(AdmissionLedger::Co(ledger)), cost_reservation)
     } else {
         let hint = match (ctx.kv_hint.as_ref(), prompt_ids.as_ref()) {
             (Some(injector), Some(ids)) => {
@@ -1111,22 +1059,16 @@ pub(crate) fn extract_session(v: Option<&serde_json::Value>) -> (Option<String>,
 
 /// PD forwarding preserves this RID on both sides. Ordinary clients need not
 /// supply an engine RID; strict replay keeps its original correlation ID.
-/// The uncached cost ledgers (`--co-schedule-uncached-balance`,
-/// `--symmetric-pd-p-select cost-function`) key engine progress by it.
+/// The uncached cost ledger (`--symmetric-pd-p-select cost-function`) keys
+/// engine progress by it.
 pub(crate) fn ensure_progress_rid(
     ctx: &AppContext,
     value: Option<&mut serde_json::Value>,
 ) -> Result<(), ApiError> {
     let uncached_ledger = ctx
-        .config
-        .model
-        .co_schedule
+        .symmetric_pd
         .as_ref()
-        .is_some_and(|c| c.uncached_balance)
-        || ctx
-            .symmetric_pd
-            .as_ref()
-            .is_some_and(|f| f.cost_function_enabled());
+        .is_some_and(|f| f.cost_function_enabled());
     if !uncached_ledger {
         return Ok(());
     }

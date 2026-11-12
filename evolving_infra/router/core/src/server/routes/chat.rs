@@ -162,7 +162,6 @@ pub async fn chat_completions(
         || ctx.tokenizers.has_chat_encoder(&model_str)
         || policy.needs_request_tokens()
         || ctx.kv_hint.is_some()
-        || ctx.co_schedule.is_some()
         || ctx.symmetric_pd.is_some();
     let mut request_value: Option<serde_json::Value> = if want_tokens {
         Some(serde_json::from_slice(&body).map_err(|_| {
@@ -253,7 +252,6 @@ pub async fn chat_completions(
     // cap + co-decided pull) when configured, `Policy::select` otherwise.
     // The co-scheduler may HOLD the request here until capacity frees or
     // its starvation guard fires.
-    let mut co_dispatch: Option<crate::co_schedule::Dispatch> = None;
     let mut flex_decision: Option<crate::scheduler::Decision> = None;
     // Traditional-PD decision replay: the pinned decode peer (routes/pd_replay.rs).
     let mut pd_replay_decode: Option<Arc<Worker>> = None;
@@ -302,34 +300,6 @@ pub async fn chat_completions(
             .await?;
         let w = Arc::clone(&d.p_worker);
         flex_decision = Some(d);
-        w
-    } else if let Some(cs) = ctx.co_schedule.as_ref() {
-        let ids = request_tokens.as_ref().map(|t| t.ids.as_slice());
-        let est_tokens = ids
-            .map(|i| i.len().max(1))
-            .unwrap_or_else(|| estimate_prefill_tokens(&body));
-        // TRADE copy price auto: the session identity counts in N_active.
-        let session = if cs.trade_auto() {
-            crate::agent_identity::trade_session_key(&headers)
-        } else {
-            None
-        };
-        let d = cs
-            .admit_session(
-                cs,
-                ids,
-                est_tokens,
-                route_cache_salt,
-                crate::server::routes::completions::extract_rid(request_value.as_ref()),
-                session,
-                None,
-            )
-            .await
-            .map_err(|_| ApiError::NoHealthyWorkers {
-                model: model_str.clone(),
-            })?;
-        let w = Arc::clone(&d.worker);
-        co_dispatch = Some(d);
         w
     } else {
         let pinned = ctx.pd_replay.as_ref().and_then(|replay| {
@@ -536,16 +506,8 @@ pub async fn chat_completions(
     };
     let bootstrap_room = bootstrap.as_ref().map(|b| b.room);
 
-    let admission_queue_wait_ms = co_dispatch
-        .as_ref()
-        .map(|d| d.queue_wait_ms)
-        .or_else(|| flex_decision.as_ref().map(|d| d.queue_wait_ms))
-        .unwrap_or(0);
-    let admission_branch = co_dispatch
-        .as_ref()
-        .map(|d| d.branch.as_str())
-        .or_else(|| flex_decision.as_ref().map(|d| d.branch()))
-        .unwrap_or("policy");
+    let admission_queue_wait_ms = flex_decision.as_ref().map_or(0, |d| d.queue_wait_ms);
+    let admission_branch = flex_decision.as_ref().map_or("policy", |d| d.branch());
 
     // kv-p2p pull hint: ask the indexer which peers own this request's
     // token prefix, then (below the gates) hint the EXECUTING worker to
@@ -565,16 +527,6 @@ pub async fn chat_completions(
             Some(AdmissionLedger::Flex(d.ledger.clone())),
             d.cost_reservation.take(),
         )
-    } else if let Some(d) = co_dispatch.take() {
-        // Co-scheduled: routing and pull came from ONE indexer answer — the
-        // hint was decided at dispatch; do not re-query.
-        let crate::co_schedule::Dispatch {
-            hint,
-            ledger,
-            cost_reservation,
-            ..
-        } = d;
-        (hint, Some(AdmissionLedger::Co(ledger)), cost_reservation)
     } else {
         let hint = match (ctx.kv_hint.as_ref(), request_tokens.as_ref()) {
             (Some(injector), Some(tokens)) => {
