@@ -64,8 +64,9 @@ seconds after the replay's first event.
 
 The planner switched from 6P3D to 3P6D at 1818 s and to 4P5D at 3025 s, and held after that.
 In the 6P3D window a request has 4,298 uncached prompt tokens and 1,126 output tokens on
-average, and decode takes 7.0 ms per output token (median). Three runs of this configuration
-scored 5.76 to 5.89 requests/s on the whole window and 4.71 to 4.91 on the 6P3D window.
+average, and decode takes 7.0 ms per output token (median). The paper's two runs of this
+configuration scored 5.89 and 5.76 requests/s on the whole window
+([`benchmarks/claude-code`](../../benchmarks/claude-code/README.md)).
 
 The same experiment run from this repository with `slurm/submit.py` scored 5.83 requests/s
 on the whole window with no failed request: 4.78 at 6P3D, 5.77 at 3P6D after the switch at
@@ -73,5 +74,6 @@ on the whole window with no failed request: 4.78 at 6P3D, 5.77 at 3P6D after the
 
 The time of the first switch decides the whole-window score. `planner.cold_start_max_wait_secs: 1`
 in the config starts the planner's 1800 s of learning with the replay, as in the paper's
-runs. With the planner's default, which first waits for the cache-hit share to settle,
-learning started at 1443 s, the first switch came at 3258 s, and the whole window scored 4.35.
+runs. With the planner's default, learning starts once the cache-hit share stops rising (the
+first minute whose share is at most 0.3 points above the previous minute's; minute 8 in the
+126-agent runs), and the first switch comes that much later.
