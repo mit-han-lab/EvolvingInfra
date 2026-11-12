@@ -74,21 +74,22 @@ set `rid` in the body: the router derives it from the header and refuses a diffe
 identity. In Python it equals `RequestIdentity(agent_id, subagent_id, request_id).engine_rid`
 (`evolving_infra/router/client/agent/identity.py`).
 
-### 3. With the planner on, send requests through the prepared path
+### 3. Choose the path
 
-The planner learns from requests that go through the prepared path only. When it runs with KV
-retention on in the router (the default; `retention: false` in the config turns it off), the
-router refuses plain `/v1/completions`, `/v1/chat/completions` and `/generate` requests with HTTP
-400 `dynamic role switching with KV session retention requires /symmetric_pd/prepared lifecycle
-callbacks`. So whenever the stack serves with `--planner`, send each request through the
-frontend, as in the [client SDK](../../docs/api-reference.md#client-sdk) example:
-`POST <tokenizer_url>/prepare` with `"request_id": request.identity.engine_rid` and the stack's
-`config_id`, then `scheduler.submit_prepared(tokenizer_url, prepared, identity=request.identity)`,
-or `stream_prepared` with `"stream": true`.
+Both paths work with and without `--planner`, and the planner counts the requests of both.
 
-**Check**: a request returns generated text, and its `meta_info.id` starts with `agent_` (the
-prepared path returns the engine's native reply). A refused request gets HTTP 400 with the
-message above; the router does not log it. Without `--planner`, this step does not apply: say so.
+- **Plain path** (step 2): `/v1/chat/completions` or `/v1/completions` on the router. A role
+  change from decode to prefill waits for the worker's running plain requests to finish.
+- **Prepared path**: `POST <tokenizer_url>/prepare` with
+  `"request_id": request.identity.engine_rid` and the stack's `config_id`, then
+  `scheduler.submit_prepared(tokenizer_url, prepared, identity=request.identity)`, or
+  `stream_prepared` with `"stream": true`, as in the
+  [client SDK](../../docs/api-reference.md#client-sdk) example. The frontend tokenizes once and
+  uploads the input to the workers, and a role change moves a running decode to another worker
+  instead of waiting for it.
+
+**Check**: a request returns generated text. On the prepared path its `meta_info.id` starts with
+`agent_` (that path returns the engine's native reply); on the plain path the reply's `id` does.
 
 ### 4. End each branch
 

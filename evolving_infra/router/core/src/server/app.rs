@@ -84,18 +84,21 @@ async fn log_413(req: Request, next: Next) -> Response {
 /// cache, health and metrics endpoints. Chat/completions use explicit body
 /// limits and HTTP 413 logging. Does not bind a socket or start serving.
 pub fn build_router(ctx: Arc<AppContext>) -> Router {
-    // Only the prepared lifecycle proves that old engine work has terminated
-    // before a role change releases its session references. Legacy placements
-    // and proxy requests do not participate in that lifecycle.
-    let prepared_only = ctx
+    // With external role control and KV session retention, a role change
+    // releases a worker's session references only after its old legs ended.
+    // The router sees the end of a prepared leg (lifecycle callbacks) and of a
+    // leg it proxies itself, and a decode->prefill drain waits for both
+    // (`scheduler::role_drain`). A placement handed to an external ingress
+    // has no end the router sees, so `/symmetric_pd/place` is refused there.
+    let no_lifecycle = ctx
         .symmetric_pd
         .as_ref()
         .is_some_and(|spd| spd.config().external_role_control && spd.config().kv_session_retention);
     let tracked = |route: MethodRouter<Arc<AppContext>>| {
-        if prepared_only {
+        if no_lifecycle {
             route.layer(middleware::from_fn(|_: Request, _: Next| async {
                 ApiError::BadRequest(
-                    "dynamic role switching with KV session retention requires /symmetric_pd/prepared lifecycle callbacks".into(),
+                    "dynamic role switching with KV session retention cannot serve /symmetric_pd/place: the router does not see the end of a placed request".into(),
                 ).into_response()
             }))
         } else {
@@ -120,13 +123,13 @@ pub fn build_router(ctx: Arc<AppContext>) -> Router {
         )
         .route(
             "/v1/chat/completions",
-            tracked(post(crate::server::routes::chat::chat_completions))
+            post(crate::server::routes::chat::chat_completions)
                 .layer(DefaultBodyLimit::max(MAX_CHAT_BODY_BYTES))
                 .layer(middleware::from_fn(log_413)),
         )
         .route(
             "/v1/completions",
-            tracked(post(crate::server::routes::completions::completions))
+            post(crate::server::routes::completions::completions)
                 .layer(DefaultBodyLimit::max(
                     ctx.config.proxy.max_completions_body_bytes,
                 ))
@@ -134,7 +137,7 @@ pub fn build_router(ctx: Arc<AppContext>) -> Router {
         )
         .route(
             "/generate",
-            tracked(post(crate::server::routes::completions::generate))
+            post(crate::server::routes::completions::generate)
                 .layer(DefaultBodyLimit::max(
                     ctx.config.proxy.max_completions_body_bytes,
                 ))
@@ -201,7 +204,7 @@ mod tests {
     use tower::ServiceExt;
 
     #[tokio::test]
-    async fn dynamic_retention_requires_tracked_execution_routes() {
+    async fn dynamic_retention_refuses_only_the_external_placement_route() {
         for (external_role_control, kv_session_retention) in
             [(false, false), (false, true), (true, false), (true, true)]
         {
@@ -246,10 +249,8 @@ mod tests {
                 let body = response.into_body().collect().await.unwrap().to_bytes();
                 let body = std::str::from_utf8(&body).unwrap();
                 assert_eq!(
-                    body.contains("requires /symmetric_pd/prepared lifecycle callbacks"),
-                    external_role_control
-                        && kv_session_retention
-                        && route != "/symmetric_pd/prepared",
+                    body.contains("cannot serve /symmetric_pd/place"),
+                    external_role_control && kv_session_retention && route == "/symmetric_pd/place",
                     "{route}: {body}",
                 );
             }
