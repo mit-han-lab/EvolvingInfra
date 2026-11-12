@@ -615,6 +615,9 @@ wheels = [
 name = "evolving-infra"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "pyyaml" },
+]
 
 [package.optional-dependencies]
 client = [
@@ -661,6 +664,7 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'frontend'", specifier = ">=10" },
     { name = "pydantic", marker = "extra == 'frontend'", specifier = ">=2,<3" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
+    { name = "pyyaml", specifier = ">=6" },
     { name = "pyzmq", marker = "extra == 'indexer'", specifier = ">=25" },
     { name = "scipy", marker = "extra == 'planner'", specifier = ">=1.11" },
     { name = "uvicorn", marker = "extra == 'frontend'", specifier = ">=0.30,<1" },
