@@ -392,6 +392,37 @@ pub(crate) struct ChooseDispatch {
     pub(crate) image_hold: Option<crate::image_source::Hold>,
 }
 
+/// The breaker slot a D-leg claimed with `allow()`. A leg dropped without an
+/// outcome (the request went stale, the prefill failed before the bind, a
+/// loser still open after its drain, the client left) would keep a half-open
+/// breaker's probe slot for good, and its worker would never be a candidate
+/// again; dropping the claim gives the slot back as a failed probe.
+struct ProbeClaim {
+    breaker: Arc<crate::health::circuit_breaker::CircuitBreaker>,
+    armed: bool,
+}
+
+impl ProbeClaim {
+    fn new(breaker: &Arc<crate::health::circuit_breaker::CircuitBreaker>) -> Self {
+        Self {
+            breaker: Arc::clone(breaker),
+            armed: true,
+        }
+    }
+    /// The leg's outcome is recorded elsewhere.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProbeClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            late_bind::settle_unused_probe(&self.breaker);
+        }
+    }
+}
+
 /// The end of a P-leg.
 #[derive(Debug, Clone, Default)]
 struct PrefillOutcome {
@@ -499,7 +530,12 @@ pub(crate) async fn dispatch(
 
     // Breakers first: no leg leaves for a refused prefill; a refused
     // candidate gets no leg and is dead for the choice.
+    // No leg leaves on either refusal, so the P work the admission counted
+    // is retired here: nothing else would end it.
     if !prefill.breaker.allow() {
+        if let Some(ledger) = &ledger {
+            ledger.retire();
+        }
         return Err(ApiError::BreakerOpen {
             worker: prefill.url.clone(),
         });
@@ -507,6 +543,9 @@ pub(crate) async fn dispatch(
     let sendable: Vec<bool> = candidates.iter().map(|w| w.breaker.allow()).collect();
     if !sendable.iter().any(|&ok| ok) {
         late_bind::settle_unused_probe(&prefill.breaker);
+        if let Some(ledger) = &ledger {
+            ledger.retire();
+        }
         return Err(ApiError::NoDecodeWorkersAvailable { model });
     }
 
@@ -668,11 +707,12 @@ pub(crate) async fn dispatch(
         let headers = Arc::clone(&headers);
         let url = worker.url.clone();
         let body = bodies.leg(idx);
+        let probe = ProbeClaim::new(&worker.breaker);
         legs.push(async move {
             let result = proxy
                 .send_late_leg(&url, path, &headers, body, streaming)
                 .await;
-            (idx, result)
+            (idx, result, probe)
         });
     }
     let mut open = legs.len();
@@ -729,11 +769,15 @@ pub(crate) async fn dispatch(
                 }
                 p_answer = Some(outcome);
             }
-            Some((idx, result)) = legs.next(), if open > 0 => {
+            Some((idx, result, probe)) = legs.next(), if open > 0 => {
                 open -= 1;
                 let worker = &candidates[idx];
                 match result {
-                    Ok(res) if res.status().is_success() => break (idx, res),
+                    Ok(res) if res.status().is_success() => {
+                        // The winner's outcome is recorded when its answer ends.
+                        probe.disarm();
+                        break (idx, res);
+                    }
                     Ok(res) => {
                         let status = res.status();
                         let reason = late_bind::late_reason(res.headers());
@@ -838,7 +882,7 @@ pub(crate) async fn dispatch(
                         break;
                     }
                     next = legs.next() => {
-                        let Some((idx, result)) = next else { break };
+                        let Some((idx, result, _probe)) = next else { break };
                         late_bind::account_loser(
                             &late,
                             &candidates[idx],

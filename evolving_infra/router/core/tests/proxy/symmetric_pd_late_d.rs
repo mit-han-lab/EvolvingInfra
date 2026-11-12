@@ -259,6 +259,8 @@ struct CostEngine {
     held: Mutex<BTreeMap<String, u64>>,
     release: tokio::sync::Notify,
     sequence: AtomicU64,
+    /// `/v1/loads` of this engine does not answer (a stalled engine).
+    hang_loads: std::sync::atomic::AtomicBool,
 }
 
 fn released() -> Response {
@@ -287,6 +289,14 @@ async fn engine_completions(e: Engine, body: Value) -> Response {
         cost.held.lock().unwrap().insert("busy".into(), 20_000);
         cost.release.notified().await;
         cost.held.lock().unwrap().remove("busy");
+    }
+    if body["rid"] == "p-fail" && body.get("kv_export").is_some() {
+        // the P-leg fails before any decode is bound.
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "p down"})),
+        )
+            .into_response();
     }
     if let (Some(export), Some(late)) = (body.get("kv_export"), body.get("late_d")) {
         let id = export["transfer_id"].as_u64().unwrap();
@@ -330,6 +340,9 @@ async fn engine_completions(e: Engine, body: Value) -> Response {
 
 async fn engine_loads(e: Engine) -> Response {
     if let Some(cost) = &e.cost {
+        if cost.hang_loads.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
         let held = cost.held.lock().unwrap().clone();
         let n = cost.sequence.fetch_add(1, Ordering::SeqCst);
         let loads = json!({"loads": [{"num_running_reqs": held.len(),
@@ -427,6 +440,8 @@ struct Opts {
     /// `--symmetric-pd-p-select cost-function` (TRADE, lambda 0) with the pull
     /// hint, an indexer mock and the prefill progress of the P-role engines.
     cost_function: bool,
+    /// circuit breaker `(threshold, cool-down ms)` of every worker.
+    breaker: Option<(u32, u64)>,
 }
 
 async fn fixture(opts: Opts) -> Fixture {
@@ -471,13 +486,21 @@ async fn fixture(opts: Opts) -> Fixture {
         .await;
         let id = WorkerId(url.clone());
         registry
-            .add(WorkerSpec {
-                id: id.clone(),
-                url: url.clone(),
-                mode: WorkerMode::Symmetric,
-                model_ids: vec![ModelId("tiny".into())],
-                bootstrap_port: Some(20_000 + 2 * i as u16),
-            })
+            .add_with_cb(
+                WorkerSpec {
+                    id: id.clone(),
+                    url: url.clone(),
+                    mode: WorkerMode::Symmetric,
+                    model_ids: vec![ModelId("tiny".into())],
+                    bootstrap_port: Some(20_000 + 2 * i as u16),
+                },
+                opts.breaker.map(|(threshold, cool_down_ms)| {
+                    sgl_router::health::circuit_breaker::CircuitBreakerConfig {
+                        threshold: std::num::NonZeroU32::new(threshold).unwrap(),
+                        cool_down: Duration::from_millis(cool_down_ms),
+                    }
+                }),
+            )
             .unwrap();
         let w = registry.get(&id).unwrap();
         w.set_symmetric_pd(SymmetricPdWorkerInfo {
@@ -709,6 +732,7 @@ fn opts(late: Option<LateDecodeRule>, d_capacity: Vec<Option<(u64, u64)>>) -> Op
         kv_sessions: false,
         gateway_ca: false,
         cost_function: false,
+        breaker: None,
     }
 }
 
@@ -1178,3 +1202,168 @@ async fn late_d_choose_with_cost_function_and_session_retention() {
     assert_eq!(res.status(), StatusCode::OK);
     body_json(res).await;
 }
+
+// ---------------------------------------------------------------------------
+// a decode whose half-open probe leg is dropped never comes back.
+// ---------------------------------------------------------------------------
+
+/// D1's breaker opened (two failures) and its cool-down passed, so the next
+/// late-D request probes it: `dispatch` claims the half-open probe slot with
+/// `breaker.allow()` and sends D1 a candidate leg. That request's P-leg fails
+/// before any bind (R8), so the dispatch returns and drops the open D-legs
+/// without recording an outcome. D1 answers every later request correctly,
+/// but its breaker stays half-open with the probe claimed: it is never a
+/// decode candidate again.
+#[tokio::test]
+async fn dropped_probe_leg_gives_the_breaker_slot_back() {
+    let f = fixture(Opts {
+        breaker: Some((2, 100)),
+        ..opts(Some(LateDecodeRule::D1), vec![None, None])
+    })
+    .await;
+    let d1 = f.ctx.registry.get(&WorkerId(f.d_urls[1].clone())).unwrap();
+    d1.breaker.record_failure();
+    d1.breaker.record_failure();
+    assert_eq!(d1.breaker.snapshot().state_code, 1, "D1's breaker is open");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        d1.breaker.would_allow(),
+        "past the cool-down D1 can be probed"
+    );
+
+    // The probing request: its P-leg answers 500 while both D-legs wait.
+    let res = f.post(request("p-fail", (0..64).collect()), None).await;
+    let status = res.status();
+    let probe_legs = f
+        .seen
+        .of(|b| b["rid"] == "p-fail" && b.get("kv_import").is_some());
+    eprintln!(
+        "p-fail status={status} decode_legs_sent={}",
+        probe_legs.len()
+    );
+    assert!(status.is_server_error());
+    assert_eq!(probe_legs.len(), 2, "D0 and D1 both got a candidate leg");
+
+    // Long after: D1 is healthy, nothing is in flight.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let snap = d1.breaker.snapshot();
+    let candidates: Vec<String> = f
+        .ctx
+        .symmetric_pd
+        .as_ref()
+        .unwrap()
+        .decode_workers()
+        .iter()
+        .map(|w| w.url.clone())
+        .collect();
+    eprintln!(
+        "3 s later: d1 state_code={} admit={} decode_candidates={}",
+        snap.state_code,
+        snap.admit,
+        candidates.len()
+    );
+    for i in 0..3 {
+        let rid = format!("ok-{i}");
+        let res = f.post(request(&rid, (0..64).collect()), None).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let legs = f
+            .seen
+            .of(|b| b["rid"] == rid.as_str() && b.get("kv_import").is_some());
+        let to_d1 = legs.iter().filter(|(url, _)| url == &f.d_urls[1]).count();
+        eprintln!("{rid}: decode legs={} to_d1={to_d1}", legs.len());
+    }
+    let snap = d1.breaker.snapshot();
+    assert!(
+        snap.admit,
+        "D1's breaker is still half-open with its probe claimed (state_code {}): no request \
+         will ever be sent to it",
+        snap.state_code
+    );
+}
+
+// ---------------------------------------------------------------------------
+// a late-D dispatch that the P's breaker refuses leaves its Backend
+// ledger reservation (the route marked it dispatched before the dispatch).
+// ---------------------------------------------------------------------------
+
+/// The P's breaker is open and past its cool-down. Requests that arrive
+/// together all pass the placement (`would_allow`), the first one claims the
+/// half-open probe in `late_d::dispatch`, and the others are refused there
+/// (`BreakerOpen`) after `pending.mark_dispatched()`: their Backend ledger
+/// entries are never retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn breaker_refusal_at_dispatch_retires_the_backend_reservation() {
+    let f = fixture(Opts {
+        breaker: Some((2, 100)),
+        ..opts(Some(LateDecodeRule::D1), vec![None, None])
+    })
+    .await;
+    let p_url = f.p_urls[0].clone();
+    let p = f.ctx.registry.get(&WorkerId(p_url.clone())).unwrap();
+    let flex = Arc::clone(f.ctx.symmetric_pd.as_ref().unwrap());
+    let mut leaked = 0u64;
+    let mut rounds = 0;
+    let mut refused_total = 0usize;
+    for round in 0..30 {
+        rounds = round + 1;
+        p.breaker.record_failure();
+        p.breaker.record_failure();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let handles: Vec<_> = (0..32)
+            .map(|i| {
+                let app = f.app.clone();
+                let body = request(&format!("race-{round}-{i}"), (0..64).collect());
+                tokio::spawn(async move {
+                    let req = Request::builder()
+                        .method("POST")
+                        .uri(COMPLETIONS)
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap();
+                    let res = app.oneshot(req).await.unwrap();
+                    let status = res.status();
+                    let text = body_json(res).await.to_string();
+                    (status, text)
+                })
+            })
+            .collect();
+        let mut refused = 0;
+        for h in handles {
+            let (status, text) = h.await.unwrap();
+            if status != StatusCode::OK && text.contains("breaker") {
+                refused += 1;
+            }
+        }
+        refused_total += refused;
+        // Every request has answered; let the detached P tasks end.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let view = flex.backend_load_views()[&p_url].clone();
+        if view.active_prefill_reqs > 0 {
+            leaked = view.active_prefill_reqs;
+            eprintln!(
+                "round={round} refused_by_breaker={refused} idle P: \
+                 active_prefill_reqs={} unknown_prefill_reqs={} reserved_uncached_tokens={}",
+                view.active_prefill_reqs, view.unknown_prefill_reqs, view.reserved_uncached_tokens
+            );
+            break;
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let view = flex.backend_load_views()[&p_url].clone();
+    eprintln!(
+        "rounds={rounds} refused_total={refused_total} 2 s later: active_prefill_reqs={} \
+         unknown_prefill_reqs={} late_d_pending={}",
+        view.active_prefill_reqs,
+        view.unknown_prefill_reqs,
+        f.ctx.late_bind.as_ref().unwrap().pending()
+    );
+    assert_eq!(
+        leaked, 0,
+        "the idle P still counts {leaked} P-legs that were never sent (not unknown, never retired)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// one P that does not answer `/v1/loads` slows the progress poll of
+// every other P (the poll loop waits for all queries of a round).
+// ---------------------------------------------------------------------------
