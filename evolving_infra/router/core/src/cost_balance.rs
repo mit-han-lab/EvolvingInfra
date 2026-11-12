@@ -142,6 +142,11 @@ pub struct RoutingSnapshot {
 /// (s): a request decided after a snapshot and finished before the decision
 /// still ran on P after the snapshot time. Longer than any usable view age.
 const RECENT_FINISHED_S: f64 = 60.0;
+/// An entry leaves the book this many seconds after it ended (finished,
+/// rolled back or expired): the forecast reads finished entries for
+/// [`RECENT_FINISHED_S`], and a late call on its reservation finds it until
+/// then. The snapshot keeps the status counts of the entries that left.
+const RETIRE_AFTER_S: f64 = RECENT_FINISHED_S;
 
 /// The E3 forecast of one candidate for `wait = e3`, under the lock.
 /// `fallback` is None exactly when the candidate is usable: `out` has
@@ -482,6 +487,9 @@ struct Entry {
     /// `--symmetric-pd-gwq-auto`: its release, until its first sighting; not in
     /// the trace.
     gwq_lead_mark: Option<GwqLeadMark>,
+    /// Its rid left `used_rids` when it rolled back before dispatch, so a
+    /// later entry may hold the same rid.
+    rid_released: bool,
 }
 
 /// The TRADE auto bookkeeping of one entry (see the module docs).
@@ -562,7 +570,8 @@ struct State {
     prefill_reader_gone: u64,
     /// The unknown expiry: RID -> (ID of the expired entry, progress replies
     /// of its P that listed the RID after the expiry).
-    expired_by_rid: BTreeMap<String, (u64, u64)>,
+    /// The worker URL is kept, so the record outlives the entry's retirement.
+    expired_by_rid: BTreeMap<String, (u64, u64, String)>,
     /// The unknown expiry: expired entries whose RID a reply listed again.
     expired_listed_again: u64,
     /// `--symmetric-pd-loads-host-room` only (None: off): the latest `host_room`
@@ -585,6 +594,13 @@ struct State {
     healthy_candidates: Vec<String>,
     trace: Option<TraceSink>,
     io_failure: Option<String>,
+    /// Ended entries in the order they ended (end time, ID); each leaves
+    /// `entries` [`RETIRE_AFTER_S`] after it ended ([`CostBook::retire_ended`]).
+    ended: VecDeque<(Instant, u64)>,
+    /// Status counts of the entries that left `entries`, per worker.
+    retired_counts: BTreeMap<String, BTreeMap<&'static str, u64>>,
+    /// Entries that left `entries`.
+    retired_entries: u64,
 }
 
 /// Where the cost trace rows go: written and flushed under the cost-book
@@ -1367,6 +1383,9 @@ impl CostBook {
                 healthy_candidates: Vec::new(),
                 trace,
                 io_failure: None,
+                ended: VecDeque::new(),
+                retired_counts: BTreeMap::new(),
+                retired_entries: 0,
             }),
         }))
     }
@@ -2783,6 +2802,7 @@ impl CostBook {
             unknown_since: None,
             last_progress_seen: None,
             gwq_lead_mark: None,
+            rid_released: false,
             decided_at: trade_decided_at.unwrap_or_else(Instant::now),
             ack_at: None,
             e3_estimate: trade_e3_estimate,
@@ -2950,11 +2970,16 @@ impl CostBook {
         reason: &str,
         detail: Option<Value>,
     ) -> Result<(), String> {
-        let old = state
-            .entries
-            .get(&id)
-            .ok_or("cost_balance: unknown reservation ID")?
-            .status;
+        let Some(old) = state.entries.get(&id).map(|e| e.status) else {
+            // A retired entry had ended: nothing changes.
+            return if id < state.next_id && target != Status::Dispatched {
+                Ok(())
+            } else if id < state.next_id {
+                Err("cost_balance: only a reserved request can be dispatched".into())
+            } else {
+                Err("cost_balance: unknown reservation ID".into())
+            };
+        };
         if target == Status::Dispatched && !matches!(old, Status::Reserved | Status::Dispatched) {
             return Err("cost_balance: only a reserved request can be dispatched".into());
         }
@@ -3011,6 +3036,9 @@ impl CostBook {
                 // the prepared plan was installed) may reuse the same rid.
                 if target == Status::RolledBack && old == Status::Reserved {
                     state.used_rids.remove(rid);
+                    if let Some(entry) = state.entries.get_mut(&id) {
+                        entry.rid_released = true;
+                    }
                 }
             }
             let worker = state.workers.get_mut(&url).expect("entry worker exists");
@@ -3046,6 +3074,9 @@ impl CostBook {
                 }
                 state.recent_finished.push_back((at, id));
             }
+            let now = Instant::now();
+            state.ended.push_back((now, id));
+            Self::retire_ended(state, now);
         }
         if target == Status::Unknown {
             state.unknown.insert(id);
@@ -3122,7 +3153,8 @@ impl CostBook {
                     "unknown reservation expired and its work released; the trace write failed");
             }
             if let Some(rid) = rid {
-                state.expired_by_rid.insert(rid, (id, 0));
+                let worker = state.entries[&id].worker_url.clone();
+                state.expired_by_rid.insert(rid, (id, 0, worker));
             }
         }
     }
@@ -3176,8 +3208,8 @@ impl CostBook {
         let mut relisted = Vec::new();
         for (rid, remaining) in &progress.remaining {
             let Some(id) = state.active_by_rid.get(rid) else {
-                if let Some((id, _)) = state.expired_by_rid.get(rid) {
-                    if state.entries[id].worker_url == worker_url {
+                if let Some((id, _, worker)) = state.expired_by_rid.get(rid) {
+                    if worker == worker_url {
                         relisted.push((rid.clone(), *id, *remaining));
                     }
                 }
@@ -3356,14 +3388,50 @@ impl CostBook {
         Ok(())
     }
 
+    /// Remove the entries that ended more than [`RETIRE_AFTER_S`] before
+    /// `now` from `entries`, count their statuses per worker, and free their
+    /// rids (a rid released by a rollback before dispatch was freed then).
+    /// The record of an expired rid goes with its entry.
+    fn retire_ended(state: &mut State, now: Instant) {
+        while let Some(&(ended_at, id)) = state.ended.front() {
+            if now.saturating_duration_since(ended_at).as_secs_f64() <= RETIRE_AFTER_S {
+                break;
+            }
+            state.ended.pop_front();
+            let Some(entry) = state.entries.remove(&id) else {
+                continue;
+            };
+            if let Some(rid) = &entry.rid {
+                if !entry.rid_released {
+                    state.used_rids.remove(rid);
+                }
+                if state.expired_by_rid.get(rid).is_some_and(|e| e.0 == id) {
+                    state.expired_by_rid.remove(rid);
+                }
+            }
+            *state
+                .retired_counts
+                .entry(entry.worker_url)
+                .or_default()
+                .entry(entry.status.label())
+                .or_default() += 1;
+            state.retired_entries += 1;
+        }
+    }
+
     /// Record a periodic snapshot and return it for the caller's monitoring.
     /// Health is the most recently supplied candidate set, not a new probe.
     /// The unknown expiry of every worker runs first (see the module docs).
     pub fn snapshot(&self) -> Value {
         let mut state = self.state.lock();
         self.expire_unknown(&mut state, None, Instant::now());
-        // Status counts and the oldest active assigned time of each worker.
+        Self::retire_ended(&mut state, Instant::now());
+        // Status counts (retired entries included) and the oldest active
+        // assigned time of each worker.
         let mut by_worker = HashMap::<&str, (BTreeMap<&str, u64>, Option<u64>)>::new();
+        for (url, counts) in &state.retired_counts {
+            by_worker.entry(url.as_str()).or_default().0 = counts.clone();
+        }
         for entry in state.entries.values() {
             let (counts, oldest_assigned_ms) =
                 by_worker.entry(entry.worker_url.as_str()).or_default();
@@ -3414,6 +3482,7 @@ impl CostBook {
             "healthy_candidates": state.healthy_candidates,
             "workers": workers,
             "tracked_entries": state.entries.len(),
+            "retired_entries": state.retired_entries,
             "unknown_entries": unknown,
             "fatal": state.io_failure,
             "admission_blocked": self.check_admission(&state).is_err(),
@@ -4167,20 +4236,31 @@ impl Reservation {
     }
 
     pub fn debuginfo(&self) -> Value {
-        self.book.state.lock().entries[&self.id].value()
+        let state = self.book.state.lock();
+        state.entries.get(&self.id).map_or_else(
+            || json!({"reservation_id": self.id, "retired": true}),
+            Entry::value,
+        )
     }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        let status = self.book.state.lock().entries[&self.id].status;
+        // A retired entry had ended.
+        let status = self
+            .book
+            .state
+            .lock()
+            .entries
+            .get(&self.id)
+            .map(|e| e.status);
         let result = match status {
-            Status::Reserved => self.book.change_status(
+            Some(Status::Reserved) => self.book.change_status(
                 self.id,
                 Status::RolledBack,
                 "owner_dropped_before_dispatch",
             ),
-            Status::Dispatched => self.book.change_status(
+            Some(Status::Dispatched) => self.book.change_status(
                 self.id,
                 Status::Unknown,
                 "dispatched_owner_dropped_without_terminal_result",
@@ -5065,6 +5145,49 @@ mod tests {
         sent.mark_dispatched().unwrap();
         sent.finish("prefill_response_success").unwrap();
         assert!(reserve().is_err());
+    }
+
+    /// Ended entries leave the book: after many finished requests and the
+    /// retire window, no entry and no rid of them is left, the snapshot keeps
+    /// their status counts, a late call on their reservation changes nothing,
+    /// and a live request keeps its entry and its rid.
+    #[test]
+    fn ended_entries_leave_the_book_after_the_retire_window() {
+        let book = CostBook::new_uncached(None).unwrap();
+        let mut live = uncached(&book, "live", "a", 100);
+        live.mark_dispatched().unwrap();
+        let mut ended = Vec::new();
+        for i in 0..1000 {
+            let mut r = uncached(&book, &format!("r{i}"), "a", 100);
+            r.mark_dispatched().unwrap();
+            r.finish("prefill_response_success").unwrap();
+            ended.push(r);
+        }
+        drop(uncached(&book, "unsent", "a", 100));
+        assert_eq!(book.state.lock().entries.len(), 1002);
+        CostBook::retire_ended(&mut book.state.lock(), Instant::now() + secs(61));
+        {
+            let state = book.state.lock();
+            assert_eq!(state.entries.len(), 1);
+            assert!(state.ended.is_empty());
+            assert!(state.used_rids.contains("live") && state.used_rids.len() == 1);
+        }
+        for mut r in ended.drain(..10) {
+            r.finish("prefill_response_success").unwrap();
+            assert!(r.mark_dispatched().is_err());
+            assert_eq!(r.debuginfo()["retired"], true);
+        }
+        drop(ended);
+        let snapshot = book.snapshot();
+        assert_eq!(snapshot["tracked_entries"], 1);
+        assert_eq!(snapshot["retired_entries"], 1001);
+        let counts = &snapshot["workers"][0]["status_counts"];
+        assert_eq!(counts["finished"], 1000);
+        assert_eq!(counts["rolled_back"], 1);
+        assert_eq!(counts["dispatched"], 1);
+        assert_eq!(snapshot["workers"][0]["active_requests"], 1);
+        assert!(book.rid_refusal(Some("live")).is_some());
+        assert!(book.rid_refusal(Some("r0")).is_none());
     }
 
     #[test]
@@ -6512,7 +6635,10 @@ mod tests {
         let snapshot = book.snapshot();
         assert_eq!(snapshot["unknown_requests"], 0);
         assert_eq!(snapshot["expired_rid_listed_again"], 2);
-        assert_eq!(book.state.lock().expired_by_rid["f"], (f.id, 2));
+        assert_eq!(
+            book.state.lock().expired_by_rid["f"],
+            (f.id, 2, "a".to_string())
+        );
         assert_eq!(book.state.lock().expired_by_rid["d"].1, 0);
         for r in [&f, &u] {
             assert_eq!(r.debuginfo()["status"], "expired");
