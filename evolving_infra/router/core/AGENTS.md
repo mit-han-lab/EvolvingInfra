@@ -15,8 +15,11 @@ The Rust router (`sgl-router`). [`README.md`](README.md) has the build;
 - **Engine and router presets match.** With late decode choice on in the router and off in an
   engine, the router refuses that worker at registration.
 - **Late decode choice applies to `/v1/completions`.** A native `/generate` request gets its D
-  at arrival, and `/v1/chat/completions` is refused under late decode choice
-  (`Ingress::late_d_choose` in `src/server/routes/completions.rs`).
+  at arrival (`Ingress::late_d_choose` in `src/server/routes/completions.rs`). With late decode
+  choice on (`--pd-late-decode choose`, the `paper` preset's default under
+  `--policy symmetric_pd`), `/v1/chat/completions` returns HTTP 501 `late_d_route_unsupported`
+  (`src/server/routes/chat.rs`). Chat completions are served when late decode choice is off on
+  the router (`--pd-late-decode off`) and on the engines (`--disaggregation-late-d=off`).
 - **Role control with KV session retention needs the prepared path.** With
   `--symmetric-pd-external-role-control` and retention on, a plain `/v1/completions` request is
   refused: the router needs the frontend's lifecycle callbacks to count work per session.
