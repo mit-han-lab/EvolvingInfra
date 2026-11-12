@@ -121,3 +121,15 @@ def test_kimi_config_passes_its_tokenizer_environment_and_image_layout(stack, tm
     assert "--co-schedule-trade" in args and "--co-schedule-trade-wait=e3" in args
     files = [a.split("=", 1)[1] for a in args if "e3/" in a]
     assert len(files) == 2 and all(f.startswith("/") and Path(f).is_file() for f in files), "full paths"
+
+
+def test_a_config_keeps_the_router_flags_and_env_of_its_base(tmp_path):
+    from evolving_infra.launch.__main__ import load
+    (tmp_path / "base.yaml").write_text(
+        "model: /m\nrouter_args: [--a=1, --b=2]\nengine_env: {X: 1, Y: 2}\nengine_args: [--e=1]\n")
+    (tmp_path / "top.yaml").write_text(
+        "base: base.yaml\nrouter_args: [--b=3, --c]\nengine_env: {Y: 5}\n")
+    cfg = load(tmp_path / "top.yaml")
+    assert cfg["router_args"] == ["--a=1", "--b=3", "--c"]
+    assert cfg["engine_env"] == {"X": 1, "Y": 5}
+    assert cfg["engine_args"] == ["--e=1"]
