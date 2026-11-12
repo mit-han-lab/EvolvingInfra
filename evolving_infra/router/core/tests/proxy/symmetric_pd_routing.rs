@@ -477,3 +477,53 @@ async fn symmetric_pd_place_503_when_no_pair_can_be_placed() {
     let v = read_json(res).await;
     assert_eq!(v["error"]["code"], "symmetric_pd_no_placement");
 }
+
+// ---------------------------------------------------------------------------
+// on the direct routes the D-leg's in-flight count (the load of
+// `--symmetric-pd-d-select cache-first`) ends when the stream starts.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn decode_reservation_lasts_as_long_as_the_stream() {
+    let p = MockWorker::start(vec![]).await;
+    // The decode streams 6 chunks, 300 ms apart (1.8 s of decoding).
+    let d = MockWorker::start_slow_stream(
+        vec![
+            "data: a\n\n",
+            "data: b\n\n",
+            "data: c\n\n",
+            "data: d\n\n",
+            "data: e\n\n",
+            "data: [DONE]\n\n",
+        ],
+        Duration::from_millis(300),
+    )
+    .await;
+    let ctx = build_ctx(
+        Some(SymmetricPdConfig::default()),
+        &[(&p.url, 1.0, 0.0, 9000), (&d.url, 0.0, 1.0, 9100)],
+    );
+    let app = build_router(Arc::clone(&ctx));
+    let flex = ctx.symmetric_pd.as_ref().unwrap();
+    let res = app
+        .oneshot(post(
+            "/v1/completions",
+            json!({"model": "tiny", "prompt": [1, 2, 3], "rid": "r-stream", "stream": true}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // The handler returned the response head; the decode has sent nothing yet.
+    let during = flex.backend_load_views()[&d.url].active_decode_reqs;
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let after = flex.backend_load_views()[&d.url].active_decode_reqs;
+    eprintln!(
+        "active_decode_reqs while the decode streams={during} after the stream={after} \
+         stream_bytes={}",
+        body.len()
+    );
+    assert_eq!(
+        during, 1,
+        "the D-leg is decoding: it must count in its worker's in-flight decodes"
+    );
+}

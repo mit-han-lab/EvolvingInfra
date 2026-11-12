@@ -849,7 +849,15 @@ pub async fn chat_completions(
         // with the decode LoadGuard too (non-streaming: counted from here;
         // streaming: counted from the decode response headers).
         let (smg_load, smg_arm) = ctx.decode_smg_load(&decode_worker.url, streaming);
-        let decode_guard = (decode_worker.load_guard(), decode_charge.take(), smg_load);
+        // symmetric_pd: the D-leg's place in its worker's in-flight count
+        // lasts as long as the leg (the stream, when streaming).
+        let d_reservation = flex_decision.as_mut().and_then(|d| d.d_reservation.take());
+        let decode_guard = (
+            decode_worker.load_guard(),
+            decode_charge.take(),
+            smg_load,
+            d_reservation,
+        );
         if streaming {
             let stream_guards: Box<dyn Send + 'static> =
                 Box::new((decode_guard, make_duration_guard()));
