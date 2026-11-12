@@ -81,12 +81,12 @@ pub fn build_policy(
         PolicyKind::GatewayCacheAware => Arc::new(GatewayCacheAwarePolicy::new(
             model.gateway_cache_aware.clone().unwrap_or_default(),
         )),
-        // Co-schedule selection happens in the routes via
-        // `AppContext::co_schedule` (`CoScheduler::admit`), not through the
-        // sync `Policy` trait — the admission queue needs `async`. This
+        // symmetric_pd placement happens in the routes through the scheduler
+        // runtime (`SymmetricPdRuntime::admit`), not through the
+        // sync `Policy` trait: the admission queue needs `async`. This
         // registry entry is only a safety net for the impossible case of
-        // the co-scheduler being unavailable at request time; least-loaded
-        // is the closest degradation.
+        // the runtime being unavailable at request time; least-loaded is
+        // the closest degradation.
         PolicyKind::SymmetricPd => Arc::new(LoadBasedPolicy::new()),
     }
 }
@@ -128,7 +128,7 @@ pub fn build_policy_kind_only(kind: PolicyKind) -> Arc<dyn Policy> {
                 ..Default::default()
             },
         )),
-        // Same fallback as `build_policy`: co-schedule selection lives in
+        // Same fallback as `build_policy`: cost-function selection lives in
         // the routes, not the sync Policy trait.
         PolicyKind::SymmetricPd => Arc::new(LoadBasedPolicy::new()),
     }

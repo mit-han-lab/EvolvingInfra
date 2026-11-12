@@ -13,13 +13,13 @@ use std::collections::{HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use super::forecast::{gpu_s, Arrivals, Features, GpuModel, LaunchAnchor, Params, RxParams};
+use super::model::{gpu_s, Arrivals, Features, GpuModel, LaunchAnchor, Params, RxParams};
 use super::numeric::{
     finite, lstsq, nonneg_fit, py_max, py_min, py_sum, quantile, resid_quantiles, sort_py,
     truthy_or,
 };
 use super::{
-    E3Error, CHUNK_TOKENS, DEFAULT_FLOOR_MS, DEFAULT_IDLE_DELAY_S, DEFAULT_LAG_S,
+    ForecastError, CHUNK_TOKENS, DEFAULT_FLOOR_MS, DEFAULT_IDLE_DELAY_S, DEFAULT_LAG_S,
     DEFAULT_LAUNCH_INTERVAL_S, DEFAULT_LAUNCH_LINE, DISPATCH_S, GPU_FIT_MIN, GRAPH_TOKENS,
     LAUNCH_FIT_MIN, LAUNCH_LINE_MIN, LAUNCH_Y_MAX_S, PAGE_TOKENS, P_AFTER, RIDGE, RX_MIN,
     RX_SHIFT_SAMPLES, SCHEMA,
@@ -227,7 +227,7 @@ pub enum LaunchSource {
     Window,
     Calibration,
     Constant,
-    /// `--trade-e3-frozen-fit`: offline warmup constants.
+    /// `--forecast-fit`: offline warmup constants.
     Frozen,
 }
 
@@ -583,7 +583,7 @@ pub fn calibrate(
     cal_reqs: &[CalReq],
     gpu_chain: &GpuChain,
     graph_tokens: i64,
-) -> Result<Calibration, E3Error> {
+) -> Result<Calibration, ForecastError> {
     let g = graph_tokens as f64;
     let class_fit = |small: bool| -> Option<Vec<f64>> {
         let mut xs: Vec<&[f64]> = Vec::new();
@@ -645,7 +645,7 @@ pub fn calibrate(
         _ => {
             let lc = launch_coef
                 .as_ref()
-                .ok_or(E3Error::Singular("calibrate: launch line"))?;
+                .ok_or(ForecastError::Singular("calibrate: launch line"))?;
             vec![lc[0], lc[1], 0.0, 0.0, 0.0, 0.0]
         }
     };
@@ -690,7 +690,7 @@ pub fn calibrate(
         let k = *r
             .its
             .last()
-            .ok_or(E3Error::Input("calibrate: request without passes"))?;
+            .ok_or(ForecastError::Input("calibrate: request without passes"))?;
         let Some(e) = finite(gpu_chain.get(&k).and_then(|c| c.1)) else {
             continue;
         };
@@ -839,8 +839,8 @@ pub fn make_params(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::e3::forecast::features;
-    use crate::e3::{ARRIVAL_MIN, STEP_S, WINDOW_S};
+    use crate::forecast::model::features;
+    use crate::forecast::{ARRIVAL_MIN, STEP_S, WINDOW_S};
 
     fn gm() -> GpuModel {
         GpuModel {
@@ -1204,7 +1204,7 @@ mod tests {
             None,
             1e9,
         );
-        let want = serde_json::json!({"schema": "router-e3.v2", "chunk_tokens": 8192, "page_tokens": 64,
+        let want = serde_json::json!({"schema": "forecast.v2", "chunk_tokens": 8192, "page_tokens": 64,
             "graph_tokens": 2048, "dispatch_s": 0.044, "p_after": 0.2, "cap_tokens": 1000000000.0,
             "gpu_idle": {"small": [50.0, 0.03, 2.0, 0.0, 0.0], "large": [50.0, 0.03, 2.0, 0.0, 0.0], "floor_ms": 1.0},
             "gpu_busy": {"small": [50.0, 0.03, 2.0, 0.0, 0.0], "large": [50.0, 0.03, 2.0, 0.0, 0.0], "floor_ms": 1.0},

@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! TRADE `wait = e3`: the subscriber of the P engines' state push
-//! (`--trade-e3-push-port PORT`).
+//! cost-function the forecast wait: the subscriber of the P engines' state push
+//! (`--forecast-push-port PORT`).
 //!
 //! The P engine (DecoupledEngine prefill state push, wire contract v1 in
 //! `prefill_state_push.py`) publishes its `prefill_routing`
@@ -35,10 +35,10 @@
 //!   than one counts the lost messages (`gaps`, `lost`); a repeated or older
 //!   sequence is dropped (`repeats`); a new epoch (engine restart) starts the
 //!   sequence, the offset window and the state again.
-//! - The pushed snapshot parses into the same [`E3View`] as a polled one. Its
-//!   timeline samples feed the online fits ([`E3Online::observe_push`];
+//! - The pushed snapshot parses into the same [`ForecastView`] as a polled one. Its
+//!   timeline samples feed the online fits ([`ForecastOnline::observe_push`];
 //!   samples are deduplicated with the polled ones by their sequence), and
-//!   the `e3_label` of a routed request whose completion it holds is written.
+//!   the `forecast_label` of a routed request whose completion it holds is written.
 //! - The message's `inflight` list is compared with the snapshot's pending
 //!   passes (`inflight_mismatch`) and its `events` are counted. The forecast
 //!   reads the in-flight passes from the snapshot: a launch message builds
@@ -47,14 +47,14 @@
 //! - A message without a snapshot (`over_max_bytes`, `build_error:*`) keeps
 //!   the previous state, marked as superseded by its sequence.
 //!
-//! The decision ([`crate::cost_balance`]) uses a P's pushed state instead of
+//! The decision ([`crate::prefill_work`]) uses a P's pushed state instead of
 //! its polled snapshot when the state is at most
-//! `--trade-e3-max-view-age-ms` old, has the epoch of the P's
+//! `--max-state-age-ms` old, has the epoch of the P's
 //! polled snapshot (the push and the poll read one tracker, so another epoch
 //! means a wrong endpoint or a restart between them) and is usable;
 //! otherwise it uses the polled snapshot and names the reason.
 //!
-//! Counters per P ([`PushCounts`]) go to an `e3_push_stats` event in the cost
+//! Counters per P ([`PushCounts`]) go to an `forecast_push_stats` event in the cost
 //! trace every [`STATS_INTERVAL`] (the interval of the engine's own push
 //! summary log).
 
@@ -68,7 +68,7 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
-use crate::trade_e3::{E3Online, E3View, ShadowSink};
+use crate::prefill_forecast::{ForecastOnline, ForecastView, ShadowSink};
 
 /// Frame 1 of every message; the SUB subscribes to it.
 pub const TOPIC: &[u8] = b"prefill_state";
@@ -79,10 +79,10 @@ pub const WIRE_SCHEMA_VERSION: u64 = 1;
 /// seconds (the engine's GPU clock uses the same window; it bounds the clock
 /// drift that enters the minimum).
 pub const OFFSET_WINDOW_S: f64 = 30.0;
-/// `e3_push_stats` interval (the engine logs its push summary every 60 s).
+/// `forecast_push_stats` interval (the engine logs its push summary every 60 s).
 pub const STATS_INTERVAL: Duration = Duration::from_secs(60);
-/// `e3_schema` of the `e3_push_stats` events.
-pub const STATS_SCHEMA: &str = "trade-e3-push-stats.v1";
+/// `forecast_schema` of the `forecast_push_stats` events.
+pub const STATS_SCHEMA: &str = "state-push-stats.v1";
 /// Wait between connection attempts after a failed one (doubling up to the
 /// maximum). zeromq itself retries a refused connection for up to 30 s per
 /// attempt and reconnects a dropped one.
@@ -242,13 +242,13 @@ pub struct PushState {
     pub seq: u64,
     pub trigger: String,
     pub snapshot_source: Option<String>,
-    /// The snapshot in E3 form (its timeline samples are already ingested
+    /// The snapshot in forecast form (its timeline samples are already ingested
     /// and taken out).
-    pub view: Arc<E3View>,
-    /// The state time on the router (E3) clock: `sampled_monotonic_s` +
+    pub view: Arc<ForecastView>,
+    /// The state time on the router (forecast) clock: `sampled_monotonic_s` +
     /// the offset.
     pub t0_s: f64,
-    /// When the router read the message (E3 clock).
+    /// When the router read the message (forecast clock).
     pub received_s: f64,
     /// The offset used: router clock minus engine monotonic clock (s).
     pub offset_s: f64,
@@ -276,7 +276,7 @@ impl OffsetWindow {
     }
 }
 
-/// Counters of one P's push (cumulative; the `e3_push_stats` event).
+/// Counters of one P's push (cumulative; the `forecast_push_stats` event).
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct PushCounts {
     pub connects: u64,
@@ -307,7 +307,7 @@ pub struct PushCounts {
     pub inflight_mismatch: u64,
     pub launch_events: u64,
     pub result_events: u64,
-    /// `e3_label` lines from pushed timeline samples.
+    /// `forecast_label` lines from pushed timeline samples.
     pub labels: u64,
     /// Receive delay above the window minimum (`x - offset`), sum and max
     /// (s): how much later than the fastest message a message was read.
@@ -361,9 +361,9 @@ struct PushTask {
 /// The subscribers of all P workers and their newest states.
 pub struct PushHub {
     port: u16,
-    online: Arc<E3Online>,
+    online: Arc<ForecastOnline>,
     shadow: Option<Arc<ShadowSink>>,
-    book: Option<Arc<crate::cost_balance::CostBook>>,
+    book: Option<Arc<crate::prefill_work::PrefillWorkBook>>,
     // Lock order: tasks, then streams, then states.
     tasks: Mutex<HashMap<String, PushTask>>,
     streams: Mutex<BTreeMap<String, PushStream>>,
@@ -390,12 +390,12 @@ impl Drop for PushHub {
 
 impl PushHub {
     /// `online` takes the pushed timeline samples, `shadow` the labels and
-    /// `book` the `e3_push_stats` events.
+    /// `book` the `forecast_push_stats` events.
     pub fn new(
         port: u16,
-        online: Arc<E3Online>,
+        online: Arc<ForecastOnline>,
         shadow: Option<Arc<ShadowSink>>,
-        book: Option<Arc<crate::cost_balance::CostBook>>,
+        book: Option<Arc<crate::prefill_work::PrefillWorkBook>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             port,
@@ -447,8 +447,8 @@ impl PushHub {
             if !keep {
                 task.cancel.cancel();
                 self.states.write().remove(url);
-                tracing::info!(target: "co_sched", worker = %url, endpoint = %task.endpoint,
-                    "e3 state push: subscriber stopped (the worker left the pool or shares \
+                tracing::info!(target: "symmetric_pd", worker = %url, endpoint = %task.endpoint,
+                    "forecast state push: subscriber stopped (the worker left the pool or shares \
                      its host)");
             }
             keep
@@ -460,16 +460,16 @@ impl PushHub {
                 st.endpoint = Some((*endpoint).clone());
                 st.conflict = true;
                 if st.warn_once("endpoint_conflict") {
-                    tracing::error!(target: "co_sched", worker = %url, endpoint = %endpoint,
-                        "e3 state push: another P of the pool has the same host, and the push \
+                    tracing::error!(target: "symmetric_pd", worker = %url, endpoint = %endpoint,
+                        "forecast state push: another P of the pool has the same host, and the push \
                          port is one per router; this P keeps the polled snapshot");
                 }
             }
             for (url, reason) in &bad {
                 let st = streams.entry((*url).clone()).or_default();
                 if st.warn_once("bad_url") {
-                    tracing::error!(target: "co_sched", worker = %url, reason,
-                        "e3 state push: no endpoint for this worker URL; it keeps the polled \
+                    tracing::error!(target: "symmetric_pd", worker = %url, reason,
+                        "forecast state push: no endpoint for this worker URL; it keeps the polled \
                          snapshot");
                 }
             }
@@ -493,8 +493,8 @@ impl PushHub {
                 endpoint.clone(),
                 cancel.clone(),
             ));
-            tracing::info!(target: "co_sched", worker = %url, %endpoint,
-                "e3 state push: subscriber started");
+            tracing::info!(target: "symmetric_pd", worker = %url, %endpoint,
+                "forecast state push: subscriber started");
             tasks.insert(url, PushTask { endpoint, cancel });
         }
     }
@@ -516,16 +516,16 @@ impl PushHub {
                 let st = streams.entry(worker.to_string()).or_default();
                 *st.counts.dropped.entry(bad.reason.to_string()).or_default() += 1;
                 if st.warn_once(bad.reason) {
-                    tracing::warn!(target: "co_sched", worker, reason = bad.reason,
+                    tracing::warn!(target: "symmetric_pd", worker, reason = bad.reason,
                         detail = %bad.detail,
-                        "e3 state push: message dropped (further ones counted)");
+                        "forecast state push: message dropped (further ones counted)");
                 }
                 return Err(bad.reason);
             }
         };
         let p = &msg.payload;
         // Parsed off every lock.
-        let mut view = p.snapshot.as_ref().map(E3View::parse);
+        let mut view = p.snapshot.as_ref().map(ForecastView::parse);
         let sampled = view.as_ref().and_then(|v| v.sampled_mono_s);
         let (offset, new_epoch) = {
             let mut streams = self.streams.lock();
@@ -668,18 +668,18 @@ impl PushHub {
         match result {
             Ok(()) => {
                 st.counts.connects += 1;
-                tracing::info!(target: "co_sched", worker, endpoint,
-                    connects = st.counts.connects, "e3 state push: connected and subscribed");
+                tracing::info!(target: "symmetric_pd", worker, endpoint,
+                    connects = st.counts.connects, "forecast state push: connected and subscribed");
             }
             Err(error) => {
                 st.counts.connect_failures += 1;
                 if st.warn_once("connect") {
-                    tracing::warn!(target: "co_sched", worker, endpoint, error,
-                        "e3 state push: cannot connect yet (retrying; the P keeps the polled \
+                    tracing::warn!(target: "symmetric_pd", worker, endpoint, error,
+                        "forecast state push: cannot connect yet (retrying; the P keeps the polled \
                          snapshot meanwhile; further failures counted)");
                 } else {
-                    tracing::debug!(target: "co_sched", worker, endpoint, error,
-                        "e3 state push: connect failed");
+                    tracing::debug!(target: "symmetric_pd", worker, endpoint, error,
+                        "forecast state push: connect failed");
                 }
             }
         }
@@ -690,8 +690,8 @@ impl PushHub {
         let st = streams.entry(worker.to_string()).or_default();
         st.counts.recv_errors += 1;
         if st.warn_once("recv") {
-            tracing::warn!(target: "co_sched", worker, error,
-                "e3 state push: receive error (zeromq reconnects; further errors counted)");
+            tracing::warn!(target: "symmetric_pd", worker, error,
+                "forecast state push: receive error (zeromq reconnects; further errors counted)");
         }
     }
 
@@ -723,7 +723,7 @@ impl PushHub {
         Value::Object(workers)
     }
 
-    /// Every [`STATS_INTERVAL`]: one `e3_push_stats` event in the cost trace
+    /// Every [`STATS_INTERVAL`]: one `forecast_push_stats` event in the placement trace
     /// and one log line per P.
     pub fn maybe_emit_stats(&self, now: Instant) {
         {
@@ -742,7 +742,7 @@ impl PushHub {
         if let Value::Object(workers) = &stats {
             for (url, s) in workers {
                 let c = &s["counts"];
-                tracing::info!(target: "co_sched", worker = %url,
+                tracing::info!(target: "symmetric_pd", worker = %url,
                     messages = c["messages"].as_u64().unwrap_or(0),
                     states = c["states"].as_u64().unwrap_or(0),
                     lost = c["lost"].as_u64().unwrap_or(0),
@@ -752,20 +752,20 @@ impl PushHub {
                     inflight_mismatch = c["inflight_mismatch"].as_u64().unwrap_or(0),
                     offset_s = s["offset_s"].as_f64().unwrap_or(f64::NAN),
                     state_age_s = s["state_age_s"].as_f64().unwrap_or(f64::NAN),
-                    "e3 state push stats");
+                    "forecast state push stats");
             }
         }
         if let Some(book) = &self.book {
             let event = json!({
-                "event": "e3_push_stats",
-                "e3_schema": STATS_SCHEMA,
+                "event": "forecast_push_stats",
+                "forecast_schema": STATS_SCHEMA,
                 "port": self.port,
-                "e3_clock_s": self.online.secs(now),
+                "forecast_clock_s": self.online.secs(now),
                 "workers": stats,
             });
             if let Err(error) = book.emit_event(event) {
-                tracing::warn!(target: "co_sched", %error,
-                    "e3_push_stats not written to the cost trace");
+                tracing::warn!(target: "symmetric_pd", %error,
+                    "state push stats not written to the placement trace");
             }
         }
     }
@@ -773,7 +773,7 @@ impl PushHub {
 
 /// The snapshot's pending passes and the message's `inflight` list name
 /// different passes (only when both name all of theirs).
-fn inflight_differs(view: &E3View, inflight: &[PassEvent]) -> bool {
+fn inflight_differs(view: &ForecastView, inflight: &[PassEvent]) -> bool {
     let snap: Option<BTreeSet<i64>> = view.inflight.iter().map(|p| p.forward_iter).collect();
     let msg: Option<BTreeSet<i64>> = inflight.iter().map(|e| e.forward_iter).collect();
     matches!((snap, msg), (Some(a), Some(b)) if a != b)
@@ -860,7 +860,7 @@ mod tests {
 
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/e3")
+            .join("tests/fixtures/forecast")
             .join(name)
     }
 
@@ -933,7 +933,7 @@ mod tests {
 
     fn hub() -> (Arc<PushHub>, Instant) {
         let anchor = Instant::now();
-        let online = Arc::new(E3Online::new(anchor).with_label_sources());
+        let online = Arc::new(ForecastOnline::new(anchor).with_label_sources());
         (PushHub::new(5600, online, None, None), anchor)
     }
 
@@ -1115,23 +1115,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shadow.jsonl");
         let anchor = Instant::now();
-        let online = Arc::new(E3Online::new(anchor).with_label_sources());
+        let online = Arc::new(ForecastOnline::new(anchor).with_label_sources());
         let sink = Arc::new(ShadowSink::file(&path).unwrap());
         let hub = PushHub::new(5600, online, Some(sink), None);
         let w = "http://p:1";
-        hub.online.record_route(crate::trade_e3::RouteRecord {
-            rid: "r1".into(),
-            worker: w.into(),
-            decided_s: 50.0,
-            decided_unix_s: 1_000.0,
-            input: 2_000,
-            prefix: 0,
-            host: 0,
-            idle: Some(true),
-            pred_s: Some(0.25),
-            session: None,
-            session_gap_s: None,
-        });
+        hub.online
+            .record_route(crate::prefill_forecast::RouteRecord {
+                rid: "r1".into(),
+                worker: w.into(),
+                decided_s: 50.0,
+                decided_unix_s: 1_000.0,
+                input: 2_000,
+                prefix: 0,
+                host: 0,
+                idle: Some(true),
+                pred_s: Some(0.25),
+                session: None,
+                session_gap_s: None,
+            });
         let mut snap = small_snapshot("e1", 500.0);
         snap["timeline"] = json!({"samples": [{"sequence": 1, "kind": "request_complete",
             "forward_iter": 3, "rid": "r1", "duration_s": 0.25, "completed_age_s": 49.5,
@@ -1149,7 +1150,7 @@ mod tests {
         assert_eq!(hub.online.counts()[w]["rx_samples"], 1);
         let text = std::fs::read_to_string(&path).unwrap();
         let label: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
-        assert_eq!(label["event"], "e3_label");
+        assert_eq!(label["event"], "forecast_label");
         assert_eq!(label["label_source"], "push");
         assert_eq!(label["label_lo_s"], label["label_hi_s"]);
         assert!(
@@ -1205,7 +1206,7 @@ mod tests {
             Endpoint::Tcp(_, port) => port,
             other => panic!("unexpected endpoint {other:?}"),
         };
-        let online = Arc::new(E3Online::new(Instant::now()).with_label_sources());
+        let online = Arc::new(ForecastOnline::new(Instant::now()).with_label_sources());
         let hub = PushHub::new(port, online, None, None);
         let worker = "http://127.0.0.1:30000".to_string();
         hub.ensure(std::slice::from_ref(&worker));
@@ -1241,7 +1242,7 @@ mod tests {
     /// end-of-iteration message that reuses the /v1/loads sample
     /// (PROVENANCE.md): every field decodes, the snapshot equals the
     /// recorded reply with the three send-time fields, and it gives the
-    /// same E3 rows. The same message without its snapshot decodes too.
+    /// same forecast rows. The same message without its snapshot decodes too.
     #[test]
     fn the_engine_encoded_payload_decodes() {
         let text = std::fs::read_to_string(fixture("prefill-state-push-recorded.json")).unwrap();
@@ -1265,8 +1266,8 @@ mod tests {
         snap["age_s"] = expected["snapshot_age_s"].clone();
         snap["stale"] = expected["snapshot_stale"].clone();
         assert_eq!(p.snapshot.as_ref(), Some(&snap));
-        let pushed = E3View::parse(p.snapshot.as_ref().unwrap());
-        let polled = E3View::parse(&recorded_snapshot());
+        let pushed = ForecastView::parse(p.snapshot.as_ref().unwrap());
+        let polled = ForecastView::parse(&recorded_snapshot());
         assert_eq!(pushed.inflight, polled.inflight);
         assert_eq!(pushed.partial, polled.partial);
         assert_eq!(pushed.waiting, polled.waiting);

@@ -1651,7 +1651,7 @@ mod tests {
         assert!(!owner.finish_worker_clear("clearing-d"));
     }
 
-    /// The co_schedule port registers (P, P), so no decode worker enters the
+    /// A P-only registration (P, P) puts no decode worker into the
     /// registry. A P move queues only the old P, and its release goes out
     /// only after the new P reports the full context ready. The counters
     /// follow each step.

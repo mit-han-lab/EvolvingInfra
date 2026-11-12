@@ -18,7 +18,7 @@ const POLL: Duration = Duration::from_millis(200);
 
 /// Start a drain for each worker that assignment `revision` moved from decode to prefill.
 pub fn spawn(
-    flex: &Arc<SymmetricPdRuntime>,
+    spd: &Arc<SymmetricPdRuntime>,
     executions: &Arc<Executions>,
     client: &reqwest::Client,
     workers: Vec<String>,
@@ -27,7 +27,7 @@ pub fn spawn(
 ) {
     for worker in workers {
         tokio::spawn(drain_to_prefill(
-            Arc::clone(flex),
+            Arc::clone(spd),
             Arc::clone(executions),
             client.clone(),
             worker,
@@ -48,7 +48,7 @@ pub fn spawn(
 /// otherwise migrates the D-legs left at the deadline, completes any required
 /// retention cleanup, ends the drain and logs one record.
 pub async fn drain_to_prefill(
-    flex: Arc<SymmetricPdRuntime>,
+    spd: Arc<SymmetricPdRuntime>,
     executions: Arc<Executions>,
     client: reqwest::Client,
     worker: String,
@@ -58,13 +58,13 @@ pub async fn drain_to_prefill(
     let started = Instant::now();
     let mut owed = executions.legs_owed(&worker);
     while owed > 0 && started.elapsed() < timeout {
-        if !flex.is_role_draining(&worker, revision) {
+        if !spd.is_role_draining(&worker, revision) {
             return;
         }
         tokio::time::sleep(POLL).await;
         owed = executions.legs_owed(&worker);
     }
-    if !flex.is_role_draining(&worker, revision) {
+    if !spd.is_role_draining(&worker, revision) {
         return;
     }
     let targets = executions.migrate_decode(&worker);
@@ -76,12 +76,11 @@ pub async fn drain_to_prefill(
     // the existing lifecycle callbacks (or expiry of never-claimed plans).
     // Then the same drain stays closed until versioned releases are acknowledged.
     let finished = loop {
-        if !flex.is_role_draining(&worker, revision) {
+        if !spd.is_role_draining(&worker, revision) {
             return;
         }
         owed = executions.legs_owed(&worker);
-        if (flex.kv_sessions().is_none() || owed == 0) && flex.finish_role_drain(&worker, revision)
-        {
+        if (spd.kv_sessions().is_none() || owed == 0) && spd.finish_role_drain(&worker, revision) {
             break true;
         }
         tokio::time::sleep(POLL).await;
@@ -145,18 +144,18 @@ mod tests {
     }
 
     /// Assign "http://d" `role`; returns the new revision.
-    fn assign_d(flex: &SymmetricPdRuntime, role: RoleAssignment) -> u64 {
-        let now = flex.role_assignments().unwrap();
+    fn assign_d(spd: &SymmetricPdRuntime, role: RoleAssignment) -> u64 {
+        let now = spd.role_assignments().unwrap();
         let mut desired = now.roles.clone();
         desired.insert("http://d".into(), role);
-        let (after, _) = flex
+        let (after, _) = spd
             .replace_role_assignments(&now.epoch, now.revision, &now.roles, &desired)
             .unwrap();
         after.revision
     }
 
-    fn weight(flex: &SymmetricPdRuntime, url: &str) -> RoleWeight {
-        flex.candidates().0.workers[url].weight
+    fn weight(spd: &SymmetricPdRuntime, url: &str) -> RoleWeight {
+        spd.candidates().0.workers[url].weight
     }
 
     /// A claimed request with its P-leg on "http://p" and D-leg on "http://d".
@@ -191,12 +190,12 @@ mod tests {
     }
 
     fn drain(
-        flex: &Arc<SymmetricPdRuntime>,
+        spd: &Arc<SymmetricPdRuntime>,
         executions: &Arc<Executions>,
         revision: u64,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(drain_to_prefill(
-            Arc::clone(flex),
+            Arc::clone(spd),
             Arc::clone(executions),
             reqwest::Client::new(),
             "http://d".into(),
@@ -207,43 +206,43 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_drained_worker_takes_prefill_without_migrating() {
-        let (flex, executions) = (runtime(), executions());
-        let revision = assign_d(&flex, RoleAssignment::Prefill);
-        assert_eq!(weight(&flex, "http://d"), RoleWeight::DRAINING);
-        let task = drain(&flex, &executions, revision);
+        let (spd, executions) = (runtime(), executions());
+        let revision = assign_d(&spd, RoleAssignment::Prefill);
+        assert_eq!(weight(&spd, "http://d"), RoleWeight::DRAINING);
+        let task = drain(&spd, &executions, revision);
         tokio::time::sleep(Duration::from_secs(10)).await;
         assert_eq!(
-            weight(&flex, "http://d"),
+            weight(&spd, "http://d"),
             RoleWeight::DRAINING,
             "its D-leg is still running"
         );
         executions.event(&decode_completed(), "secret").unwrap();
         task.await.unwrap();
-        assert_eq!(weight(&flex, "http://d"), RoleWeight::PREFILL_LEANING);
+        assert_eq!(weight(&spd, "http://d"), RoleWeight::PREFILL_LEANING);
         assert_eq!(executions.migration_status("r", "secret"), Ok(false));
-        assert!(flex.role_drains().is_empty());
+        assert!(spd.role_drains().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
     async fn d_legs_left_at_the_deadline_migrate() {
-        let (flex, executions) = (runtime(), executions());
-        let revision = assign_d(&flex, RoleAssignment::Prefill);
+        let (spd, executions) = (runtime(), executions());
+        let revision = assign_d(&spd, RoleAssignment::Prefill);
         let started = Instant::now();
-        drain(&flex, &executions, revision).await.unwrap();
+        drain(&spd, &executions, revision).await.unwrap();
         assert!(started.elapsed() >= Duration::from_secs(30));
         assert_eq!(executions.migration_status("r", "secret"), Ok(true));
-        assert_eq!(weight(&flex, "http://d"), RoleWeight::PREFILL_LEANING);
+        assert_eq!(weight(&spd, "http://d"), RoleWeight::PREFILL_LEANING);
     }
 
     #[tokio::test(start_paused = true)]
     async fn reassigning_the_worker_to_decode_ends_its_drain() {
-        let (flex, executions) = (runtime(), executions());
-        let revision = assign_d(&flex, RoleAssignment::Prefill);
-        let task = drain(&flex, &executions, revision);
+        let (spd, executions) = (runtime(), executions());
+        let revision = assign_d(&spd, RoleAssignment::Prefill);
+        let task = drain(&spd, &executions, revision);
         tokio::time::sleep(Duration::from_secs(5)).await;
-        assign_d(&flex, RoleAssignment::Decode);
+        assign_d(&spd, RoleAssignment::Decode);
         task.await.unwrap();
-        assert_eq!(weight(&flex, "http://d"), RoleWeight::DECODE_LEANING);
+        assert_eq!(weight(&spd, "http://d"), RoleWeight::DECODE_LEANING);
         assert_eq!(
             executions.migration_status("r", "secret"),
             Ok(false),
@@ -253,24 +252,24 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn retention_waits_for_terminal_evidence_after_abort_deadline() {
-        let (flex, executions) = (runtime_with_retention(true), executions());
-        let revision = assign_d(&flex, RoleAssignment::Prefill);
-        let task = drain(&flex, &executions, revision);
+        let (spd, executions) = (runtime_with_retention(true), executions());
+        let revision = assign_d(&spd, RoleAssignment::Prefill);
+        let task = drain(&spd, &executions, revision);
         tokio::time::sleep(Duration::from_secs(40)).await;
         assert_eq!(executions.migration_status("r", "secret"), Ok(true));
         assert_eq!(executions.legs_owed("http://d"), 1);
-        assert_eq!(weight(&flex, "http://d"), RoleWeight::DRAINING);
+        assert_eq!(weight(&spd, "http://d"), RoleWeight::DRAINING);
         assert!(!task.is_finished());
         executions.event(&decode_completed(), "secret").unwrap();
         task.await.unwrap();
-        assert_eq!(weight(&flex, "http://d"), RoleWeight::PREFILL_LEANING);
-        assert!(flex.role_drains().is_empty());
+        assert_eq!(weight(&spd, "http://d"), RoleWeight::PREFILL_LEANING);
+        assert!(spd.role_drains().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
     async fn drained_worker_stays_unavailable_until_session_releases_are_acknowledged() {
-        let (flex, executions) = (runtime_with_retention(true), executions());
-        let sessions = flex.kv_sessions().unwrap();
+        let (spd, executions) = (runtime_with_retention(true), executions());
+        let sessions = spd.kv_sessions().unwrap();
         let identity = crate::agent_identity::RequestIdentity {
             agent_id: "role-clear".into(),
             subagent_id: 0,
@@ -279,27 +278,27 @@ mod tests {
         sessions
             .register(&identity, "http://p", "http://d")
             .unwrap();
-        let revision = assign_d(&flex, RoleAssignment::Prefill);
+        let revision = assign_d(&spd, RoleAssignment::Prefill);
         executions.event(&decode_completed(), "secret").unwrap();
-        let task = drain(&flex, &executions, revision);
+        let task = drain(&spd, &executions, revision);
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(executions.legs_owed("http://d"), 0);
-        assert_eq!(weight(&flex, "http://d"), RoleWeight::DRAINING);
+        assert_eq!(weight(&spd, "http://d"), RoleWeight::DRAINING);
         assert!(!task.is_finished());
         assert!(sessions
             .register(&identity, "http://d", "http://d2")
             .is_err());
-        assert!(!flex.finish_role_drain("http://d", revision));
+        assert!(!spd.finish_role_drain("http://d", revision));
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
     }
 
     #[test]
     fn prefill_to_decode_keeps_session_registration_and_retry_version() {
-        let flex = runtime_with_retention(true);
-        let revision = assign_d(&flex, RoleAssignment::Prefill);
-        assert!(flex.finish_role_drain("http://d", revision));
-        let sessions = flex.kv_sessions().unwrap();
+        let spd = runtime_with_retention(true);
+        let revision = assign_d(&spd, RoleAssignment::Prefill);
+        assert!(spd.finish_role_drain("http://d", revision));
+        let sessions = spd.kv_sessions().unwrap();
         let identity = crate::agent_identity::RequestIdentity {
             agent_id: "preserved-prefill".into(),
             subagent_id: 0,
@@ -308,9 +307,9 @@ mod tests {
         let before = sessions
             .register(&identity, "http://d", "http://d2")
             .unwrap();
-        assign_d(&flex, RoleAssignment::Decode);
-        assert_eq!(weight(&flex, "http://d"), RoleWeight::DECODE_LEANING);
-        assert!(flex.role_drains().is_empty());
+        assign_d(&spd, RoleAssignment::Decode);
+        assert_eq!(weight(&spd, "http://d"), RoleWeight::DECODE_LEANING);
+        assert!(spd.role_drains().is_empty());
         assert_eq!(
             sessions
                 .register(&identity, "http://d", "http://d2")
@@ -325,7 +324,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn retention_drain_unblocked_by_unresolved_decode_expiry() {
         for after in [None, Some(Duration::from_secs(300))] {
-            let flex = runtime_with_retention(true);
+            let spd = runtime_with_retention(true);
             let mut state = BackendState::new(Arc::new(tokio::sync::Notify::new()));
             let executions = Arc::new(Executions::default().with_decode_unresolved_expiry(after));
             executions.install_claimed_for_test(
@@ -343,8 +342,8 @@ mod tests {
             d_cancel.event_id = "r:decode:cancelled".into();
             d_cancel.http_status = None;
             executions.event(&d_cancel, "secret").unwrap();
-            let revision = assign_d(&flex, RoleAssignment::Prefill);
-            let task = drain(&flex, &executions, revision);
+            let revision = assign_d(&spd, RoleAssignment::Prefill);
+            let task = drain(&spd, &executions, revision);
             tokio::time::sleep(Duration::from_secs(60)).await;
             assert_eq!(executions.legs_owed("http://d"), 1);
             assert!(!task.is_finished());
@@ -355,11 +354,11 @@ mod tests {
                     !task.is_finished(),
                     "without the expiry the drain never ends"
                 );
-                assert_eq!(weight(&flex, "http://d"), RoleWeight::DRAINING);
+                assert_eq!(weight(&spd, "http://d"), RoleWeight::DRAINING);
                 task.abort();
             } else {
                 task.await.unwrap();
-                assert_eq!(weight(&flex, "http://d"), RoleWeight::PREFILL_LEANING);
+                assert_eq!(weight(&spd, "http://d"), RoleWeight::PREFILL_LEANING);
             }
         }
     }

@@ -35,7 +35,7 @@ engine_args:
   - --weight-loader-drop-cache-after-load
 engine_env:
   SGLANG_SYMMETRIC_PUBLISH_ASYNC_READBACK: 1
-  SGLANG_PREFILL_STATE_PUSH_PORT: 26648          # prefill state for the router's e3 wait model
+  SGLANG_PREFILL_STATE_PUSH_PORT: 26648          # prefill state for the router's forecast wait
   SGLANG_PREFILL_STATE_PUSH_LAUNCH_MODE: always
 frontend:
   image_config:
@@ -53,23 +53,14 @@ frontend:
   max_staging_bytes: 17179869184
   ttl_seconds: 3600
   request_timeout_seconds: 3600
-router_args:                   # the e3 wait model with measured copy price and prefill rate
-  - --trade-copy-lambda=auto
-  - --trade-copy-lambda-q=sat
-  - --trade-copy-lambda-mu=1
-  - --trade-copy-lambda-min=0
-  - --trade-copy-lambda-max=1000000000
-  - --trade-copy-lambda-fallback=18.4
-  - --trade-rate-tokens-per-s=auto
-  - --trade-wait=e3
-  - --trade-e3-bound-table=examples/gb300/e3/bound-params.json
-  - --trade-e3-frozen-fit=examples/gb300/e3/kimi-k26-frozen-fit.json
-  - --trade-e3-push-port=26648
-  - --trade-e3-next-pass-lag
-  - --trade-gate-m=0
-  - --trade-e3-max-view-age-ms=5000
-  - --symmetric-pd-gwq-auto
-  - --symmetric-pd-gwq-room=predicted
+router_args:                   # forecast wait and global queue (router defaults), measured copy price and prefill rate
+  - --copy-price=auto
+  - --copy-price-min=0
+  - --copy-price-max=1000000000
+  - --copy-price-fallback=18.4
+  - --prefill-rate-tokens-per-s=auto
+  - --forecast-fit=examples/gb300/forecast/kimi-k26-fit.json
+  - --forecast-push-port=26648
   - --symmetric-pd-trace-session-moves
 planner:
   prefill_shape_prior: kimi-k26-gb300-tp4

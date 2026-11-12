@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pixel-free late-D decode legs (`--late-d-image-source-url`, Kimi CUA).
+//! Pixel-free late-D decode legs of image requests (`--late-d-image-source-url`).
 //!
 //! With `--pd-late-decode choose` every decode candidate receives the whole
 //! request. A decode leg imports its KV from the prefill and never runs the

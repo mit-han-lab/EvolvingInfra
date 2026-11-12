@@ -259,12 +259,12 @@ impl AppContext {
             // symmetric_pd: the owners are the prefill-capable symmetric workers
             // of the current roles, whatever their breaker state (as the PD
             // links); no power-of-two-smg policy is involved.
-            if let Some(flex) = &symmetric_pd {
-                let weak = Arc::downgrade(flex);
+            if let Some(spd) = &symmetric_pd {
+                let weak = Arc::downgrade(spd);
                 // External role control: link every worker (a P-leg queued
                 // on a worker moved to decode still binds through its link),
                 // and bind only to candidates still in the decode role.
-                let external = flex.config().external_role_control;
+                let external = spd.config().external_role_control;
                 let late = crate::late_bind::LateBind::new_symmetric(
                     config.proxy.late_decode,
                     config.model.pd_decode_tokens.clone().unwrap_or_default(),
@@ -282,7 +282,7 @@ impl AppContext {
                     }),
                 );
                 if external {
-                    let weak = Arc::downgrade(flex);
+                    let weak = Arc::downgrade(spd);
                     late.set_decode_role_gate(Arc::new(move || {
                         weak.upgrade()
                             .map(|f| f.decode_members())
@@ -319,8 +319,8 @@ impl AppContext {
                 .as_ref()
                 .filter(|_| late_bind.as_ref().is_some_and(|l| l.symmetric()))
             {
-                Some(flex) => {
-                    let weak = Arc::downgrade(flex);
+                Some(spd) => {
+                    let weak = Arc::downgrade(spd);
                     crate::late_fit::start_collector_over(
                         &registry,
                         store,

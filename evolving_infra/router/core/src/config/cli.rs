@@ -26,32 +26,17 @@ const DEFAULT_KV_INDEXER_QUERY_TIMEOUT_MS: u64 = 100;
 const DEFAULT_ROLE_DRAIN_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_KV_INDEXER_QUERY_MAX_INFLIGHT: usize = sgl_kv_indexer::DEFAULT_QUERY_MAX_INFLIGHT;
 /// Per-RID progress poll period of the P-role workers under
-/// `--symmetric-pd-p-select cost-function` when `--trade-load-poll-ms` is unset.
+/// `--symmetric-pd-p-select cost-function` when `--prefill-poll-ms` is unset.
 const DEFAULT_COST_FUNCTION_LOAD_POLL_MS: u64 = 100;
 /// KV hint indexer query timeout when `--kv-indexer-timeout-ms` is unset.
 const DEFAULT_KV_HINT_INDEXER_TIMEOUT_MS: u64 = 20;
 /// KV hint indexer query timeout set by `--symmetric-pd-preset paper`.
 const PAPER_PRESET_KV_HINT_INDEXER_TIMEOUT_MS: u64 = 200;
+/// `--symmetric-pd-preset paper` with `--prefill-wait forecast`: the
+/// `--max-state-age-ms`.
+const PAPER_PRESET_MAX_STATE_AGE_MS: f64 = 5000.0;
 /// Minimum expected hit (one page) when `--kv-pull-hint-min-tokens` is unset.
 const DEFAULT_KV_PULL_HINT_MIN_TOKENS: u32 = 256;
-
-/// The new name of a `--co-schedule-*` flag of earlier versions, when `arg`
-/// is one: the cost function's flags are `--trade-*` now.
-pub fn renamed_flag(arg: &str) -> Option<String> {
-    let name = arg.split('=').next()?;
-    let rest = name.strip_prefix("--co-schedule-")?;
-    Some(match rest {
-        "trade" | "uncached-balance" => {
-            "no longer needed: --symmetric-pd-p-select cost-function includes it".into()
-        }
-        "trade-eft-max-view-age-ms" => "now --trade-e3-max-view-age-ms".into(),
-        "cost-trace" | "load-poll-ms" => format!("now --trade-{rest}"),
-        _ => match rest.strip_prefix("trade-") {
-            Some(tail) => format!("now --trade-{tail}"),
-            None => "removed with the co_schedule policy".into(),
-        },
-    })
-}
 
 /// Trimmed decision-replay routing-key header named by `flag`, or the default
 /// header when the flag is unset. An empty value is an error.
@@ -188,24 +173,24 @@ pub struct Cli {
     /// sgl-model-gateway `--cache-threshold` (default 0.3, range 0..=1):
     /// the matched worker wins when `matched tokens / prompt tokens` is
     /// greater than this; else the least-loaded prefill.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub gateway_ca_cache_threshold: Option<f32>,
     /// sgl-model-gateway `--balance-abs-threshold` (default 64): imbalanced
     /// when `max - min` in-flight prefill requests is greater than this (and
     /// the relative test holds).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub gateway_ca_balance_abs_threshold: Option<usize>,
     /// sgl-model-gateway `--balance-rel-threshold` (default 1.5, at least
     /// 1): imbalanced when `max > min * this` (and the absolute test holds).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub gateway_ca_balance_rel_threshold: Option<f32>,
     /// sgl-model-gateway `--eviction-interval` in seconds (default 120,
     /// positive): period of the tree size eviction.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub gateway_ca_eviction_interval_secs: Option<u64>,
     /// sgl-model-gateway `--max-tree-size` (default 67108864, positive): tree
     /// characters kept per prefill worker by each eviction (8 per token).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub gateway_ca_max_tree_size: Option<usize>,
 
     // ---- sticky-session policy (only used by `--policy sticky`) ----
@@ -270,112 +255,113 @@ pub struct Cli {
     #[arg(long)]
     pub kv_worker_map: Option<String>,
 
-    // ---- the cost function of `--symmetric-pd-p-select cost-function`: the
-    // TRADE model, the cost trace and the P progress poll ----
-    /// TRADE: R, uncached prefill tokens one P computes per second. Converts
-    /// pull time into tokens. Default 13500. `auto`: R = R_hat, the computed
-    /// prefill tokens per busy second of all P, measured by the router at
-    /// each decision; 13500 during the first 120 seconds and without a
-    /// measurement.
+    // ---- the placement cost function of `--symmetric-pd-p-select
+    // cost-function` (docs/placement.md): cost(P) = R x (wait(P) + exposed
+    // fetch time) + uncached tokens + copy price x fetched tokens ----
+    /// Placement cost function: R, the uncached prefill tokens one prefill
+    /// worker computes per second. It converts wait and fetch time into
+    /// tokens. Default 13500. `auto`: the router measures R as the computed
+    /// prefill tokens per busy second of all prefill workers (13500 for the
+    /// first 120 s and while no measurement exists).
     #[arg(long, value_parser = parse_number_or_auto)]
-    pub trade_rate_tokens_per_s: Option<NumberOrAuto>,
-    /// TRADE: fixed time of one KV pull in milliseconds. Default 450.
+    pub prefill_rate_tokens_per_s: Option<NumberOrAuto>,
+    /// Placement cost function: fixed time of one KV fetch in milliseconds.
+    /// Default 450.
     #[arg(long)]
-    pub trade_pull_fixed_ms: Option<f64>,
-    /// TRADE: pull time in milliseconds per 100k pulled tokens. Default 100.
+    pub fetch_fixed_ms: Option<f64>,
+    /// Placement cost function: KV fetch time in milliseconds per 100k
+    /// fetched tokens. Default 100.
     #[arg(long)]
-    pub trade_pull_ms_per_100k: Option<f64>,
-    /// TRADE: copy price lambda, in uncached-token equivalents per pulled
-    /// token (the second copy a pull leaves in the target host pool).
-    /// Default 4.6, the value of the paper's runs. 0 = transfer time only.
-    /// `auto`: at each decision lambda = clamp(mu * q * R / R_hat, min, max)
-    /// from the router's own measurements (see --trade-copy-lambda-min,
-    /// -max and -fallback).
+    pub fetch_ms_per_100k_tokens: Option<f64>,
+    /// Placement cost function: the copy price, in uncached-token
+    /// equivalents per fetched token. It charges the second copy that a
+    /// fetch leaves in the host pool of the target worker. Default 4.6.
+    /// 0 charges the fetch time only. `auto`: at each decision the price is
+    /// q x R / R_hat (q: active requests per prefill worker times their
+    /// busy share; R_hat: the measured prefill rate), clamped to
+    /// --copy-price-min and --copy-price-max.
     #[arg(long, value_parser = parse_number_or_auto)]
-    pub trade_copy_lambda: Option<NumberOrAuto>,
-    /// TRADE: source of the P wait B and the request's own service S.
-    /// `ledger` (default): B = backlog / R and S = u / R from the router
-    /// ledger. `e3`: the E3 P completion forecast of
-    /// the P's snapshot, the router's own unseen rows and online fits from
-    /// the engine timeline samples: B_w = wait_s, S_w = pred_s - wait_s, so
-    /// cost = R*(pred_s + max(0, pull_s - wait_s)) + lambda*pulled; the
-    /// request leaves the cache-aware owner only through the prediction
-    /// gate (--trade-gate-m).
-    /// A P without a usable forecast keeps the ledger terms and never wins
-    /// a move. Requires --trade-e3-bound-table.
-    #[arg(long, value_parser = ["ledger", "e3"])]
-    pub trade_wait: Option<String>,
-    /// TRADE wait e3: a snapshot whose view age (poll sent to
-    /// decision plus the engine's own snapshot age) is above this many
-    /// milliseconds is not used. Default 1500.
+    pub copy_price: Option<NumberOrAuto>,
+    /// Placement cost function: how the wait of a prefill worker is
+    /// estimated. `tokens`: the uncached tokens the router has sent to the
+    /// worker and not seen finish, divided by R. `forecast`: the prefill
+    /// completion forecast, a step-time model run on the scheduler state
+    /// that the engine reports (the engine needs
+    /// SGLANG_PREFILL_ROUTING_SNAPSHOT=1; a symmetric worker also
+    /// SGLANG_SYMMETRIC_ROUTING_SNAPSHOT=1). With `forecast`, a request
+    /// leaves its cache-aware owner only when the forecast saving exceeds
+    /// the forecast error (--move-margin). A worker without a usable
+    /// forecast keeps the token-count wait and is never chosen in place of
+    /// the owner. Default `forecast` with --symmetric-pd-preset paper,
+    /// else `tokens`.
+    #[arg(long, value_parser = ["tokens", "forecast"])]
+    pub prefill_wait: Option<String>,
+    /// Forecast: a worker state that is older than this many milliseconds
+    /// at the decision is not used. Default 5000 with
+    /// --symmetric-pd-preset paper, else 1500.
     #[arg(long)]
-    pub trade_e3_max_view_age_ms: Option<f64>,
-    /// TRADE wait e3: the error-bound file. Either bound-params.json
-    /// (schema router-e3-bound-params.v2: per deploy mode a table and its
-    /// level). Its sha256 goes into
-    /// the startup log and the trace. Required with wait e3.
+    pub max_state_age_ms: Option<f64>,
+    /// Forecast: the error-table file (schema `forecast-error-table.v2`),
+    /// the error bound of the forecast per deployment mode. Default: the
+    /// table built into the router (`data/forecast-error-table.json`). The
+    /// tables were fitted for engines with 8192-token chunks and 64-token
+    /// pages; a worker with another chunk or page size gets no forecast.
+    /// The table's sha256 is in the startup log and the placement trace.
     #[arg(long)]
-    pub trade_e3_bound_table: Option<std::path::PathBuf>,
-    /// TRADE wait e3: m of the prediction gate. The request leaves the
-    /// cache-aware owner o for the cheapest P w only if
-    /// (C_o - C_w)/R - m*sqrt(b_o^2 + b_w^2) > g_min, with b the error bound
-    /// of each forecast. Default 1 (the bounds as fitted).
+    pub forecast_error_table: Option<std::path::PathBuf>,
+    /// Forecast: the margin m of the move rule. A request leaves its
+    /// cache-aware owner o for the cheapest worker w only if
+    /// (C_o - C_w) / R - m x sqrt(b_o^2 + b_w^2) > 0, with C the cost and
+    /// b the error bound of each forecast. Default 0 with
+    /// --symmetric-pd-preset paper, else 1.
     #[arg(long)]
-    pub trade_gate_m: Option<f64>,
-    /// TRADE wait e3: subscribe to the state push of each P engine
-    /// (DecoupledEngine prefill state push; the engine needs
+    pub move_margin: Option<f64>,
+    /// Forecast: subscribe to the state push of each prefill engine (one
+    /// ZMQ SUB per worker at tcp://<host>:PORT; the engine needs
     /// SGLANG_PREFILL_STATE_PUSH_PORT=PORT and
-    /// SGLANG_PREFILL_ROUTING_SNAPSHOT=1). One ZMQ SUB per P at
-    /// tcp://<P host>:PORT (routing rank 0). A P's forecast starts from its
-    /// newest pushed state when that state is at most
-    /// --trade-e3-max-view-age-ms old (state time = the
-    /// snapshot's sampled_monotonic_s + the minimum receive - send offset of
-    /// the last 30 s), has the epoch of the P's polled snapshot and is
-    /// usable; otherwise from the polled snapshot. P workers that share a
-    /// host keep the poll. Default off.
+    /// SGLANG_PREFILL_ROUTING_SNAPSHOT=1). A pushed state replaces the
+    /// polled one when it is newer, at most --max-state-age-ms old and from
+    /// the same engine start. Workers that share a host keep the poll.
+    /// Default off.
     #[arg(long)]
-    pub trade_e3_push_port: Option<u16>,
-    /// TRADE wait e3 or the predicted GWQ room: the forecast of a request
-    /// whose last pass leaves no known work on a busy P prices the next pass
-    /// that the expected arrivals form (the engine processes a pass's
-    /// results after it launches the next pass). Default off: the E3
-    /// reference (the bare result lag). Offline on Kimi-K2.6 TP4 at
-    /// concurrency 128: APE 17.8 % -> 13.5 %, mean signed error -3.7 s ->
-    /// -0.6 s.
+    pub forecast_push_port: Option<u16>,
+    /// Forecast: when the last pass of a request leaves no known work on a
+    /// busy worker, also count the next pass that the expected arrivals
+    /// form (the engine handles the results of a pass after it launches
+    /// the next one). `--forecast-next-pass-lag` or `=true` turns it on,
+    /// `=false` off. Default on with --symmetric-pd-preset paper when a
+    /// forecast is used, else off.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub forecast_next_pass_lag: Option<bool>,
+    /// Forecast: a JSON file of offline step-model constants that replace
+    /// the online fits of every prefill worker (the online samples still
+    /// give the arrival rates). It helps when a worker is never idle: the
+    /// online fit takes only passes launched after an idle gap, so a
+    /// saturated worker has no fit and its forecast falls back. The file's
+    /// sha256 is in the startup log. Default off.
     #[arg(long)]
-    pub trade_e3_next_pass_lag: bool,
-    /// TRADE wait e3 or the predicted GWQ room: FILE holds offline warmup
-    /// constants (the e3_constants of an offline step model: the model JSON
-    /// or that object) that replace the online GPU model, launch model and
-    /// calibration constants of every P; the online samples still give the
-    /// arrival rates. For a P that is never idle: the online GPU fit takes
-    /// only single passes launched after an idle gap (20 per class), so a
-    /// saturated P keeps no fit and its forecast falls back (no_fit). The
-    /// file's sha256 goes into the startup log. Default off (the online
-    /// fits).
+    pub forecast_fit: Option<std::path::PathBuf>,
+    /// Placement cost function, `--copy-price auto`: the lowest copy price.
+    /// Default 4.6.
     #[arg(long)]
-    pub trade_e3_frozen_fit: Option<std::path::PathBuf>,
-    /// TRADE copy price auto: the floor of lambda. Default 4.6 (safety only).
-    /// Needs --trade-copy-lambda auto.
+    pub copy_price_min: Option<f64>,
+    /// Placement cost function, `--copy-price auto`: the highest copy
+    /// price. Default 1000.
     #[arg(long)]
-    pub trade_copy_lambda_min: Option<f64>,
-    /// TRADE copy price auto: the cap of lambda. Default 1000. Needs
-    /// --trade-copy-lambda auto.
+    pub copy_price_max: Option<f64>,
+    /// Placement cost function, `--copy-price auto`: the copy price for the
+    /// first seconds and while a measurement is missing. Default 4.6.
     #[arg(long)]
-    pub trade_copy_lambda_max: Option<f64>,
-    /// TRADE copy price auto: the fixed lambda for the first tau seconds and
-    /// when an input is missing (no session, no P history, no R_hat).
-    /// Default 4.6 (the fixed default). Needs --trade-copy-lambda auto.
+    pub copy_price_fallback: Option<f64>,
+    /// Placement cost function: write a new JSONL file (schema
+    /// `placement-trace.v1`) with each placement and its costs, the request
+    /// lifecycle events and 1 s snapshots. Default off.
     #[arg(long)]
-    pub trade_copy_lambda_fallback: Option<f64>,
-    /// New JSONL file for request costs, lifecycle events and 1s snapshots.
+    pub placement_trace: Option<std::path::PathBuf>,
+    /// Placement cost function: interval in milliseconds of the progress
+    /// poll (`/v1/loads`) of each prefill worker. Default 100.
     #[arg(long)]
-    pub trade_cost_trace: Option<std::path::PathBuf>,
-    /// Interval in milliseconds for polling each mapped worker's
-    /// `/v1/loads` (the per-RID progress poll of each P-role worker).
-    /// Default 100.
-    #[arg(long)]
-    pub trade_load_poll_ms: Option<u64>,
+    pub prefill_poll_ms: Option<u64>,
     /// Session KV retention on the PD path of
     /// `--policy gateway_cache_aware` (needs engines with session
     /// retention). A request with an
@@ -424,48 +410,49 @@ pub struct Cli {
     #[arg(long)]
     pub symmetric_pd_load_poll_ms: Option<u64>,
     /// Score weight of `reuse_gain(p)` (default 1.0).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub symmetric_pd_w_hit: Option<f64>,
     /// Score weight of `backlog(p)` (default 0.3).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub symmetric_pd_w_backlog: Option<f64>,
     /// Score weight of `role_pen(p) + role_pen(d)` (default 0.3).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub symmetric_pd_w_role: Option<f64>,
     /// Score weight of `xfer_cost(p, d)` (default 0.2).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub symmetric_pd_w_xfer: Option<f64>,
     /// Score weight of `decode_load(d)` (default 0.1; 0 recovers the plain
     /// additive formula).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub symmetric_pd_w_dload: Option<f64>,
-    /// P-leg selection: `cache-first` (default; replicates
-    /// `cache_aware_zmq`: imbalance fast path, best hit above the cache
-    /// threshold, else least-loaded) or `score` (argmax of the additive
-    /// score, which under saturation degenerates to least-backlog),
-    /// `co-schedule`, `gateway-cache-aware` (the sgl-model-gateway
-    /// cache-aware prefill rule with the `--gateway-ca-*` flags and
-    /// defaults; never holds requests), or `cost-function` (the TRADE cost
-    /// model of `--trade-*`, lambda fixed or auto, over the
-    /// P-role workers: it picks the P-leg and the pull of the P-leg's
-    /// `kv_pull_hint`; never holds requests). `cost-function` needs
-    /// `--symmetric-pd-force-split`, `--symmetric-pd-pull-hint`,
-    /// `--kv-indexer-url` and a `--kv-worker-map` entry with a
-    /// servicer for each P-role worker.
+    /// Prefill selection. `cache-first` (default without the paper preset):
+    /// the cache-aware rule (imbalance fast path, best hit above the cache
+    /// threshold, else least loaded). `score`: argmax of the additive score.
+    /// `gateway-cache-aware`: the sgl-model-gateway cache-aware prefill
+    /// rule; never holds requests. `cost-function`: the placement cost
+    /// function (docs/placement.md) over the prefill workers; it picks the
+    /// prefill worker and the KV fetch of its `kv_pull_hint`.
+    /// `cost-function` needs `--symmetric-pd-force-split`,
+    /// `--symmetric-pd-pull-hint`, `--kv-indexer-url` and a
+    /// `--kv-worker-map` entry with a servicer for each prefill worker.
     #[arg(long, value_enum)]
     pub symmetric_pd_p_select: Option<SymmetricPdPSelect>,
     /// `--policy symmetric_pd` only: what fills the flags left unset.
-    /// `paper` (default) is the configuration of the paper's runs: force
-    /// split, round-robin D selection, 100 ms load polls, late decode choice
-    /// by `fit_req` over every decode on observed capacity, KV session
-    /// retention, and, with `--kv-indexer-url` and a `--kv-worker-map` that
-    /// names servicers, the cost-function P selection (TRADE, uncached
-    /// balance) with peer pulls from any holder. `none`: the flags as given.
+    /// `paper` (default): force split, round-robin decode selection, 100 ms
+    /// load polls, late decode choice by `fit_req` over every decode on
+    /// observed capacity, KV session retention, and, with `--kv-indexer-url`
+    /// and a `--kv-worker-map` that names servicers, the placement cost
+    /// function with KV fetches from any holder. With the cost function it
+    /// also sets `--prefill-wait forecast`, `--global-queue`,
+    /// `--global-queue-room forecast`, `--forecast-next-pass-lag`,
+    /// `--move-margin 0` and `--max-state-age-ms 5000`. The paper's runs
+    /// used `--prefill-wait tokens --global-queue=false`. `none`: the flags
+    /// as given.
     #[arg(long, value_enum, default_value = "paper")]
     pub symmetric_pd_preset: SymmetricPdPreset,
     /// `--symmetric-pd-p-select cost-function` only: an unknown P-leg reservation
     /// (a transport error such as `upstream timed out`, or a drop after
-    /// dispatch) leaves the cost ledger when its P answers a progress poll
+    /// dispatch) leaves the work book when its P answers a progress poll
     /// sent at least this many seconds after the later of the error and the
     /// last listing of its RID, and the answer does not list the RID. A P
     /// that does not answer keeps the work. A P aborts a prefill whose router
@@ -475,43 +462,34 @@ pub struct Cli {
     /// result).
     #[arg(long)]
     pub symmetric_pd_unknown_expire_secs: Option<u64>,
-    /// `--symmetric-pd-p-select cost-function` only: the global waiting queue of
-    /// the TRADE P choice with a measured lead (GWQ-AUTO). A request bound to
-    /// one P (largest local hit minus the second largest >= C, the engine
-    /// chunk from /server_info, 8192 when not reported) takes TRADE at
-    /// arrival and is never held. A free request waits in one router queue,
-    /// in HRRN order (the held work ahead counts as virtual backlog), until
-    /// its TRADE argmin P has W(P) <= lead(P): W = queued work / R, lead =
-    /// C / R + T_react(P). T_react = the time from a release to the first
-    /// progress poll that lists the RID (time-weighted mean over 120 s;
-    /// only releases to an idle P (no
-    /// queued and no launched work) count; poll period + 500 ms before the
-    /// first sample). A
-    /// request held 300 s goes at once. Off by default: no request is held and
-    /// the trace is unchanged.
-    #[arg(long)]
-    pub symmetric_pd_gwq_auto: bool,
-    /// `--symmetric-pd-gwq-auto` only: how the queue decides that a P has room.
-    /// `tokens` (default): W(P) = queued work / R <= lead(P). `predicted`:
-    /// room also while the P's predicted drain (the E3 step-time-model
-    /// forecast of a cold one-chunk probe on the P's newest engine state,
-    /// the state push or the polled prefill_routing snapshot, plus the
-    /// router's own rows) is at most lead(P) = C / R + T_react(P); the walk
-    /// then prices the P's wait as min(R x drain, ledger backlog). A P
-    /// without a usable forecast keeps the token rule (the forecast may only
-    /// release earlier). Needs the E3 forecast state:
-    /// --trade-e3-bound-table (and best
-    /// --trade-e3-push-port), with --trade-wait
-    /// ledger (the drain only) or e3.
-    #[arg(long, value_parser = ["tokens", "predicted"])]
-    pub symmetric_pd_gwq_room: Option<String>,
-    /// `--symmetric-pd-p-select cost-function` only: each TRADE reserve event of
+    /// Placement cost function: hold requests in one router-wide queue and
+    /// send each to its cheapest prefill worker when that worker is about
+    /// to have room. A request whose local cache hit binds it to one worker
+    /// (its largest hit exceeds the second largest by at least one engine
+    /// chunk) is placed at arrival. Other requests wait in HRRN order until
+    /// the queued work of their cheapest worker, divided by R, is within
+    /// that worker's lead time (one chunk / R plus the measured time from a
+    /// release to the worker's first report of the request). A request is
+    /// held at most 300 s. `--global-queue` or `=true` turns it on, `=false`
+    /// off. Default on with --symmetric-pd-preset paper, else off.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub global_queue: Option<bool>,
+    /// Global queue: when a prefill worker has room. `tokens`: its queued
+    /// work divided by R is within the lead time. `forecast`: also when the
+    /// forecast time to drain its queue is within the lead time; a worker
+    /// without a usable forecast keeps the token rule. `forecast` uses the
+    /// forecast state (the --forecast-* flags) also with
+    /// `--prefill-wait tokens`. Default `forecast` with
+    /// --symmetric-pd-preset paper, else `tokens`.
+    #[arg(long, value_parser = ["tokens", "forecast"])]
+    pub global_queue_room: Option<String>,
+    /// `--symmetric-pd-p-select cost-function` only: each cost-function reserve event of
     /// a request with a session identity gets a `session_move` record (the
     /// session, the P of its last decision, the chosen P, the largest local
     /// hit over the P, the local hit on the last P, the pulled tokens), so
     /// the share of moved sessions comes from the router trace alone. Off by
     /// default: the trace is unchanged.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub symmetric_pd_trace_session_moves: bool,
     /// With `--symmetric-pd-p-select cost-function`: the pull source of a P-leg may
     /// be any holder of the indexer answer that is a healthy registered
@@ -521,12 +499,6 @@ pub struct Cli {
     /// hit and every pull source is a P-role worker.
     #[arg(long)]
     pub symmetric_pd_pull_from_any_holder: bool,
-    /// Co-schedule: preserve cache owners below this existing uncached workload (default 12288).
-    #[arg(long)]
-    pub symmetric_pd_owner_threshold_tokens: Option<u64>,
-    /// Co-schedule: a detour must save more work than this margin (default 0).
-    #[arg(long)]
-    pub symmetric_pd_detour_margin_tokens: Option<u64>,
     /// D-leg selection once P is fixed: `score` (default) or `round-robin`
     /// (the `--pd-decode-policy round-robin` equivalent).
     #[arg(long, value_enum)]
@@ -560,11 +532,11 @@ pub struct Cli {
     /// exhausted sessions and ineligible pairs fall back to the configured
     /// selection; every decision logs `replay=hit|hit_len|hit_len_near|
     /// unknown_key|unknown_len|exhausted|no_key|off`.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub symmetric_pd_decision_replay: Option<std::path::PathBuf>,
     /// Header carrying the routing key for `--symmetric-pd-decision-replay`
     /// (default `X-SMG-Routing-Key`, what the strict-replay client sends).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub symmetric_pd_decision_replay_header: Option<String>,
     /// What the D-leg engine does with the imported prompt KV at finish
     /// (`kv_import.cache_policy`): `auto` (default: `gpu-only` for D-leg
@@ -642,11 +614,11 @@ pub struct Cli {
     /// back to `--policy` + `--pd-decode-policy`. Every decision logs
     /// `replay=hit|hit_len|hit_len_near|unknown_key|unknown_len|exhausted|
     /// no_key` (target `pd_replay`). Not for `--policy symmetric_pd`.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub pd_decision_replay: Option<std::path::PathBuf>,
     /// Header carrying the routing key for `--pd-decision-replay`
     /// (default `X-SMG-Routing-Key`).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub pd_decision_replay_header: Option<String>,
 
     // ---- discovery: static ----
@@ -700,8 +672,8 @@ pub struct Cli {
     pub pd_abort_decode_on_prefill_failure: bool,
     /// `/v1/completions` request-body cap in MiB (larger bodies get HTTP
     /// 413 before the handler runs). Default 5 (the chat route keeps 5).
-    /// Token-id replay with uploaded screenshots needs more: the Kimi CUA
-    /// OSWorld2 trace reaches 102 MiB per request (p95 38 MiB).
+    /// Token-id requests with uploaded images can need more (around
+    /// 100 MiB for long multi-image requests).
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=4096))]
     pub max_completions_body_mib: u64,
     /// Screenshot-aware token ids (Kimi K2.5/K2.6): PATH = the engine's
@@ -718,7 +690,7 @@ pub struct Cli {
     /// sgl_router_image_layout_total).
     #[arg(long)]
     pub image_layout_config: Option<std::path::PathBuf>,
-    /// Pixel-free late-D decode legs (Kimi CUA; needs `--image-layout-config`
+    /// Pixel-free late-D decode legs for image requests (needs `--image-layout-config`
     /// and `--pd-late-decode choose` with `--policy symmetric_pd`): URL = this
     /// router's `/internal/prepared_image` as the decode workers reach it
     /// (e.g. `http://10.0.0.1:25800/internal/prepared_image`). The decode
@@ -797,7 +769,7 @@ pub struct Cli {
     pub pd_late_decode_fit_state_max_age_ms: u64,
     /// sgl-model-gateway `--pd-late-decode-local`: only `off` is accepted
     /// (the owner-local winner of symmetric workers is not ported).
-    #[arg(long, value_parser = ["off", "on"])]
+    #[arg(long, value_parser = ["off", "on"], hide = true)]
     pub pd_late_decode_local: Option<String>,
     /// Max lifetime of an in-flight request entry before the janitor
     /// reaps it (returns 504 `stale_request_expired`).
@@ -820,7 +792,7 @@ impl Cli {
     /// arrival pick, which the prefill admits when no decision comes in time,
     /// and the load monitor whose `bound_total_tokens` the `po2` rule reads),
     /// and no decision replay. symmetric_pd (symmetric owners) needs force split,
-    /// no `po2` rule and no flex decision replay (external role control is
+    /// no `po2` rule and no symmetric decision replay (external role control is
     /// accepted), and no `power-of-two-smg` (its arrival pick is the symmetric_pd
     /// D selection).
     fn build_late_decode(
@@ -953,25 +925,25 @@ impl Cli {
         })
     }
 
-    /// True when any `--trade-*` flag (the cost function's TRADE
-    /// model, its trace and its progress poll) was given.
-    fn trade_flag_given(&self) -> bool {
-        self.trade_rate_tokens_per_s.is_some()
-            || self.trade_pull_fixed_ms.is_some()
-            || self.trade_pull_ms_per_100k.is_some()
-            || self.trade_copy_lambda.is_some()
-            || self.trade_wait.is_some()
-            || self.trade_e3_max_view_age_ms.is_some()
-            || self.trade_e3_bound_table.is_some()
-            || self.trade_gate_m.is_some()
-            || self.trade_e3_push_port.is_some()
-            || self.trade_e3_next_pass_lag
-            || self.trade_e3_frozen_fit.is_some()
-            || self.trade_copy_lambda_min.is_some()
-            || self.trade_copy_lambda_max.is_some()
-            || self.trade_copy_lambda_fallback.is_some()
-            || self.trade_cost_trace.is_some()
-            || self.trade_load_poll_ms.is_some()
+    /// True when any flag of the placement cost function (its model, the
+    /// forecast, the placement trace and the progress poll) was given.
+    fn cost_flag_given(&self) -> bool {
+        self.prefill_rate_tokens_per_s.is_some()
+            || self.fetch_fixed_ms.is_some()
+            || self.fetch_ms_per_100k_tokens.is_some()
+            || self.copy_price.is_some()
+            || self.prefill_wait.is_some()
+            || self.max_state_age_ms.is_some()
+            || self.forecast_error_table.is_some()
+            || self.move_margin.is_some()
+            || self.forecast_push_port.is_some()
+            || self.forecast_next_pass_lag.is_some()
+            || self.forecast_fit.is_some()
+            || self.copy_price_min.is_some()
+            || self.copy_price_max.is_some()
+            || self.copy_price_fallback.is_some()
+            || self.placement_trace.is_some()
+            || self.prefill_poll_ms.is_some()
     }
 
     /// `--symmetric-pd-preset paper`: set every flag of the paper's
@@ -1023,10 +995,30 @@ impl Cli {
             self.symmetric_pd_p_select = Some(SymmetricPdPSelect::CostFunction);
             self.symmetric_pd_pull_hint = true;
             self.symmetric_pd_pull_from_any_holder = true;
-            self.trade_load_poll_ms
+            self.prefill_poll_ms
                 .get_or_insert(DEFAULT_COST_FUNCTION_LOAD_POLL_MS);
             self.kv_pull_hint_min_incremental_tokens
-                .get_or_insert(crate::scheduler::trade::TRADE_MIN_PULL_TOKENS as u32);
+                .get_or_insert(crate::scheduler::placement_cost::MIN_FETCH_TOKENS as u32);
+        }
+        // The cost function waits on the forecast and holds requests in the
+        // global queue; the paper's runs pinned `--prefill-wait tokens` and
+        // `--global-queue=false`.
+        if self.symmetric_pd_p_select == Some(SymmetricPdPSelect::CostFunction) {
+            let forecast_wait =
+                self.prefill_wait.get_or_insert_with(|| "forecast".into()) == "forecast";
+            let room_forecast = *self.global_queue.get_or_insert(true)
+                && self
+                    .global_queue_room
+                    .get_or_insert_with(|| "forecast".into())
+                    == "forecast";
+            if forecast_wait || room_forecast {
+                self.forecast_next_pass_lag.get_or_insert(true);
+            }
+            if forecast_wait {
+                self.move_margin.get_or_insert(0.0);
+                self.max_state_age_ms
+                    .get_or_insert(PAPER_PRESET_MAX_STATE_AGE_MS);
+            }
         }
     }
 
@@ -1040,12 +1032,12 @@ impl Cli {
     pub fn into_config(mut self) -> Result<Config> {
         self.apply_symmetric_pd_preset();
         let mut symmetric_pd = self.build_symmetric_pd()?;
-        // `--symmetric-pd-p-select cost-function`: the TRADE flags of the
+        // `--symmetric-pd-p-select cost-function`: the cost-function flags of the
         // cost function configure the symmetric_pd P selection.
-        let flex_cost_function = symmetric_pd.is_some()
+        let spd_cost_function = symmetric_pd.is_some()
             && self.symmetric_pd_p_select == Some(SymmetricPdPSelect::CostFunction);
         let gateway_cache_aware = self.build_gateway_cache_aware()?;
-        let trade_flag_given = self.trade_flag_given();
+        let cost_flag_given = self.cost_flag_given();
         let pd_decision_replay = match &self.pd_decision_replay {
             Some(p) => {
                 if self.policy == PolicyKind::SymmetricPd {
@@ -1270,12 +1262,12 @@ impl Cli {
             None
         };
 
-        // The TRADE flags (`--trade-*`) configure the cost function of
+        // The flags of the placement cost function configure
         // `--symmetric-pd-p-select cost-function`.
-        if trade_flag_given && !flex_cost_function {
+        if cost_flag_given && !spd_cost_function {
             return Err(anyhow!(
-                "the --trade-* flags require --policy symmetric_pd with \
-                 --symmetric-pd-p-select cost-function"
+                "the cost-function flags (--copy-price, --prefill-wait, --forecast-*, ...) \
+                 require --policy symmetric_pd with --symmetric-pd-p-select cost-function"
             ));
         }
         // Session KV retention on the gateway_cache_aware PD path. symmetric_pd
@@ -1291,9 +1283,9 @@ impl Cli {
                 anyhow!("--kv-session-retention requires --policy gateway_cache_aware")
             });
         }
-        let mut trade_e3 = None;
-        let trade = if flex_cost_function {
-            let floor = crate::scheduler::trade::TRADE_MIN_PULL_TOKENS;
+        let mut forecast = None;
+        let cost_params = if spd_cost_function {
+            let floor = crate::scheduler::placement_cost::MIN_FETCH_TOKENS;
             if self
                 .kv_pull_hint_min_incremental_tokens
                 .is_some_and(|n| u64::from(n) < floor)
@@ -1310,32 +1302,30 @@ impl Cli {
                      it cannot be combined with --kv-pull-hint-local-prefix-fallback"
                 ));
             }
-            let defaults = crate::scheduler::trade::TradeParams::default();
-            let lambda_auto = self.trade_copy_lambda == Some(NumberOrAuto::Auto);
-            let rate_auto = self.trade_rate_tokens_per_s == Some(NumberOrAuto::Auto);
+            let defaults = crate::scheduler::placement_cost::PlacementCostParams::default();
+            let lambda_auto = self.copy_price == Some(NumberOrAuto::Auto);
+            let rate_auto = self.prefill_rate_tokens_per_s == Some(NumberOrAuto::Auto);
             if !lambda_auto
-                && (self.trade_copy_lambda_min.is_some()
-                    || self.trade_copy_lambda_max.is_some()
-                    || self.trade_copy_lambda_fallback.is_some())
+                && (self.copy_price_min.is_some()
+                    || self.copy_price_max.is_some()
+                    || self.copy_price_fallback.is_some())
             {
                 return Err(anyhow!(
-                    "--trade-copy-lambda-min, -max and -fallback need \
-                     --trade-copy-lambda auto"
+                    "--copy-price-min, -max and -fallback need --copy-price auto"
                 ));
             }
             let auto = (
-                self.trade_copy_lambda_min
-                    .unwrap_or(crate::scheduler::trade::DEFAULT_TRADE_AUTO_LAMBDA_MIN),
-                self.trade_copy_lambda_max
-                    .unwrap_or(crate::scheduler::trade::DEFAULT_TRADE_AUTO_LAMBDA_MAX),
+                self.copy_price_min
+                    .unwrap_or(crate::scheduler::placement_cost::DEFAULT_COPY_PRICE_MIN),
+                self.copy_price_max
+                    .unwrap_or(crate::scheduler::placement_cost::DEFAULT_COPY_PRICE_MAX),
             );
             for (name, value) in [
-                ("--trade-copy-lambda-min", auto.0),
-                ("--trade-copy-lambda-max", auto.1),
+                ("--copy-price-min", auto.0),
+                ("--copy-price-max", auto.1),
                 (
-                    "--trade-copy-lambda-fallback",
-                    self.trade_copy_lambda_fallback
-                        .unwrap_or(defaults.copy_lambda),
+                    "--copy-price-fallback",
+                    self.copy_price_fallback.unwrap_or(defaults.copy_price),
                 ),
             ] {
                 if !(value.is_finite() && value >= 0.0) {
@@ -1344,158 +1334,152 @@ impl Cli {
             }
             if auto.0 > auto.1 {
                 return Err(anyhow!(
-                    "--trade-copy-lambda-min must not be above \
-                     --trade-copy-lambda-max"
+                    "--copy-price-min must not be above --copy-price-max"
                 ));
             }
-            let params = crate::scheduler::trade::TradeParams {
+            let params = crate::scheduler::placement_cost::PlacementCostParams {
                 // auto: the default R is the fallback.
-                rate_tokens_per_s: match self.trade_rate_tokens_per_s {
+                prefill_rate_tokens_per_s: match self.prefill_rate_tokens_per_s {
                     Some(NumberOrAuto::Number(rate)) => rate,
-                    _ => defaults.rate_tokens_per_s,
+                    _ => defaults.prefill_rate_tokens_per_s,
                 },
-                pull_fixed_ms: self.trade_pull_fixed_ms.unwrap_or(defaults.pull_fixed_ms),
-                pull_ms_per_100k: self
-                    .trade_pull_ms_per_100k
-                    .unwrap_or(defaults.pull_ms_per_100k),
-                // auto: the fallback lambda.
-                copy_lambda: match self.trade_copy_lambda {
-                    Some(NumberOrAuto::Number(lambda)) => lambda,
-                    Some(NumberOrAuto::Auto) => self
-                        .trade_copy_lambda_fallback
-                        .unwrap_or(defaults.copy_lambda),
-                    None => defaults.copy_lambda,
+                fetch_fixed_ms: self.fetch_fixed_ms.unwrap_or(defaults.fetch_fixed_ms),
+                fetch_ms_per_100k_tokens: self
+                    .fetch_ms_per_100k_tokens
+                    .unwrap_or(defaults.fetch_ms_per_100k_tokens),
+                // auto: the fallback price.
+                copy_price: match self.copy_price {
+                    Some(NumberOrAuto::Number(price)) => price,
+                    Some(NumberOrAuto::Auto) => {
+                        self.copy_price_fallback.unwrap_or(defaults.copy_price)
+                    }
+                    None => defaults.copy_price,
                 },
-                copy_lambda_mode: if lambda_auto {
-                    crate::scheduler::trade::TradeLambdaMode::Auto {
-                        q: crate::scheduler::trade::TradeAutoQ::Sat,
-                        mu: crate::scheduler::trade::DEFAULT_TRADE_AUTO_MU,
+                copy_price_mode: if lambda_auto {
+                    crate::scheduler::placement_cost::CopyPriceMode::Auto {
                         min: auto.0,
                         max: auto.1,
                     }
                 } else {
-                    crate::scheduler::trade::TradeLambdaMode::Fixed
+                    crate::scheduler::placement_cost::CopyPriceMode::Fixed
                 },
-                rate_mode: if rate_auto {
-                    crate::scheduler::trade::TradeRateMode::Auto
+                prefill_rate_mode: if rate_auto {
+                    crate::scheduler::placement_cost::PrefillRateMode::Auto
                 } else {
-                    crate::scheduler::trade::TradeRateMode::Fixed
+                    crate::scheduler::placement_cost::PrefillRateMode::Fixed
                 },
-                wait: match self.trade_wait.as_deref() {
-                    Some("e3") => crate::scheduler::trade::TradeWait::E3,
-                    _ => crate::scheduler::trade::TradeWait::Ledger,
+                wait: match self.prefill_wait.as_deref() {
+                    Some("forecast") => crate::scheduler::placement_cost::PrefillWait::Forecast,
+                    _ => crate::scheduler::placement_cost::PrefillWait::Tokens,
                 },
-                eft_max_view_age_s: self
-                    .trade_e3_max_view_age_ms
-                    .map_or(defaults.eft_max_view_age_s, |ms| ms / 1000.0),
-                gate_m: self.trade_gate_m.unwrap_or(defaults.gate_m),
+                max_state_age_s: self
+                    .max_state_age_ms
+                    .map_or(defaults.max_state_age_s, |ms| ms / 1000.0),
+                move_margin: self.move_margin.unwrap_or(defaults.move_margin),
                 ..defaults
             };
-            if !(params.rate_tokens_per_s.is_finite() && params.rate_tokens_per_s > 0.0) {
+            if !(params.prefill_rate_tokens_per_s.is_finite()
+                && params.prefill_rate_tokens_per_s > 0.0)
+            {
                 return Err(anyhow!(
-                    "--trade-rate-tokens-per-s must be finite and greater than 0"
+                    "--prefill-rate-tokens-per-s must be finite and greater than 0"
                 ));
             }
             for (name, value) in [
-                ("--trade-pull-fixed-ms", params.pull_fixed_ms),
-                ("--trade-pull-ms-per-100k", params.pull_ms_per_100k),
-                ("--trade-copy-lambda", params.copy_lambda),
-                ("--trade-gate-m", params.gate_m),
+                ("--fetch-fixed-ms", params.fetch_fixed_ms),
+                (
+                    "--fetch-ms-per-100k-tokens",
+                    params.fetch_ms_per_100k_tokens,
+                ),
+                ("--copy-price", params.copy_price),
+                ("--move-margin", params.move_margin),
             ] {
                 if !(value.is_finite() && value >= 0.0) {
                     return Err(anyhow!("{name} must be finite and at least 0"));
                 }
             }
-            let e3 = params.wait == crate::scheduler::trade::TradeWait::E3;
-            if !(params.eft_max_view_age_s.is_finite() && params.eft_max_view_age_s > 0.0) {
+            let forecast_wait =
+                params.wait == crate::scheduler::placement_cost::PrefillWait::Forecast;
+            if !(params.max_state_age_s.is_finite() && params.max_state_age_s > 0.0) {
                 return Err(anyhow!(
-                    "--trade-e3-max-view-age-ms must be finite and greater than 0"
+                    "--max-state-age-ms must be finite and greater than 0"
                 ));
             }
-            if !e3 && self.trade_e3_max_view_age_ms.is_some() {
-                return Err(anyhow!("--trade-e3-max-view-age-ms needs --trade-wait e3"));
+            if !forecast_wait && self.max_state_age_ms.is_some() {
+                return Err(anyhow!("--max-state-age-ms needs --prefill-wait forecast"));
             }
-            let e3_flags = self.trade_e3_bound_table.is_some()
-                || self.trade_gate_m.is_some()
-                || self.trade_e3_push_port.is_some()
-                || self.trade_e3_next_pass_lag
-                || self.trade_e3_frozen_fit.is_some();
-            // `--symmetric-pd-gwq-room predicted` needs the E3 forecast state
-            // also with the ledger wait (the drain only; no gate).
-            let room_predicted = self.symmetric_pd_gwq_auto
-                && self.symmetric_pd_gwq_room.as_deref() == Some("predicted");
-            if !e3 && room_predicted && self.trade_gate_m.is_some() {
-                return Err(anyhow!(
-                    "--trade-gate-m needs --trade-wait e3 (the GWQ drain \
-                     of --symmetric-pd-gwq-room predicted has no gate)"
-                ));
+            let forecast_flags = self.forecast_error_table.is_some()
+                || self.move_margin.is_some()
+                || self.forecast_push_port.is_some()
+                || self.forecast_next_pass_lag == Some(true)
+                || self.forecast_fit.is_some();
+            // `--global-queue-room forecast` needs the forecast state also
+            // with the token-count wait (the drain only; no move rule).
+            let room_forecast = self.global_queue == Some(true)
+                && self.global_queue_room.as_deref() == Some("forecast");
+            if !forecast_wait && self.move_margin.is_some() {
+                return Err(anyhow!("--move-margin needs --prefill-wait forecast"));
             }
-            if e3 || room_predicted {
-                let path = self.trade_e3_bound_table.as_deref().ok_or_else(|| {
-                    if e3 {
-                        anyhow!("--trade-wait e3 requires --trade-e3-bound-table")
-                    } else {
-                        anyhow!(
-                            "--symmetric-pd-gwq-room predicted requires \
-                             --trade-e3-bound-table (the E3 forecast state)"
-                        )
-                    }
-                })?;
-                let config = crate::trade_e3::TradeE3Config::load(
+            if forecast_wait || room_forecast {
+                let path = self
+                    .forecast_error_table
+                    .as_deref()
+                    .unwrap_or(std::path::Path::new(
+                        crate::prefill_forecast::BUILTIN_ERROR_TABLE_PATH,
+                    ));
+                let config = crate::prefill_forecast::ForecastConfig::load(
                     path,
-                    crate::trade_e3::DEFAULT_BOUND_MODE,
+                    crate::prefill_forecast::DEFAULT_BOUND_MODE,
                     None,
                     0.0,
                     None,
                 )
-                .map_err(|e| anyhow!("--trade-e3-bound-table: {e}"))?;
-                let config = match self.trade_e3_push_port {
+                .map_err(|e| anyhow!("--forecast-error-table: {e}"))?;
+                let config = match self.forecast_push_port {
                     Some(port) => config
                         .with_push(port, None, None)
-                        .map_err(|e| anyhow!("--trade-e3-push-port: {e}"))?,
+                        .map_err(|e| anyhow!("--forecast-push-port: {e}"))?,
                     None => config,
                 };
-                let config = config.with_next_pass_lag(self.trade_e3_next_pass_lag);
+                let config = config.with_next_pass_lag(self.forecast_next_pass_lag == Some(true));
                 let frozen = self
-                    .trade_e3_frozen_fit
+                    .forecast_fit
                     .as_deref()
-                    .map(crate::trade_e3::FrozenFit::load)
+                    .map(crate::prefill_forecast::ForecastFit::load)
                     .transpose()
-                    .map_err(|e| anyhow!("--trade-e3-frozen-fit: {e}"))?
+                    .map_err(|e| anyhow!("--forecast-fit: {e}"))?
                     .map(std::sync::Arc::new);
-                trade_e3 = Some(std::sync::Arc::new(config.with_frozen_fit(frozen)));
-            } else if e3_flags {
+                forecast = Some(std::sync::Arc::new(config.with_frozen_fit(frozen)));
+            } else if forecast_flags {
                 return Err(anyhow!(
-                    "the --trade-e3-* flags and --trade-gate-m need \
-                     --trade-wait e3 (the e3 flags also --symmetric-pd-gwq-room \
-                     predicted)"
+                    "the --forecast-* flags need --prefill-wait forecast or \
+                     --global-queue-room forecast"
                 ));
             }
             Some(params)
         } else {
             None
         };
-        // The TRADE parameters, the cost trace and the P progress poll period
-        // go to the symmetric_pd config.
-        if let (Some(trade), Some(flex)) = (trade, symmetric_pd.as_mut()) {
+        // The cost-function parameters, the placement trace and the progress
+        // poll period go to the symmetric_pd config.
+        if let (Some(cost_params), Some(spd)) = (cost_params, symmetric_pd.as_mut()) {
             let load_poll_ms = self
-                .trade_load_poll_ms
+                .prefill_poll_ms
                 .unwrap_or(DEFAULT_COST_FUNCTION_LOAD_POLL_MS);
             if load_poll_ms == 0 {
-                return Err(anyhow!("--trade-load-poll-ms must be greater than 0"));
+                return Err(anyhow!("--prefill-poll-ms must be greater than 0"));
             }
-            flex.cost_function = Some(SymmetricPdCostFunctionConfig {
-                trade,
-                cost_trace: self.trade_cost_trace.clone(),
+            spd.cost_function = Some(SymmetricPdCostFunctionConfig {
+                cost_params,
+                placement_trace: self.placement_trace.clone(),
                 load_poll_ms,
                 unknown_expire_secs: self
                     .symmetric_pd_unknown_expire_secs
                     .unwrap_or_else(crate::config::types::default_symmetric_pd_unknown_expire_secs),
-                loads_host_room: false,
-                gwq_auto: self.symmetric_pd_gwq_auto.then(|| {
-                    crate::config::SymmetricPdGwqAutoConfig {
-                        room: if self.symmetric_pd_gwq_room.as_deref() == Some("predicted") {
-                            crate::global_queue::GlobalQueueRoom::Predicted
+                global_queue: (self.global_queue == Some(true)).then(|| {
+                    crate::config::GlobalQueueConfig {
+                        room: if self.global_queue_room.as_deref() == Some("forecast") {
+                            crate::global_queue::GlobalQueueRoom::Forecast
                         } else {
                             crate::global_queue::GlobalQueueRoom::Tokens
                         },
@@ -1503,9 +1487,8 @@ impl Cli {
                     }
                 }),
                 trace_session_moves: self.symmetric_pd_trace_session_moves,
-                trade_e3: trade_e3.clone().map(crate::config::SymmetricPdTradeE3),
+                forecast: forecast.clone().map(crate::config::SymmetricPdForecast),
                 pull_from_any_holder: self.symmetric_pd_pull_from_any_holder,
-                trace_async: false,
             });
         }
 
@@ -1521,18 +1504,17 @@ impl Cli {
             || self.kv_worker_map.is_some();
         // symmetric_pd: the indexer is optional (placement degrades to load /
         // role only, logged), so the flags are accepted but not required.
-        let flex_selected = symmetric_pd.is_some();
-        if tuned_kv_hint && !self.inject_kv_pull_hint && !flex_selected && !self.dynamo_cache_aware
-        {
+        let spd_selected = symmetric_pd.is_some();
+        if tuned_kv_hint && !self.inject_kv_pull_hint && !spd_selected && !self.dynamo_cache_aware {
             return Err(anyhow!(
                 "--kv-indexer-url / --kv-pull-hint-min-tokens / \
                  --kv-pull-hint-min-incremental-tokens / --kv-pull-hint-local-prefix-fallback / --kv-indexer-timeout-ms / \
                  --kv-worker-map require --inject-kv-pull-hint or --policy symmetric_pd"
             ));
         }
-        let flex_wants_indexer = flex_selected && self.kv_indexer_url.is_some();
+        let spd_wants_indexer = spd_selected && self.kv_indexer_url.is_some();
         let mut kv_hint =
-            if self.inject_kv_pull_hint || flex_wants_indexer || self.dynamo_cache_aware {
+            if self.inject_kv_pull_hint || spd_wants_indexer || self.dynamo_cache_aware {
                 let requirer = if self.inject_kv_pull_hint {
                     "--inject-kv-pull-hint"
                 } else if self.dynamo_cache_aware {
@@ -1558,10 +1540,10 @@ impl Cli {
                     min_tokens: self
                         .kv_pull_hint_min_tokens
                         .unwrap_or(DEFAULT_KV_PULL_HINT_MIN_TOKENS),
-                    // TRADE never pulls below 512, so its gate defaults to 512.
+                    // cost-function never pulls below 512, so its gate defaults to 512.
                     min_incremental_tokens: self.kv_pull_hint_min_incremental_tokens.unwrap_or(
-                        if flex_cost_function {
-                            crate::scheduler::trade::TRADE_MIN_PULL_TOKENS as u32
+                        if spd_cost_function {
+                            crate::scheduler::placement_cost::MIN_FETCH_TOKENS as u32
                         } else {
                             0
                         },
@@ -1576,14 +1558,14 @@ impl Cli {
         // `--symmetric-pd-p-select cost-function`: the cost function reads the
         // indexer, and every P-role worker can be a pull source, so each needs
         // its servicer. D-role workers may stay out of the map.
-        if let Some(flex) = symmetric_pd.as_ref().filter(|_| flex_cost_function) {
+        if let Some(spd) = symmetric_pd.as_ref().filter(|_| spd_cost_function) {
             let kv = kv_hint.as_ref().ok_or_else(|| {
                 anyhow!(
                     "--symmetric-pd-p-select cost-function requires --kv-indexer-url and \
                      --kv-worker-map"
                 )
             })?;
-            let p_roles: Vec<&SymmetricPdWorkerSpec> = flex
+            let p_roles: Vec<&SymmetricPdWorkerSpec> = spd
                 .workers
                 .iter()
                 .filter(|w| w.prefill_weight > 0.0 && w.capabilities().prefill)
@@ -1703,10 +1685,10 @@ impl Cli {
             || self.gateway_ca_balance_rel_threshold.is_some()
             || self.gateway_ca_eviction_interval_secs.is_some()
             || self.gateway_ca_max_tree_size.is_some();
-        let flex_ca = self.policy == PolicyKind::SymmetricPd
+        let spd_ca = self.policy == PolicyKind::SymmetricPd
             && self.symmetric_pd_p_select == Some(SymmetricPdPSelect::GatewayCacheAware);
         if self.policy != PolicyKind::GatewayCacheAware {
-            if tuned && !flex_ca {
+            if tuned && !spd_ca {
                 return Err(anyhow!(
                     "--gateway-ca-* flags require --policy gateway_cache_aware \
                      (or --policy symmetric_pd --symmetric-pd-p-select gateway-cache-aware)"
@@ -1775,8 +1757,6 @@ impl Cli {
             || self.symmetric_pd_w_role.is_some()
             || self.symmetric_pd_w_xfer.is_some()
             || self.symmetric_pd_w_dload.is_some()
-            || self.symmetric_pd_owner_threshold_tokens.is_some()
-            || self.symmetric_pd_detour_margin_tokens.is_some()
             || self.symmetric_pd_p_select.is_some()
             || self.symmetric_pd_d_select.is_some()
             || self.symmetric_pd_cache_threshold.is_some()
@@ -1794,8 +1774,8 @@ impl Cli {
             || self.symmetric_pd_kv_session_key_file.is_some()
             || self.symmetric_pd_role_drain_timeout_secs.is_some()
             || self.symmetric_pd_unknown_expire_secs.is_some()
-            || self.symmetric_pd_gwq_auto
-            || self.symmetric_pd_gwq_room.is_some()
+            || self.global_queue == Some(true)
+            || self.global_queue_room.is_some()
             || self.symmetric_pd_trace_session_moves
             || self.symmetric_pd_pull_from_any_holder;
         if tuned && !selected {
@@ -1868,18 +1848,15 @@ impl Cli {
             placement.p_select = v.into();
         }
         if placement.p_select == crate::scheduler::placement::PSelect::CostFunction {
-            self.check_flex_cost_function()?;
+            self.check_cost_function()?;
         } else {
             let cost_function_only = [
                 (
                     self.symmetric_pd_unknown_expire_secs.is_some(),
                     "--symmetric-pd-unknown-expire-secs",
                 ),
-                (self.symmetric_pd_gwq_auto, "--symmetric-pd-gwq-auto"),
-                (
-                    self.symmetric_pd_gwq_room.is_some(),
-                    "--symmetric-pd-gwq-room",
-                ),
+                (self.global_queue == Some(true), "--global-queue"),
+                (self.global_queue_room.is_some(), "--global-queue-room"),
                 (
                     self.symmetric_pd_trace_session_moves,
                     "--symmetric-pd-trace-session-moves",
@@ -1894,18 +1871,6 @@ impl Cli {
                     "{flag} requires --symmetric-pd-p-select cost-function"
                 ));
             }
-        }
-        if (self.symmetric_pd_owner_threshold_tokens.is_some()
-            || self.symmetric_pd_detour_margin_tokens.is_some())
-            && placement.p_select != crate::scheduler::placement::PSelect::CoSchedule
-        {
-            return Err(anyhow!("--symmetric-pd-owner-threshold-tokens / --symmetric-pd-detour-margin-tokens require --symmetric-pd-p-select co-schedule"));
-        }
-        if let Some(v) = self.symmetric_pd_owner_threshold_tokens {
-            placement.co_schedule.owner_threshold_tokens = v;
-        }
-        if let Some(v) = self.symmetric_pd_detour_margin_tokens {
-            placement.co_schedule.detour_margin_tokens = v;
         }
         if let Some(v) = self.symmetric_pd_d_select {
             placement.d_select = v.into();
@@ -2087,18 +2052,18 @@ impl Cli {
                     .symmetric_pd_external_role_control
                     .then_some(DEFAULT_ROLE_DRAIN_TIMEOUT_SECS))
                 .map(std::time::Duration::from_secs),
-            // `into_config` attaches it from the `--trade-*` flags.
+            // `into_config` attaches it from the cost-function flags.
             cost_function: None,
         }))
     }
 
     /// The `--symmetric-pd-*` flags that `--symmetric-pd-p-select cost-function`
-    /// needs or refuses. The TRADE pull rides on the P-leg as the pull hint;
+    /// needs or refuses. The cost-function pull rides on the P-leg as the pull hint;
     /// the cost function never uses the symmetric_pd hold queue (its own waiting
-    /// queue is `--symmetric-pd-gwq-auto`). External role control is accepted:
+    /// queue is `--global-queue`). External role control is accepted:
     /// the candidate pool, the pull sources, the progress poll and the
     /// waiting-queue steps follow the live P-role set at each request.
-    fn check_flex_cost_function(&self) -> Result<()> {
+    fn check_cost_function(&self) -> Result<()> {
         if !self.symmetric_pd_force_split {
             return Err(anyhow!(
                 "--symmetric-pd-p-select cost-function requires --symmetric-pd-force-split"
@@ -2106,7 +2071,7 @@ impl Cli {
         }
         if !self.symmetric_pd_pull_hint {
             return Err(anyhow!(
-                "--symmetric-pd-p-select cost-function requires --symmetric-pd-pull-hint: the TRADE pull \
+                "--symmetric-pd-p-select cost-function requires --symmetric-pd-pull-hint: the cost-function pull \
                  rides on the P-leg as the pull hint"
             ));
         }
@@ -2123,9 +2088,9 @@ impl Cli {
                 "--symmetric-pd-p-select cost-function conflicts with --symmetric-pd-decision-replay"
             ));
         }
-        if self.symmetric_pd_gwq_room.is_some() && !self.symmetric_pd_gwq_auto {
+        if self.global_queue_room.is_some() && self.global_queue != Some(true) {
             return Err(anyhow!(
-                "--symmetric-pd-gwq-room requires --symmetric-pd-gwq-auto (the room rule of its queue)"
+                "--global-queue-room requires --global-queue (the room rule of its queue)"
             ));
         }
         let cache_first_knobs = self.symmetric_pd_cache_threshold.is_some()
@@ -2158,13 +2123,13 @@ impl Cli {
         symmetric_pd: Option<&SymmetricPdConfig>,
     ) -> Result<DiscoveryBackend> {
         let mut static_urls = self.worker_urls.clone();
-        if let Some(flex) = symmetric_pd {
+        if let Some(spd) = symmetric_pd {
             if !self.service_discovery {
                 let mut seen: std::collections::HashSet<String> = static_urls
                     .iter()
                     .map(|u| u.trim().trim_end_matches('/').to_string())
                     .collect();
-                for w in &flex.workers {
+                for w in &spd.workers {
                     if seen.insert(w.normalized_url()) {
                         static_urls.push(w.url.trim().to_string());
                     }
@@ -2229,8 +2194,8 @@ fn join_selector(terms: &[String]) -> Option<String> {
     }
 }
 
-/// The value of a TRADE flag that takes a number or `auto`
-/// (`--trade-copy-lambda`, `--trade-rate-tokens-per-s`).
+/// The value of a cost-function flag that takes a number or `auto`
+/// (`--copy-price`, `--prefill-rate-tokens-per-s`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NumberOrAuto {
     Number(f64),
@@ -2289,8 +2254,9 @@ mod tests {
     /// `--policy symmetric_pd` defaults to the paper's configuration: late
     /// decode choice by fit_req over every decode, retention, force split and
     /// round-robin D; with the KV directory and servicers also the cost
-    /// function with peer pulls, the copy price 4.6 and no cost trace. Flags
-    /// that are given win, and `none` takes the flags as given.
+    /// function with peer pulls, the copy price 4.6, the forecast wait, the
+    /// global queue and no placement trace. Flags that are given win, and
+    /// `none` takes the flags as given.
     #[test]
     fn symmetric_pd_preset_paper_is_the_default() {
         use crate::config::{LateDecodeMode, LateDecodeRule};
@@ -2305,16 +2271,16 @@ mod tests {
             "paper",
         ];
         let c = into_config_owned(with_model(&workers)).unwrap();
-        let flex = c.model.symmetric_pd.as_ref().unwrap();
-        assert!(flex.placement.force_split);
-        assert!(flex.kv_session_retention);
-        assert_eq!(format!("{:?}", flex.placement.d_select), "RoundRobin");
+        let spd = c.model.symmetric_pd.as_ref().unwrap();
+        assert!(spd.placement.force_split);
+        assert!(spd.kv_session_retention);
+        assert_eq!(format!("{:?}", spd.placement.d_select), "RoundRobin");
         assert_eq!(
-            format!("{:?}", flex.placement.p_select),
+            format!("{:?}", spd.placement.p_select),
             "CacheFirst",
             "no KV directory"
         );
-        assert!(flex.cost_function.is_none());
+        assert!(spd.cost_function.is_none());
         let late = &c.proxy.late_decode;
         assert_eq!(late.mode, LateDecodeMode::Choose);
         assert_eq!(late.rule, Some(LateDecodeRule::FitReq));
@@ -2323,9 +2289,9 @@ mod tests {
         let mut no_retention = workers.to_vec();
         no_retention.push("--symmetric-pd-no-kv-session-retention");
         let c = into_config_owned(with_model(&no_retention)).unwrap();
-        let flex = c.model.symmetric_pd.as_ref().unwrap();
+        let spd = c.model.symmetric_pd.as_ref().unwrap();
         assert!(
-            !flex.kv_session_retention && flex.placement.force_split,
+            !spd.kv_session_retention && spd.placement.force_split,
             "only retention is off"
         );
 
@@ -2337,28 +2303,31 @@ mod tests {
             r#"[{"id":1,"url":"http://10.0.0.1:30000","servicer":"10.0.0.1:18100"},{"id":2,"url":"http://10.0.0.2:30000","servicer":"10.0.0.2:18100"}]"#,
         ]);
         let c = into_config_owned(with_model(&with_kv)).unwrap();
-        let flex = c.model.symmetric_pd.as_ref().unwrap();
-        assert_eq!(format!("{:?}", flex.placement.p_select), "CostFunction");
-        assert!(flex.pull_hint);
-        let cost = flex.cost_function.as_ref().unwrap();
-        assert_eq!(cost.trade.copy_lambda, 4.6);
-        assert!(cost.cost_trace.is_none());
+        let spd = c.model.symmetric_pd.as_ref().unwrap();
+        assert_eq!(format!("{:?}", spd.placement.p_select), "CostFunction");
+        assert!(spd.pull_hint);
+        let cost = spd.cost_function.as_ref().unwrap();
+        assert_eq!(cost.cost_params.copy_price, 4.6);
+        assert_eq!(cost.cost_params.prefill_rate_tokens_per_s, 13_500.0);
         assert_eq!(
-            flex.import_cache_policy,
+            cost.cost_params.wait,
+            crate::scheduler::placement_cost::PrefillWait::Forecast
+        );
+        assert!(cost.global_queue.is_some() && cost.forecast.is_some());
+        assert!(cost.placement_trace.is_none());
+        assert_eq!(
+            spd.import_cache_policy,
             SymmetricPdImportCachePolicy::Retain
         );
         assert_eq!(c.model.kv_hint.as_ref().unwrap().indexer_timeout_ms, 200);
-        assert!(
-            flex.role_drain_timeout.is_none(),
-            "no external role control"
-        );
+        assert!(spd.role_drain_timeout.is_none(), "no external role control");
 
         let mut roles = with_kv.clone();
         roles.push("--symmetric-pd-external-role-control");
         let c = into_config_owned(with_model(&roles)).unwrap();
-        let flex = c.model.symmetric_pd.as_ref().unwrap();
+        let spd = c.model.symmetric_pd.as_ref().unwrap();
         assert_eq!(
-            flex.role_drain_timeout,
+            spd.role_drain_timeout,
             Some(std::time::Duration::from_secs(5))
         );
 
@@ -2370,16 +2339,16 @@ mod tests {
             "d1",
         ]);
         let c = into_config_owned(with_model(&given)).unwrap();
-        let flex = c.model.symmetric_pd.as_ref().unwrap();
-        assert_eq!(format!("{:?}", flex.placement.p_select), "CacheFirst");
+        let spd = c.model.symmetric_pd.as_ref().unwrap();
+        assert_eq!(format!("{:?}", spd.placement.p_select), "CacheFirst");
         assert_eq!(c.proxy.late_decode.rule, Some(LateDecodeRule::D1));
 
         let mut none = with_kv.clone();
         let at = none.iter().position(|a| *a == "paper").unwrap();
         none[at] = "none";
         let c = into_config_owned(with_model(&none)).unwrap();
-        let flex = c.model.symmetric_pd.as_ref().unwrap();
-        assert!(!flex.kv_session_retention && !flex.pull_hint);
+        let spd = c.model.symmetric_pd.as_ref().unwrap();
+        assert!(!spd.kv_session_retention && !spd.pull_hint);
         assert_eq!(c.proxy.late_decode.mode, LateDecodeMode::Off);
     }
 
@@ -2535,25 +2504,6 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("--pd-decode-tokens-*"), "{err}");
-    }
-
-    #[test]
-    fn earlier_co_schedule_flags_name_their_replacement() {
-        assert_eq!(
-            renamed_flag("--co-schedule-trade-copy-lambda=4.6").unwrap(),
-            "now --trade-copy-lambda"
-        );
-        assert_eq!(
-            renamed_flag("--co-schedule-cost-trace").unwrap(),
-            "now --trade-cost-trace"
-        );
-        assert!(renamed_flag("--co-schedule-trade")
-            .unwrap()
-            .contains("no longer needed"));
-        assert!(renamed_flag("--co-schedule-tick-ms")
-            .unwrap()
-            .contains("removed"));
-        assert_eq!(renamed_flag("--trade-copy-lambda"), None);
     }
 
     #[test]
@@ -3186,13 +3136,13 @@ mod tests {
         ];
         let cfg = into_config_owned(with_model(&base)).unwrap();
         assert!(cfg.model.gateway_cache_aware.is_none());
-        let flex = cfg.model.symmetric_pd.unwrap();
+        let spd = cfg.model.symmetric_pd.unwrap();
         assert_eq!(
-            flex.gateway_cache_aware,
+            spd.gateway_cache_aware,
             Some(GatewayCacheAwareConfig::default())
         );
         assert_eq!(
-            flex.placement.p_select,
+            spd.placement.p_select,
             crate::scheduler::placement::PSelect::CacheFirst
         );
 
@@ -3811,16 +3761,16 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(c.model.policy, PolicyKind::SymmetricPd);
-        let flex = c.model.symmetric_pd.as_ref().expect("symmetric_pd config");
-        assert!(flex.placement.force_split);
-        assert_eq!(flex.max_queue_wait_ms, 1500);
-        assert_eq!(flex.placement.weights.w_dload, 0.0);
-        assert_eq!(flex.placement.weights.w_hit, 1.0);
-        assert_eq!(flex.workers.len(), 2);
-        assert_eq!(flex.workers[0].bootstrap_port, Some(8998));
-        assert_eq!(flex.workers[0].prefill_weight, 1.0);
-        assert_eq!(flex.workers[0].decode_weight, 0.0);
-        assert!(flex
+        let spd = c.model.symmetric_pd.as_ref().expect("symmetric_pd config");
+        assert!(spd.placement.force_split);
+        assert_eq!(spd.max_queue_wait_ms, 1500);
+        assert_eq!(spd.placement.weights.w_dload, 0.0);
+        assert_eq!(spd.placement.weights.w_hit, 1.0);
+        assert_eq!(spd.workers.len(), 2);
+        assert_eq!(spd.workers[0].bootstrap_port, Some(8998));
+        assert_eq!(spd.workers[0].prefill_weight, 1.0);
+        assert_eq!(spd.workers[0].decode_weight, 0.0);
+        assert!(spd
             .worker_spec_for("http://10.0.0.5:30000")
             .is_some_and(|w| w.decode_weight == 1.0));
         // No --worker-urls: the symmetric P/D workers ARE the static fleet.
@@ -3893,12 +3843,12 @@ mod tests {
         ]);
         let config = into_config_owned(with_model(&args)).unwrap();
         assert!(config.model.kv_hint.is_none());
-        let flex = config.model.symmetric_pd.unwrap();
+        let spd = config.model.symmetric_pd.unwrap();
         assert_eq!(
-            flex.import_cache_policy,
+            spd.import_cache_policy,
             SymmetricPdImportCachePolicy::Retain
         );
-        let returns = flex.decode_host_return.unwrap();
+        let returns = spd.decode_host_return.unwrap();
         assert_eq!(returns.servicers["http://p:30000"], "p:18100");
         assert_eq!(returns.servicers["http://d:30000"], "d:18100");
         assert_eq!((returns.timeout_ms, returns.max_tokens), (10_000, 65_536));
@@ -4198,10 +4148,10 @@ mod tests {
         assert!(into_config_owned(with_model(&args)).is_err());
         args.push("--symmetric-pd-external-role-control");
         let c = into_config_owned(with_model(&args)).unwrap();
-        let flex = c.model.symmetric_pd.as_ref().unwrap();
-        assert!(flex.external_role_control);
+        let spd = c.model.symmetric_pd.as_ref().unwrap();
+        assert!(spd.external_role_control);
         assert_eq!(
-            flex.role_drain_timeout,
+            spd.role_drain_timeout,
             Some(std::time::Duration::from_secs(30))
         );
         let mut zero = base.to_vec();
@@ -4397,49 +4347,6 @@ mod tests {
     }
 
     #[test]
-    fn symmetric_pd_co_schedule_is_explicit_and_keeps_native_defaults() {
-        let base = [
-            "--policy",
-            "symmetric_pd",
-            "--symmetric-pd-worker",
-            "http://10.0.0.1:30000,8998,1,0",
-            "--symmetric-pd-worker",
-            "http://10.0.0.5:30000,8998,0,1",
-        ];
-        let mut args = base.to_vec();
-        args.extend([
-            "--symmetric-pd-p-select",
-            "co-schedule",
-            "--symmetric-pd-d-select",
-            "round-robin",
-            "--symmetric-pd-owner-threshold-tokens",
-            "8192",
-            "--symmetric-pd-detour-margin-tokens",
-            "1024",
-        ]);
-        let config = into_config_owned(with_model(&args)).unwrap();
-        let flex = config.model.symmetric_pd.unwrap();
-        assert_eq!(
-            flex.placement.p_select,
-            crate::scheduler::placement::PSelect::CoSchedule
-        );
-        assert_eq!(
-            flex.placement.d_select,
-            crate::scheduler::placement::DSelect::RoundRobin
-        );
-        assert_eq!(flex.placement.co_schedule.owner_threshold_tokens, 8192);
-        assert_eq!(flex.placement.co_schedule.detour_margin_tokens, 1024);
-        let default = into_config_owned(with_model(&base)).unwrap();
-        assert_eq!(
-            default.model.symmetric_pd.unwrap().placement.p_select,
-            crate::scheduler::placement::PSelect::CacheFirst
-        );
-        let mut invalid = base.to_vec();
-        invalid.extend(["--symmetric-pd-owner-threshold-tokens", "8192"]);
-        assert!(into_config_owned(with_model(&invalid)).is_err());
-    }
-
-    #[test]
     fn symmetric_pd_selection_flags_map_into_placement_config() {
         use crate::scheduler::placement::{DSelect, PSelect};
         let c = into_config_owned(with_model(&[
@@ -4451,12 +4358,12 @@ mod tests {
             "http://10.0.0.5:30000,8998,0,1",
         ]))
         .unwrap();
-        let flex = c.model.symmetric_pd.as_ref().unwrap();
-        assert_eq!(flex.placement.p_select, PSelect::CacheFirst, "default");
-        assert_eq!(flex.placement.d_select, DSelect::Score, "default");
-        assert_eq!(flex.placement.cache_threshold, 0.5);
-        assert_eq!(flex.placement.balance_abs_reqs, 32);
-        assert_eq!(flex.placement.balance_rel, 1.1);
+        let spd = c.model.symmetric_pd.as_ref().unwrap();
+        assert_eq!(spd.placement.p_select, PSelect::CacheFirst, "default");
+        assert_eq!(spd.placement.d_select, DSelect::Score, "default");
+        assert_eq!(spd.placement.cache_threshold, 0.5);
+        assert_eq!(spd.placement.balance_abs_reqs, 32);
+        assert_eq!(spd.placement.balance_rel, 1.1);
 
         let c = into_config_owned(with_model(&[
             "--policy",
@@ -4477,12 +4384,12 @@ mod tests {
             "1.5",
         ]))
         .unwrap();
-        let flex = c.model.symmetric_pd.as_ref().unwrap();
-        assert_eq!(flex.placement.p_select, PSelect::Score);
-        assert_eq!(flex.placement.d_select, DSelect::RoundRobin);
-        assert_eq!(flex.placement.cache_threshold, 0.25);
-        assert_eq!(flex.placement.balance_abs_reqs, 8);
-        assert_eq!(flex.placement.balance_rel, 1.5);
+        let spd = c.model.symmetric_pd.as_ref().unwrap();
+        assert_eq!(spd.placement.p_select, PSelect::Score);
+        assert_eq!(spd.placement.d_select, DSelect::RoundRobin);
+        assert_eq!(spd.placement.cache_threshold, 0.25);
+        assert_eq!(spd.placement.balance_abs_reqs, 8);
+        assert_eq!(spd.placement.balance_rel, 1.5);
 
         let c = into_config_owned(with_model(&[
             "--policy",
@@ -4495,8 +4402,8 @@ mod tests {
             "cache-first",
         ]))
         .unwrap();
-        let flex = c.model.symmetric_pd.as_ref().unwrap();
-        assert_eq!(flex.placement.d_select, DSelect::CacheFirst);
+        let spd = c.model.symmetric_pd.as_ref().unwrap();
+        assert_eq!(spd.placement.d_select, DSelect::CacheFirst);
 
         for bad in [
             ["--symmetric-pd-cache-threshold", "1.5"],
@@ -4630,9 +4537,9 @@ mod tests {
             path.to_str().unwrap(),
         ]))
         .unwrap();
-        let flex = c.model.symmetric_pd.unwrap();
-        assert_eq!(flex.workers.len(), 1);
-        let w = &flex.workers[0];
+        let spd = c.model.symmetric_pd.unwrap();
+        assert_eq!(spd.workers.len(), 1);
+        let w = &spd.workers[0];
         assert_eq!(w.prefill_weight, 0.2);
         assert_eq!(w.decode_weight, 1.0);
         assert!(w.capabilities().prefill && !w.capabilities().decode);
@@ -4667,10 +4574,10 @@ mod tests {
             vec!["--symmetric-pd-force-split"],
             vec!["--symmetric-pd-p-select", "cost-function"],
             vec!["--symmetric-pd-pull-hint"],
-            vec!["--trade-copy-lambda", "auto"],
-            vec!["--trade-copy-lambda-fallback", "18.4"],
-            vec!["--trade-load-poll-ms", "100"],
-            vec!["--trade-cost-trace", "/tmp/flex-cost.jsonl"],
+            vec!["--copy-price", "auto"],
+            vec!["--copy-price-fallback", "18.4"],
+            vec!["--prefill-poll-ms", "100"],
+            vec!["--placement-trace", "/tmp/placement-trace.jsonl"],
             vec!["--kv-indexer-url", "http://127.0.0.1:9100"],
             vec!["--kv-worker-map", COST_FUNCTION_MAP],
             vec!["--kv-pull-hint-min-tokens", "256"],
@@ -4710,222 +4617,200 @@ mod tests {
     fn symmetric_pd_cost_function_accepts_the_startup_argv() {
         use crate::config::{LateDecodeMode, LateDecodeRule};
         use crate::scheduler::placement::{DSelect, PSelect};
-        use crate::scheduler::trade::{TradeAutoQ, TradeLambdaMode, TradeRateMode};
+        use crate::scheduler::placement_cost::{CopyPriceMode, PrefillRateMode};
         let cfg = cost_function_config(&[], &[]).unwrap();
         let kv = cfg.model.kv_hint.as_ref().unwrap();
         assert_eq!((kv.min_tokens, kv.min_incremental_tokens), (256, 512));
         assert_eq!(kv.worker_map.len(), 3);
-        let flex = cfg.model.symmetric_pd.as_ref().unwrap();
-        assert_eq!(flex.workers.len(), 9);
-        assert_eq!(flex.placement.p_select, PSelect::CostFunction);
-        assert_eq!(flex.placement.d_select, DSelect::RoundRobin);
-        assert!(flex.placement.force_split && flex.pull_hint && flex.kv_session_retention);
-        let cost = flex.cost_function.as_ref().unwrap();
+        let spd = cfg.model.symmetric_pd.as_ref().unwrap();
+        assert_eq!(spd.workers.len(), 9);
+        assert_eq!(spd.placement.p_select, PSelect::CostFunction);
+        assert_eq!(spd.placement.d_select, DSelect::RoundRobin);
+        assert!(spd.placement.force_split && spd.pull_hint && spd.kv_session_retention);
+        let cost = spd.cost_function.as_ref().unwrap();
         assert_eq!(cost.load_poll_ms, 100);
         assert_eq!(cost.unknown_expire_secs, 60, "the default unknown expiry");
-        assert!(
-            !cost.loads_host_room,
-            "the host_room poll is off by default"
-        );
         assert_eq!(
-            cost.cost_trace.as_deref().and_then(|p| p.to_str()),
-            Some("/tmp/flex-cost.jsonl")
+            cost.placement_trace.as_deref().and_then(|p| p.to_str()),
+            Some("/tmp/placement-trace.jsonl")
         );
-        let trade = cost.trade;
+        let cost_params = cost.cost_params;
         assert_eq!(
-            trade.copy_lambda_mode,
-            TradeLambdaMode::Auto {
-                q: TradeAutoQ::Sat,
-                mu: 1.0,
+            cost_params.copy_price_mode,
+            CopyPriceMode::Auto {
                 min: 4.6,
                 max: 1000.0,
             }
         );
-        assert_eq!(trade.copy_lambda, 18.4);
+        assert_eq!(cost_params.copy_price, 18.4);
         assert_eq!(
-            (trade.rate_mode, trade.rate_tokens_per_s),
-            (TradeRateMode::Fixed, 13_500.0)
+            (
+                cost_params.prefill_rate_mode,
+                cost_params.prefill_rate_tokens_per_s
+            ),
+            (PrefillRateMode::Fixed, 13_500.0)
         );
-        assert!(trade.is_auto() && !trade.exclude_unlaunched);
+        assert!(cost_params.is_auto());
         let late = &cfg.proxy.late_decode;
         assert_eq!(late.mode, LateDecodeMode::Choose);
         assert_eq!(late.rule, Some(LateDecodeRule::FitReq));
         assert!(late.fit_native && late.native_state_poll && late.packed_prompt);
     }
 
-    /// `--trade-wait e3` and `--symmetric-pd-gwq-room predicted` on
-    /// the cost function: the E3 forecast state reaches the symmetric_pd config
-    /// (decisions, or the queue drain with the ledger wait), and each missing
-    /// piece is refused.
+    /// `--prefill-wait forecast` and `--global-queue-room forecast` on the
+    /// cost function. The paper preset turns both on with the built-in error
+    /// table; the paper's runs pin `--prefill-wait tokens
+    /// --global-queue=false`; each flag that needs the forecast is refused
+    /// without it.
     #[test]
-    fn symmetric_pd_cost_function_e3_and_gwq_room() {
+    fn symmetric_pd_cost_function_forecast_and_queue_room() {
         use crate::global_queue::GlobalQueueRoom;
-        use crate::scheduler::trade::TradeWait;
-        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/e3");
+        use crate::scheduler::placement_cost::PrefillWait;
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/forecast");
         let table = format!("{fixtures}/bound-params.json");
         let cost = |add: &[&str]| {
             cost_function_config(&[], add)
                 .map(|c| c.model.symmetric_pd.unwrap().cost_function.unwrap())
         };
-        // Off by default: no E3 state, the token rule.
-        let off = cost(&["--symmetric-pd-gwq-auto"]).unwrap();
-        assert!(off.trade_e3.is_none());
-        assert_eq!(off.gwq_auto.unwrap().room, GlobalQueueRoom::Tokens);
-        // wait e3 with the gate at m = 0 and the state push.
-        let e3 = cost(&[
-            "--trade-wait",
-            "e3",
-            "--trade-e3-bound-table",
-            &table,
-            "--trade-gate-m",
-            "0",
-            "--trade-e3-push-port",
-            "26648",
-        ])
-        .unwrap();
-        assert_eq!(e3.trade.wait, TradeWait::E3);
-        assert_eq!((e3.trade.gate_m, e3.trade.gate_gmin_s), (0.0, 0.0));
-        let state = e3.trade_e3.as_ref().unwrap();
-        assert_eq!(state.0.push.as_ref().map(|p| p.port), Some(26648));
-        assert_eq!(state.0.bound_sha256.len(), 64);
-        assert!(e3.gwq_auto.is_none());
-        // The same file parsed twice compares equal (the config is PartialEq).
+        let paper = |add: &[&str]| {
+            let mut args = vec!["--symmetric-pd-preset", "paper"];
+            args.extend(add);
+            cost(&args)
+        };
+        let with_pins = |add: &[&str]| {
+            let mut args = vec!["--prefill-wait", "tokens", "--global-queue=false"];
+            args.extend(add);
+            paper(&args)
+        };
+        // The paper preset: forecast wait, the global queue with the
+        // forecast room, the next-pass lag, m = 0, a 5 s state age and the
+        // built-in error table.
+        let preset = paper(&[]).unwrap();
+        assert_eq!(preset.cost_params.wait, PrefillWait::Forecast);
+        assert_eq!(preset.cost_params.move_margin, 0.0);
+        assert_eq!(preset.cost_params.max_state_age_s, 5.0);
+        assert_eq!(preset.global_queue.unwrap().room, GlobalQueueRoom::Forecast);
+        let state = &preset.forecast.as_ref().unwrap().0;
+        assert!(state.next_pass_lag && state.push.is_none() && state.frozen_fit.is_none());
         assert_eq!(
-            e3.trade_e3,
-            cost(&[
-                "--trade-wait",
-                "e3",
-                "--trade-e3-bound-table",
-                &table,
-                "--trade-e3-push-port",
-                "26648",
-            ])
-            .unwrap()
-            .trade_e3
+            state.bound_path,
+            std::path::Path::new(crate::prefill_forecast::BUILTIN_ERROR_TABLE_PATH)
         );
-        // The queue drain with the ledger wait.
-        let drain = cost(&[
-            "--symmetric-pd-gwq-auto",
-            "--symmetric-pd-gwq-room",
-            "predicted",
-            "--trade-e3-bound-table",
-            &table,
-        ])
-        .unwrap();
-        assert_eq!(drain.trade.wait, TradeWait::Ledger);
-        assert_eq!(drain.gwq_auto.unwrap().room, GlobalQueueRoom::Predicted);
-        assert!(drain.trade_e3.is_some());
-        // Both: wait e3 and the predicted room.
-        let both = cost(&[
-            "--trade-wait",
-            "e3",
-            "--symmetric-pd-gwq-auto",
-            "--symmetric-pd-gwq-room",
-            "predicted",
-            "--trade-e3-bound-table",
-            &table,
-        ])
-        .unwrap();
-        assert_eq!(both.trade.wait, TradeWait::E3);
-        assert_eq!(both.gwq_auto.unwrap().room, GlobalQueueRoom::Predicted);
-        assert!(!both.trade_e3.as_ref().unwrap().0.next_pass_lag);
-        // The Kimi argv: wait e3, gate m 0, push, predicted room, next-pass lag.
-        let kimi_args = [
-            "--trade-wait",
-            "e3",
-            "--trade-e3-bound-table",
-            table.as_str(),
-            "--trade-gate-m",
-            "0",
-            "--trade-e3-push-port",
+        // The built-in table is the fixture: the same state as the file.
+        assert_eq!(
+            preset.forecast,
+            paper(&["--forecast-error-table", &table]).unwrap().forecast
+        );
+        // The paper's runs: the token-count wait, no queue, no forecast state.
+        let pinned = with_pins(&[]).unwrap();
+        assert_eq!(pinned.cost_params.wait, PrefillWait::Tokens);
+        assert_eq!(pinned.cost_params.move_margin, 1.0);
+        assert!(pinned.global_queue.is_none() && pinned.forecast.is_none());
+        // `--symmetric-pd-preset none`: the same as the pins.
+        let none = cost(&[]).unwrap();
+        assert_eq!(none.cost_params, pinned.cost_params);
+        assert!(none.global_queue.is_none() && none.forecast.is_none());
+        // Given flags win over the preset.
+        let given = paper(&[
+            "--move-margin",
+            "1",
+            "--max-state-age-ms",
+            "1500",
+            "--forecast-next-pass-lag=false",
+            "--forecast-push-port",
             "26648",
-            "--symmetric-pd-gwq-auto",
-            "--symmetric-pd-gwq-room",
-            "predicted",
-        ];
-        let kimi_off = cost(&kimi_args).unwrap();
-        let mut with_lag = kimi_args.to_vec();
-        with_lag.push("--trade-e3-next-pass-lag");
-        let kimi = cost(&with_lag).unwrap();
-        assert!(kimi.trade_e3.as_ref().unwrap().0.next_pass_lag);
-        assert!(!kimi_off.trade_e3.as_ref().unwrap().0.next_pass_lag);
-        assert_ne!(kimi.trade_e3, kimi_off.trade_e3, "switch in the state");
-        // The frozen fit: the Kimi fixture constants, with their sha256.
-        let frozen = format!("{fixtures}/kimi-frozen-fit.json");
-        let mut with_frozen = with_lag.clone();
-        with_frozen.extend(["--trade-e3-frozen-fit", frozen.as_str()]);
-        let kimi_frozen = cost(&with_frozen).unwrap();
-        let state = kimi_frozen.trade_e3.as_ref().unwrap();
-        let fit = state.0.frozen_fit.as_ref().unwrap();
-        assert_eq!(fit.sha256.len(), 64);
-        assert!(state.0.next_pass_lag);
-        assert!(kimi.trade_e3.as_ref().unwrap().0.frozen_fit.is_none());
-        assert_ne!(kimi_frozen.trade_e3, kimi.trade_e3, "in the state");
-        // A file that is not a frozen fit (the bound table) is refused.
-        let mut bad = with_lag.clone();
-        bad.extend(["--trade-e3-frozen-fit", table.as_str()]);
-        let err = cost(&bad).unwrap_err().to_string();
-        assert!(err.contains("--trade-e3-frozen-fit"), "{err}");
+            "--global-queue-room",
+            "tokens",
+        ])
+        .unwrap();
+        assert_eq!(given.cost_params.move_margin, 1.0);
+        assert_eq!(given.cost_params.max_state_age_s, 1.5);
+        assert_eq!(given.global_queue.unwrap().room, GlobalQueueRoom::Tokens);
+        let state = &given.forecast.as_ref().unwrap().0;
+        assert!(!state.next_pass_lag);
+        assert_eq!(state.push.as_ref().map(|p| p.port), Some(26648));
+        // The queue drain with the token-count wait.
+        let drain = paper(&["--prefill-wait", "tokens"]).unwrap();
+        assert_eq!(drain.cost_params.wait, PrefillWait::Tokens);
+        assert_eq!(drain.global_queue.unwrap().room, GlobalQueueRoom::Forecast);
+        assert!(drain.forecast.as_ref().unwrap().0.next_pass_lag);
+        // Without the preset each piece is given.
+        let explicit = cost(&[
+            "--prefill-wait",
+            "forecast",
+            "--global-queue",
+            "--global-queue-room",
+            "forecast",
+        ])
+        .unwrap();
+        assert_eq!(explicit.cost_params.wait, PrefillWait::Forecast);
+        assert_eq!(explicit.cost_params.move_margin, 1.0);
+        assert_eq!(
+            explicit.global_queue.unwrap().room,
+            GlobalQueueRoom::Forecast
+        );
+        assert!(!explicit.forecast.as_ref().unwrap().0.next_pass_lag);
+        // The Kimi argv: a fit file on top of the preset.
+        let fit = format!("{fixtures}/kimi-k26-fit.json");
+        let kimi = paper(&["--forecast-fit", fit.as_str()]).unwrap();
+        let state = &kimi.forecast.as_ref().unwrap().0;
+        assert_eq!(state.frozen_fit.as_ref().unwrap().sha256.len(), 64);
+        assert_ne!(kimi.forecast, preset.forecast, "the fit is in the state");
+        // A file that is not a fit (the error table) is refused.
+        let err = paper(&["--forecast-fit", table.as_str()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--forecast-fit"), "{err}");
         let refused = |add: &[&str], want: &str| {
-            let err = cost(add).unwrap_err().to_string();
+            let err = with_pins(add).unwrap_err().to_string();
             assert!(err.contains(want), "{add:?}: {err}");
         };
         refused(
-            &[
-                "--symmetric-pd-gwq-auto",
-                "--symmetric-pd-gwq-room",
-                "predicted",
-            ],
-            "--symmetric-pd-gwq-room predicted requires --trade-e3-bound-table",
+            &["--global-queue-room", "forecast"],
+            "--global-queue-room requires --global-queue",
         );
         refused(
-            &["--symmetric-pd-gwq-room", "predicted"],
-            "--symmetric-pd-gwq-room requires --symmetric-pd-gwq-auto",
+            &["--move-margin", "0"],
+            "--move-margin needs --prefill-wait forecast",
         );
         refused(
-            &["--trade-wait", "e3"],
-            "--trade-wait e3 requires --trade-e3-bound-table",
+            &["--max-state-age-ms", "5000"],
+            "--max-state-age-ms needs --prefill-wait forecast",
         );
-        refused(
-            &[
-                "--symmetric-pd-gwq-auto",
-                "--symmetric-pd-gwq-room",
-                "predicted",
-                "--trade-e3-bound-table",
-                &table,
-                "--trade-gate-m",
-                "0",
-            ],
-            "--trade-gate-m needs --trade-wait e3",
-        );
-        refused(&["--trade-e3-bound-table", &table], "need --trade-wait e3");
-        refused(&["--trade-e3-next-pass-lag"], "need --trade-wait e3");
-        refused(&["--trade-e3-frozen-fit", &frozen], "need --trade-wait e3");
+        let needs = "need --prefill-wait forecast or --global-queue-room forecast";
+        refused(&["--forecast-error-table", &table], needs);
+        refused(&["--forecast-next-pass-lag"], needs);
+        refused(&["--forecast-fit", &fit], needs);
         let err = into_config_owned(with_model(&[
             "--policy",
             "symmetric_pd",
             "--symmetric-pd-worker",
             "http://10.0.0.1:18080,18998,1,0",
-            "--symmetric-pd-gwq-room",
+            "--global-queue-room",
             "tokens",
         ]))
         .unwrap_err()
         .to_string();
         assert!(
-            err.contains("--symmetric-pd-gwq-room requires --symmetric-pd-p-select cost-function"),
+            err.contains("--global-queue-room requires --symmetric-pd-p-select cost-function"),
             "{err}"
         );
     }
 
     #[test]
     fn symmetric_pd_cost_function_fixed_lambda() {
-        use crate::scheduler::trade::TradeLambdaMode;
-        let cfg = cost_function_config(&["--trade-copy-lambda"], &["--trade-copy-lambda", "18.4"])
-            .unwrap();
-        let trade = cfg.model.symmetric_pd.unwrap().cost_function.unwrap().trade;
-        assert_eq!(trade.copy_lambda_mode, TradeLambdaMode::Fixed);
-        assert_eq!(trade.copy_lambda, 18.4);
-        assert!(!trade.is_auto());
+        use crate::scheduler::placement_cost::CopyPriceMode;
+        let cfg = cost_function_config(&["--copy-price"], &["--copy-price", "18.4"]).unwrap();
+        let cost_params = cfg
+            .model
+            .symmetric_pd
+            .unwrap()
+            .cost_function
+            .unwrap()
+            .cost_params;
+        assert_eq!(cost_params.copy_price_mode, CopyPriceMode::Fixed);
+        assert_eq!(cost_params.copy_price, 18.4);
+        assert!(!cost_params.is_auto());
     }
 
     /// `--symmetric-pd-unknown-expire-secs` sets the unknown expiry of the cost
@@ -5072,41 +4957,41 @@ mod tests {
     fn symmetric_pd_cost_function_accepts_external_role_control() {
         for drop in [&["--pd-native-decode-state", "--pd-late-decode"][..], &[]] {
             let c = cost_function_config(drop, &["--symmetric-pd-external-role-control"]).unwrap();
-            let flex = c.model.symmetric_pd.as_ref().unwrap();
-            assert!(flex.external_role_control);
-            assert!(flex.cost_function.is_some());
+            let spd = c.model.symmetric_pd.as_ref().unwrap();
+            assert!(spd.external_role_control);
+            assert!(spd.cost_function.is_some());
             assert_eq!(
-                flex.role_drain_timeout,
+                spd.role_drain_timeout,
                 Some(std::time::Duration::from_secs(5))
             );
             assert_eq!(c.proxy.late_decode.choose(), drop.is_empty());
         }
     }
 
-    /// GWQ-AUTO on the dynamic argv: `--symmetric-pd-gwq-auto` and
+    /// global queue on the dynamic argv: `--global-queue` and
     /// `--symmetric-pd-trace-session-moves` are accepted with
     /// `--symmetric-pd-external-role-control`, with and without the router late-D
     /// choice (the queue steps over the current P-role pool).
     #[test]
-    fn symmetric_pd_gwq_auto_accepts_external_role_control() {
+    fn symmetric_pd_global_queue_accepts_external_role_control() {
         for drop in [&["--pd-native-decode-state", "--pd-late-decode"][..], &[]] {
             let c = cost_function_config(
                 drop,
                 &[
                     "--symmetric-pd-external-role-control",
-                    "--symmetric-pd-gwq-auto",
+                    "--global-queue",
                     "--symmetric-pd-trace-session-moves",
                 ],
             )
             .unwrap();
-            let flex = c.model.symmetric_pd.as_ref().unwrap();
-            assert!(flex.external_role_control);
-            let cost = flex.cost_function.as_ref().unwrap();
+            let spd = c.model.symmetric_pd.as_ref().unwrap();
+            assert!(spd.external_role_control);
+            let cost = spd.cost_function.as_ref().unwrap();
             assert_eq!(
-                cost.gwq_auto,
-                Some(crate::config::SymmetricPdGwqAutoConfig {
+                cost.global_queue,
+                Some(crate::config::GlobalQueueConfig {
                     max_wait_ms: 300_000,
-                    ..Default::default()
+                    room: crate::global_queue::GlobalQueueRoom::Tokens,
                 })
             );
             assert!(cost.trace_session_moves);
@@ -5114,37 +4999,33 @@ mod tests {
         }
     }
 
-    /// `--symmetric-pd-gwq-auto` and `--symmetric-pd-trace-session-moves` (default
-    /// off): only with `--symmetric-pd-p-select cost-function`; the queue has the
-    /// 300-s guard; the co_schedule queue flag is refused with the cost
-    /// function (its queue is --symmetric-pd-gwq-auto).
+    /// `--global-queue` (on with the paper preset) and
+    /// `--symmetric-pd-trace-session-moves` (default off): only with
+    /// `--symmetric-pd-p-select cost-function`; the queue has the 300-s guard.
     #[test]
-    fn symmetric_pd_gwq_auto_flags() {
+    fn symmetric_pd_global_queue_flags() {
         let cost = |cfg: Config| cfg.model.symmetric_pd.unwrap().cost_function.unwrap();
         let off = cost(cost_function_config(&[], &[]).unwrap());
-        assert!(off.gwq_auto.is_none() && !off.trace_session_moves);
+        assert!(off.global_queue.is_none() && !off.trace_session_moves);
         let on = cost(
             cost_function_config(
                 &[],
-                &[
-                    "--symmetric-pd-gwq-auto",
-                    "--symmetric-pd-trace-session-moves",
-                ],
+                &["--global-queue", "--symmetric-pd-trace-session-moves"],
             )
             .unwrap(),
         );
         assert_eq!(
-            on.gwq_auto,
-            Some(crate::config::SymmetricPdGwqAutoConfig {
+            on.global_queue,
+            Some(crate::config::GlobalQueueConfig {
                 max_wait_ms: 300_000,
-                ..Default::default()
+                room: crate::global_queue::GlobalQueueRoom::Tokens,
             })
         );
         assert!(on.trace_session_moves);
         for (flag, want) in [
             (
-                "--symmetric-pd-gwq-auto",
-                "--symmetric-pd-gwq-auto requires --symmetric-pd-p-select cost-function",
+                "--global-queue",
+                "--global-queue requires --symmetric-pd-p-select cost-function",
             ),
             (
                 "--symmetric-pd-trace-session-moves",
@@ -5183,14 +5064,13 @@ mod tests {
                 "N1",
                 &["--symmetric-pd-p-select"],
                 &[],
-                "the --trade-* flags require --policy symmetric_pd with \
-                 --symmetric-pd-p-select cost-function",
+                "require --policy symmetric_pd with --symmetric-pd-p-select cost-function",
             ),
             (
                 "N5",
-                &["--trade-load-poll-ms"],
-                &["--trade-load-poll-ms", "0"],
-                "--trade-load-poll-ms must be greater than 0",
+                &["--prefill-poll-ms"],
+                &["--prefill-poll-ms", "0"],
+                "--prefill-poll-ms must be greater than 0",
             ),
             (
                 "N6",
@@ -5202,7 +5082,7 @@ mod tests {
                 "N7",
                 &["--symmetric-pd-pull-hint"],
                 &[],
-                "--symmetric-pd-p-select cost-function requires --symmetric-pd-pull-hint: the TRADE pull \
+                "--symmetric-pd-p-select cost-function requires --symmetric-pd-pull-hint: the cost-function pull \
                  rides on the P-leg as the pull hint",
             ),
             (
@@ -5282,12 +5162,6 @@ mod tests {
                  --symmetric-pd-kv-session-retention",
             ),
             (
-                "E11",
-                &[],
-                &["--symmetric-pd-owner-threshold-tokens", "1"],
-                "require --symmetric-pd-p-select co-schedule",
-            ),
-            (
                 "N15",
                 &["--symmetric-pd-p-select"],
                 &["--symmetric-pd-unknown-expire-secs", "60"],
@@ -5300,15 +5174,15 @@ mod tests {
         }
     }
 
-    /// The co-schedule gate keeps its message for the other policies.
+    /// The cost-function flags are refused under the other policies.
     #[test]
-    fn trade_flags_need_the_cost_function() {
+    fn cost_flags_need_the_cost_function() {
         let err = into_config_owned(with_model(&[
             "--worker-urls",
             "http://x:30000",
             "--policy",
             "round_robin",
-            "--trade-load-poll-ms",
+            "--prefill-poll-ms",
             "100",
         ]))
         .unwrap_err()

@@ -22,8 +22,9 @@ The Rust router (`sgl-router`). [`README.md`](README.md) has the build;
 - **Role control with KV session retention needs the prepared path.** With
   `--symmetric-pd-external-role-control` and retention on, a plain `/v1/completions` request is
   refused: the router needs the frontend's lifecycle callbacks to count work per session.
-- **Placement constants** are named in `src/scheduler/trade.rs`
-  (`DEFAULT_TRADE_COPY_LAMBDA`); [`docs/paper.md`](../../../docs/paper.md) points at them. Change
-  the doc with the constant.
+- **Placement constants** are named in `src/scheduler/placement_cost.rs`
+  (`DEFAULT_COPY_PRICE`); [`docs/paper.md`](../../../docs/paper.md) points at them. Change
+  the doc with the constant. The built-in forecast error table is
+  `data/forecast-error-table.json`, the same file as `tests/fixtures/forecast/bound-params.json`.
 - **A flag that only makes sense with `--policy symmetric_pd`** is listed in the check that
   rejects it under other policies (search `symmetric_pd_import_cache_policy.is_some()`).

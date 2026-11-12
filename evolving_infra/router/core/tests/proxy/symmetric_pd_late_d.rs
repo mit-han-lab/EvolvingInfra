@@ -14,7 +14,7 @@
 //! * `--symmetric-pd-p-select gateway-cache-aware`: the gateway rule picks
 //!   P, a repeated prefix follows its tree;
 //! * `--symmetric-pd-p-select cost-function` with late D and session
-//!   retention: the TRADE cost function picks P and its pull; the P-leg
+//!   retention: the placement cost function picks P and its pull; the P-leg
 //!   alone carries the pull hint and the session tag.
 //!
 //! The mock owner holds its P-leg until every candidate leg reached its
@@ -40,7 +40,7 @@ use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
 use sgl_router::kv_hint::{KvHintConfig, KvWorkerMapEntry};
 use sgl_router::policies::factory::build_registry_with_defaults;
 use sgl_router::proxy::Proxy;
-use sgl_router::scheduler::trade::TradeParams;
+use sgl_router::scheduler::placement_cost::PlacementCostParams;
 use sgl_router::scheduler::{DSelect, PSelect, RoleWeight};
 use sgl_router::server::app::build_router;
 use sgl_router::server::app_context::AppContext;
@@ -421,7 +421,7 @@ struct Fixture {
     /// The `/v1/loads` capacity each decode reports, by URL.
     d_capacity: HashMap<String, Option<(u64, u64)>>,
     /// `Opts::cost_function`: the indexer reply (ids 1, 2, ... are the
-    /// prefill-role workers in URL order), the cost trace and each
+    /// prefill-role workers in URL order), the placement trace and each
     /// prefill-role engine's hold state, by URL.
     indexer: Option<Arc<Mutex<Value>>>,
     trace: Option<std::path::PathBuf>,
@@ -437,7 +437,7 @@ struct Opts {
     d_capacity: Vec<Option<(u64, u64)>>,
     kv_sessions: bool,
     gateway_ca: bool,
-    /// `--symmetric-pd-p-select cost-function` (TRADE, lambda 0) with the pull
+    /// `--symmetric-pd-p-select cost-function` (cost-function, lambda 0) with the pull
     /// hint, an indexer mock and the prefill progress of the P-role engines.
     cost_function: bool,
     /// circuit breaker `(threshold, cool-down ms)` of every worker.
@@ -527,7 +527,7 @@ async fn fixture(opts: Opts) -> Fixture {
     }
     p_urls.sort();
     d_urls.sort();
-    let mut flex = SymmetricPdConfig {
+    let mut spd = SymmetricPdConfig {
         max_queue_wait_ms: 0,
         kv_session_retention: opts.kv_sessions,
         gateway_cache_aware: opts.gateway_ca.then(|| GatewayCacheAwareConfig {
@@ -536,28 +536,26 @@ async fn fixture(opts: Opts) -> Fixture {
         }),
         ..SymmetricPdConfig::default()
     };
-    flex.placement.force_split = true;
-    flex.placement.d_select = DSelect::RoundRobin;
+    spd.placement.force_split = true;
+    spd.placement.d_select = DSelect::RoundRobin;
     let (kv_hint, indexer, trace, tmp) = if opts.cost_function {
         let reply = Arc::new(Mutex::new(json!({"instances": {}})));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cost.jsonl");
-        flex.pull_hint = true;
-        flex.placement.p_select = PSelect::CostFunction;
-        flex.cost_function = Some(SymmetricPdCostFunctionConfig {
-            trade: TradeParams {
-                copy_lambda: 0.0,
-                ..TradeParams::default()
+        spd.pull_hint = true;
+        spd.placement.p_select = PSelect::CostFunction;
+        spd.cost_function = Some(SymmetricPdCostFunctionConfig {
+            cost_params: PlacementCostParams {
+                copy_price: 0.0,
+                ..PlacementCostParams::default()
             },
-            cost_trace: Some(path.clone()),
+            placement_trace: Some(path.clone()),
             load_poll_ms: 10,
             unknown_expire_secs: 60,
-            loads_host_room: false,
-            gwq_auto: None,
+            global_queue: None,
             trace_session_moves: false,
-            trade_e3: None,
+            forecast: None,
             pull_from_any_holder: false,
-            trace_async: false,
         });
         let kv = KvHintConfig {
             indexer_url: switchable_indexer(Arc::clone(&reply)).await,
@@ -606,7 +604,7 @@ async fn fixture(opts: Opts) -> Fixture {
             pd_decode_policy: PdDecodePolicy::AffinityMinLoad,
             pd_decode_tokens: Some(PdDecodeTokensConfig::default()),
             pd_decision_replay: None,
-            symmetric_pd: Some(flex),
+            symmetric_pd: Some(spd),
             gateway_cache_aware: None,
         },
         discovery: DiscoveryBackend::StaticUrls(StaticUrlsDiscoveryConfig {
@@ -746,7 +744,7 @@ fn opts(late: Option<LateDecodeRule>, d_capacity: Vec<Option<(u64, u64)>>) -> Op
 /// binds the decode with the fewest allocated requests among those that fit,
 /// whatever the arrival pick.
 #[tokio::test]
-async fn flex_late_d_fit_req_native_binds_the_fewest_requests_that_fit() {
+async fn spd_late_d_fit_req_native_binds_the_fewest_requests_that_fit() {
     let f = fixture(Opts {
         fit_native: true,
         ..opts(
@@ -824,7 +822,7 @@ async fn flex_late_d_fit_req_native_binds_the_fewest_requests_that_fit() {
 /// (`kv_import`) go to the engines' chat route with the messages, and the
 /// candidate that fits with the fewest requests answers.
 #[tokio::test]
-async fn flex_late_d_serves_chat_on_the_engines_chat_route() {
+async fn spd_late_d_serves_chat_on_the_engines_chat_route() {
     let f = fixture(Opts {
         fit_native: true,
         ..opts(
@@ -876,7 +874,7 @@ async fn flex_late_d_serves_chat_on_the_engines_chat_route() {
 /// one decode gets the request. A `/v1/completions` request after it still
 /// takes the choose dispatch.
 #[tokio::test]
-async fn flex_late_d_generate_takes_the_plain_split() {
+async fn spd_late_d_generate_takes_the_plain_split() {
     let f = fixture(opts(Some(LateDecodeRule::FitReq), vec![None, None])).await;
     let res = f
         .post_to(
@@ -922,7 +920,7 @@ async fn flex_late_d_generate_takes_the_plain_split() {
 /// Without observed capacity, `fit_req` native falls back to `d1` and
 /// counts it; every request still binds exactly one decode.
 #[tokio::test]
-async fn flex_late_d_without_capacity_falls_back_to_d1() {
+async fn spd_late_d_without_capacity_falls_back_to_d1() {
     let f = fixture(Opts {
         fit_native: true,
         ..opts(Some(LateDecodeRule::FitReq), vec![None, None])
@@ -948,7 +946,7 @@ async fn flex_late_d_without_capacity_falls_back_to_d1() {
 /// rid unchanged); no candidate body does; a decode change between turns
 /// queues the old decode home for release (one decode copy per agent).
 #[tokio::test]
-async fn flex_late_d_session_tag_rides_on_the_p_leg_and_moves_the_decode_home() {
+async fn spd_late_d_session_tag_rides_on_the_p_leg_and_moves_the_decode_home() {
     let f = fixture(Opts {
         kv_sessions: true,
         ..opts(Some(LateDecodeRule::Keep), vec![None, None, None])
@@ -986,7 +984,7 @@ async fn flex_late_d_session_tag_rides_on_the_p_leg_and_moves_the_decode_home() 
 /// The plain symmetric_pd Split reads the `x-kv-session-context` alias: both legs
 /// carry the tag and the body rid is untouched; a malformed alias is 400.
 #[tokio::test]
-async fn flex_split_reads_the_kv_session_context_alias() {
+async fn spd_split_reads_the_kv_session_context_alias() {
     let f = fixture(Opts {
         kv_sessions: true,
         ..opts(None, vec![None])
@@ -1033,7 +1031,7 @@ async fn flex_split_reads_the_kv_session_context_alias() {
 /// with the same prefix goes to the same P (its tree), with or without late
 /// D; D stays the configured selection.
 #[tokio::test]
-async fn flex_gateway_cache_aware_p_select_follows_its_tree() {
+async fn spd_gateway_cache_aware_p_select_follows_its_tree() {
     for late in [None, Some(LateDecodeRule::D1)] {
         let f = fixture(Opts {
             n_p: 3,
@@ -1068,7 +1066,7 @@ async fn flex_gateway_cache_aware_p_select_follows_its_tree() {
 // --symmetric-pd-p-select cost-function with late D and session retention.
 // ---------------------------------------------------------------------------
 
-/// The cost function (TRADE, lambda 0) picks the P-leg and its pull; late D
+/// The cost function (cost-function, lambda 0) picks the P-leg and its pull; late D
 /// picks the decode. `busy` has no cached prefix: every P costs 20,000, so
 /// the tie goes to the lowest URL (P1), which holds it and reports 20,000
 /// remaining tokens (the reserved estimate: the progress row acknowledges
@@ -1076,7 +1074,7 @@ async fn flex_gateway_cache_aware_p_select_follows_its_tree() {
 /// `pull` (20,000 tokens) moves to P2 and pulls 18,000 tokens from P1
 /// (8,318 < P1's 22,000; P2 and P3 tie, the lower URL wins). The P-leg
 /// alone carries the pull hint and the session tag, the late-D winner
-/// answers, and the cost trace has the reservation, the dispatch and the
+/// answers, and the placement trace has the reservation, the dispatch and the
 /// P answer of `pull`, each with the policy label.
 #[tokio::test]
 async fn late_d_choose_with_cost_function_and_session_retention() {
@@ -1166,7 +1164,7 @@ async fn late_d_choose_with_cost_function_and_session_retention() {
     let sessions = f.ctx.symmetric_pd.as_ref().unwrap().kv_sessions().unwrap();
     assert_eq!(sessions.stats().tagged.load(Ordering::Relaxed), 1);
 
-    // 3. The cost trace of `pull`: reserve, dispatch, P answer.
+    // 3. The placement trace of `pull`: reserve, dispatch, P answer.
     assert!(
         wait_until(Duration::from_secs(5), || {
             events()
@@ -1174,7 +1172,7 @@ async fn late_d_choose_with_cost_function_and_session_retention() {
                 .any(|e| e["event"] == "finished" && e["entry"]["rid"] == "pull")
         })
         .await,
-        "the P answer of pull is not in the cost trace"
+        "the P answer of pull is not in the placement trace"
     );
     let rows = events();
     let pull: Vec<&str> = rows
@@ -1187,8 +1185,8 @@ async fn late_d_choose_with_cost_function_and_session_retention() {
         .iter()
         .find(|e| e["event"] == "reserve" && e["entry"]["rid"] == "pull")
         .unwrap();
-    assert_eq!(reserve["trade_decision"]["chosen"], f.p_urls[1]);
-    assert_eq!(reserve["trade_decision"]["pulled_tokens"], 18000);
+    assert_eq!(reserve["placement"]["chosen"], f.p_urls[1]);
+    assert_eq!(reserve["placement"]["pulled_tokens"], 18000);
     assert!(rows
         .iter()
         .all(|e| e["policy"] == "symmetric_pd_cost_function"));
@@ -1300,7 +1298,7 @@ async fn breaker_refusal_at_dispatch_retires_the_backend_reservation() {
     .await;
     let p_url = f.p_urls[0].clone();
     let p = f.ctx.registry.get(&WorkerId(p_url.clone())).unwrap();
-    let flex = Arc::clone(f.ctx.symmetric_pd.as_ref().unwrap());
+    let spd = Arc::clone(f.ctx.symmetric_pd.as_ref().unwrap());
     let mut leaked = 0u64;
     let mut rounds = 0;
     let mut refused_total = 0usize;
@@ -1337,7 +1335,7 @@ async fn breaker_refusal_at_dispatch_retires_the_backend_reservation() {
         refused_total += refused;
         // Every request has answered; let the detached P tasks end.
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let view = flex.backend_load_views()[&p_url].clone();
+        let view = spd.backend_load_views()[&p_url].clone();
         if view.active_prefill_reqs > 0 {
             leaked = view.active_prefill_reqs;
             eprintln!(
@@ -1349,7 +1347,7 @@ async fn breaker_refusal_at_dispatch_retires_the_backend_reservation() {
         }
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let view = flex.backend_load_views()[&p_url].clone();
+    let view = spd.backend_load_views()[&p_url].clone();
     eprintln!(
         "rounds={rounds} refused_total={refused_total} 2 s later: active_prefill_reqs={} \
          unknown_prefill_reqs={} late_d_pending={}",

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Session KV retention on the PD path of `--policy co_schedule`
+//! Session KV retention on the PD path of `--policy cost function`
 //! (`--kv-session-retention`).
 //!
 //! - Identity: the `x-kv-session-context` header (the same JSON as

@@ -49,7 +49,7 @@ pub async fn plan(
         .prepared_config
         .as_ref()
         .ok_or_else(|| ApiError::BadRequest("prepared inputs not configured".into()))?;
-    let flex = ctx
+    let spd = ctx
         .symmetric_pd
         .as_ref()
         .ok_or(ApiError::SymmetricPdDisabled)?;
@@ -58,8 +58,8 @@ pub async fn plan(
         .map_err(ApiError::BadRequest)?;
     // `--symmetric-pd-trace-session-moves`: the session identity of the
     // session-move trace, as the completions route passes it.
-    if flex.cost_function_traces_session_moves() {
-        input.trade_session = crate::agent_identity::trade_session_key(&headers);
+    if spd.cost_function_traces_session_moves() {
+        input.placement_session = crate::agent_identity::placement_session_key(&headers);
     }
     let rid = input.rid.as_ref().unwrap().clone();
     let identity = crate::agent_identity::from_headers(&headers)?;
@@ -71,11 +71,11 @@ pub async fn plan(
             "prepared request_id conflicts with trajectory identity".into(),
         ));
     }
-    // `--trade-wait e3`: the session key of the forecast target's
+    // `--prefill-wait forecast`: the session key of the forecast target's
     // host rule (the agent identity, else `x-smg-routing-key`), as the
     // completions route passes it.
-    if flex.cost_function_wants_e3_session() {
-        input.e3_session = crate::trade_e3::session_key(&headers, identity.as_ref());
+    if spd.cost_function_wants_forecast_session() {
+        input.forecast_session = crate::prefill_forecast::session_key(&headers, identity.as_ref());
     }
 
     let reservation = ctx
@@ -107,7 +107,7 @@ pub async fn plan(
         rid: rid.clone(),
         id: reservation.clone(),
     };
-    let decision = flex.admit(input).await?;
+    let decision = spd.admit(input).await?;
     let ledger = decision.ledger.clone();
     let (p, d) = (decision.p_worker.url.clone(), decision.d_worker.url.clone());
     // Late D choose on symmetric workers (`--pd-late-decode choose`) under
@@ -118,9 +118,9 @@ pub async fn plan(
     let late = match ctx
         .late_bind
         .as_ref()
-        .filter(|l| l.symmetric() && flex.config().external_role_control)
+        .filter(|l| l.symmetric() && spd.config().external_role_control)
     {
-        Some(late) => super::late_d::flex_pick(late, flex, &decision).inspect_err(|_| {
+        Some(late) => super::late_d::spd_pick(late, spd, &decision).inspect_err(|_| {
             ledger.retire();
         })?,
         None => None,
@@ -128,10 +128,10 @@ pub async fn plan(
     let charge_body =
         json!({"sampling_params": {"max_new_tokens": req.prepared["max_new_tokens"]}});
     let prompt_tokens = req.prepared["prompt_tokens"].as_u64().unwrap_or(0);
-    let installed = flex.with_current_role_pair(&p, &d, || {
+    let installed = spd.with_current_role_pair(&p, &d, || {
         let Some((choose, marks)) = late else {
             let tag =
-                if let (Some(sessions), Some(identity)) = (flex.kv_sessions(), identity.as_ref()) {
+                if let (Some(sessions), Some(identity)) = (spd.kv_sessions(), identity.as_ref()) {
                     Some(sessions.register(identity, &p, &d)?)
                 } else {
                     None
@@ -145,11 +145,13 @@ pub async fn plan(
         // the prefill forwards it to the admitted decode in the ADMIT frame.
         // The entry enters the table before the
         // plan leaves, with the session hook recording every ADMIT target.
-        let session = match (flex.kv_sessions(), identity.as_ref()) {
-            (Some(sessions), Some(identity)) => Some(Arc::new(super::late_d::FlexLateSession {
-                sessions: Arc::clone(sessions),
-                tag: sessions.register_late_prefill(identity, &p)?,
-            })),
+        let session = match (spd.kv_sessions(), identity.as_ref()) {
+            (Some(sessions), Some(identity)) => {
+                Some(Arc::new(super::late_d::SymmetricLateSession {
+                    sessions: Arc::clone(sessions),
+                    tag: sessions.register_late_prefill(identity, &p)?,
+                }))
+            }
             _ => None,
         };
         let tag = session.as_ref().map(|s| s.tag.clone());
@@ -174,8 +176,8 @@ pub async fn plan(
             kv_export: marks.kv_export,
             imports: marks.imports,
             reserve_decode: {
-                let flex = Arc::clone(flex);
-                Arc::new(move |w: &str| flex.reserve_decode(w))
+                let spd = Arc::clone(spd);
+                Arc::new(move |w: &str| spd.reserve_decode(w))
             },
         };
         ctx.executions
@@ -274,11 +276,11 @@ pub async fn summary(State(ctx): State<Arc<AppContext>>) -> Json<Value> {
 /// JSON `workers` map of load views, or `SymmetricPdDisabled`. Includes freshness and
 /// unknown-state information; does not trigger a new engine poll or placement.
 pub async fn backend_loads(State(ctx): State<Arc<AppContext>>) -> Result<Json<Value>, ApiError> {
-    let flex = ctx
+    let spd = ctx
         .symmetric_pd
         .as_ref()
         .ok_or(ApiError::SymmetricPdDisabled)?;
-    Ok(Json(json!({"workers": flex.backend_load_views()})))
+    Ok(Json(json!({"workers": spd.backend_load_views()})))
 }
 
 /// External controller operations are opt-in and leave native routing untouched.
@@ -335,20 +337,20 @@ pub async fn roles(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     external_credential(&ctx, &headers)?;
-    let flex = ctx
+    let spd = ctx
         .symmetric_pd
         .as_ref()
         .ok_or(ApiError::SymmetricPdDisabled)?;
-    if !flex.config().external_role_control {
+    if !spd.config().external_role_control {
         return Err(ApiError::BadRequest(
             "external role control is disabled".into(),
         ));
     }
     Ok(Json(
-        json!({"assignment": flex.role_assignments().map_err(ApiError::BadRequest)?,
+        json!({"assignment": spd.role_assignments().map_err(ApiError::BadRequest)?,
         "completed_workload": ctx.external_workload.as_ref().map(|w| w.totals()),
         "decode_population": ctx.executions.decode_population(),
-        "draining": flex.role_drains()}),
+        "draining": spd.role_drains()}),
     ))
 }
 pub async fn replace_roles(
@@ -356,17 +358,17 @@ pub async fn replace_roles(
     headers: HeaderMap,
     Json(req): Json<ReplaceRoles>,
 ) -> Result<Json<Value>, ApiError> {
-    let flex = ctx
+    let spd = ctx
         .symmetric_pd
         .as_ref()
         .ok_or(ApiError::SymmetricPdDisabled)?;
     external_credential(&ctx, &headers)?;
-    let (roles, draining) = flex
+    let (roles, draining) = spd
         .replace_role_assignments(&req.epoch, req.revision, &req.expected, &req.desired)
         .map_err(ApiError::BadRequest)?;
-    if let Some(timeout) = flex.config().role_drain_timeout {
+    if let Some(timeout) = spd.config().role_drain_timeout {
         crate::scheduler::role_drain::spawn(
-            flex,
+            spd,
             &ctx.executions,
             &ctx.proxy.client,
             draining.clone(),
@@ -409,7 +411,7 @@ mod tests {
     use crate::{
         config::SymmetricPdConfig,
         discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec},
-        scheduler::{DSelect, PSelect, PlaceHttpRequest, RoleWeight, SymmetricPdRuntime},
+        scheduler::{DSelect, PlaceHttpRequest, RoleWeight, SymmetricPdRuntime},
         workers::SymmetricPdWorkerInfo,
     };
     use axum::{
@@ -471,17 +473,16 @@ mod tests {
         let registry = Arc::clone(&ctx.registry);
         // Build outside Tokio so automatic background polling cannot affect this
         // route-only test. No engine is needed to observe a local reservation.
-        let flex = std::thread::spawn(move || {
+        let spd = std::thread::spawn(move || {
             let mut cfg = SymmetricPdConfig::default();
             cfg.placement.force_split = true;
-            cfg.placement.p_select = PSelect::CoSchedule;
             cfg.placement.d_select = DSelect::RoundRobin;
             SymmetricPdRuntime::spawn(cfg, None, registry, ModelId("stub-model".into()))
         })
         .join()
         .unwrap();
-        ctx.symmetric_pd = Some(Arc::clone(&flex));
-        let reservation = flex.account("http://p:30000", 8192);
+        ctx.symmetric_pd = Some(Arc::clone(&spd));
+        let reservation = spd.account("http://p:30000", 8192);
         reservation.mark_unknown();
         let app = crate::server::app::build_router(Arc::new(ctx));
         let probe = PlaceHttpRequest {
@@ -489,7 +490,7 @@ mod tests {
             prompt_len: Some(8),
             ..Default::default()
         };
-        let before = flex.place_http(probe.clone()).await.unwrap();
+        let before = spd.place_http(probe.clone()).await.unwrap();
         for _ in 0..4 {
             let response = app
                 .clone()
@@ -510,12 +511,12 @@ mod tests {
             assert_eq!(p["reserved_uncached_tokens"], 8192);
             assert_eq!(p["active_prefill_reqs"], 1);
             assert_eq!(p["unknown_prefill_reqs"], 1);
-            assert_eq!(p["workload_mode"], "rid_remaining");
+            assert_eq!(p["workload_mode"], "aggregate_estimate");
             assert_eq!(p["status"], "missing");
             assert!(p["observation"].is_null());
             assert!(p["sample_age_ms"].is_null());
         }
-        let after = flex.place_http(probe).await.unwrap();
+        let after = spd.place_http(probe).await.unwrap();
         assert_eq!(
             after.transfer_id.unwrap(),
             (before.transfer_id.unwrap() + 1) & i64::MAX as u64
@@ -525,12 +526,12 @@ mod tests {
         assert_ne!(before.d_leg.worker, after.d_leg.worker);
         // Queries must not retire work; only its authoritative handle can do so.
         assert_eq!(
-            flex.backend_load_views()["http://p:30000"].active_prefill_reqs,
+            spd.backend_load_views()["http://p:30000"].active_prefill_reqs,
             1
         );
         reservation.retire();
         assert_eq!(
-            flex.backend_load_views()["http://p:30000"].active_prefill_reqs,
+            spd.backend_load_views()["http://p:30000"].active_prefill_reqs,
             0
         );
     }

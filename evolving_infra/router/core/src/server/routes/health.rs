@@ -28,7 +28,7 @@ pub async fn healthz() -> StatusCode {
 /// Split, and a decode-only fleet cannot place anything.
 pub async fn readyz(State(ctx): State<Arc<AppContext>>) -> StatusCode {
     let workers_ok = match ctx.symmetric_pd.as_ref() {
-        Some(flex) => flex.has_capable_pair(),
+        Some(spd) => spd.has_capable_pair(),
         None => !ctx.registry.is_empty(),
     };
     if ctx.is_ready() && workers_ok {

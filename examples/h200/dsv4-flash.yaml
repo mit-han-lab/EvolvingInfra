@@ -21,6 +21,9 @@ engine_args:
   - --synthetic-oracle-dspark-accept-rate=0.6
   - --dist-timeout=1800
   - --watchdog-timeout=900
+router_args:                   # paper reproduction: the paper's runs used the token-count wait and no global queue
+  - --prefill-wait=tokens
+  - --global-queue=false
 engine_env:
   # Register the host KV tier for RDMA in 16 GB pieces: one 71 GB registration per worker fails on
   # Modal H200 nodes (peer_kv host registration rc=-202); the paper's H200 runs used 16.

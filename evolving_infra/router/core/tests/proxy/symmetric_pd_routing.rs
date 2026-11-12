@@ -38,7 +38,7 @@ use tower::ServiceExt;
 
 use crate::common::mock_worker::MockWorker;
 
-fn config(flex: Option<SymmetricPdConfig>) -> Config {
+fn config(spd: Option<SymmetricPdConfig>) -> Config {
     Config {
         server: ServerConfig {
             host: "0".into(),
@@ -48,7 +48,7 @@ fn config(flex: Option<SymmetricPdConfig>) -> Config {
         model: ModelConfig {
             id: "tiny".into(),
             tokenizer_path: "tests/fixtures/tiny_tokenizer.json".into(),
-            policy: if flex.is_some() {
+            policy: if spd.is_some() {
                 PolicyKind::SymmetricPd
             } else {
                 PolicyKind::RoundRobin
@@ -60,7 +60,7 @@ fn config(flex: Option<SymmetricPdConfig>) -> Config {
             pd_decode_policy: sgl_router::config::PdDecodePolicy::AffinityMinLoad,
             pd_decision_replay: None,
             pd_decode_tokens: None,
-            symmetric_pd: flex,
+            symmetric_pd: spd,
             gateway_cache_aware: None,
         },
         discovery: DiscoveryBackend::StaticUrls(StaticUrlsDiscoveryConfig {
@@ -73,11 +73,11 @@ fn config(flex: Option<SymmetricPdConfig>) -> Config {
 
 /// `(url, prefill_weight, decode_weight, bootstrap_port)`.
 fn build_ctx_with(
-    flex: Option<SymmetricPdConfig>,
+    spd: Option<SymmetricPdConfig>,
     workers: &[(&str, f64, f64, u16)],
     count_workload: bool,
 ) -> Arc<AppContext> {
-    let cfg = config(flex);
+    let cfg = config(spd);
     let tokenizers = Arc::new(TokenizerRegistry::load_from_config(&cfg).unwrap());
     let registry = Arc::new(WorkerRegistry::default());
     for (url, p, d, port) in workers {
@@ -113,11 +113,8 @@ fn build_ctx_with(
 }
 
 /// `(url, prefill_weight, decode_weight, bootstrap_port)`.
-fn build_ctx(
-    flex: Option<SymmetricPdConfig>,
-    workers: &[(&str, f64, f64, u16)],
-) -> Arc<AppContext> {
-    build_ctx_with(flex, workers, false)
+fn build_ctx(spd: Option<SymmetricPdConfig>, workers: &[(&str, f64, f64, u16)]) -> Arc<AppContext> {
+    build_ctx_with(spd, workers, false)
 }
 
 fn post(uri: &str, body: Value) -> Request<Body> {
@@ -163,7 +160,7 @@ fn assert_no_bootstrap(v: &Value) {
 async fn completions_decode_host_return_is_preserved_on_decode_only() {
     let p = MockWorker::start(vec![]).await;
     let d = MockWorker::start(vec![]).await;
-    let flex = SymmetricPdConfig {
+    let spd = SymmetricPdConfig {
         import_cache_policy: sgl_router::config::SymmetricPdImportCachePolicy::Retain,
         decode_host_return: Some(sgl_router::config::DecodeHostReturnConfig {
             servicers: [
@@ -177,7 +174,7 @@ async fn completions_decode_host_return_is_preserved_on_decode_only() {
         ..Default::default()
     };
     let app = build_router(build_ctx(
-        Some(flex),
+        Some(spd),
         &[(&p.url, 1.0, 0.0, 9000), (&d.url, 0.0, 1.0, 9100)],
     ));
     let response = app.oneshot(post("/v1/completions", json!({
@@ -517,7 +514,7 @@ async fn decode_reservation_lasts_as_long_as_the_stream() {
         &[(&p.url, 1.0, 0.0, 9000), (&d.url, 0.0, 1.0, 9100)],
     );
     let app = build_router(Arc::clone(&ctx));
-    let flex = ctx.symmetric_pd.as_ref().unwrap();
+    let spd = ctx.symmetric_pd.as_ref().unwrap();
     let res = app
         .oneshot(post(
             "/v1/completions",
@@ -527,9 +524,9 @@ async fn decode_reservation_lasts_as_long_as_the_stream() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     // The handler returned the response head; the decode has sent nothing yet.
-    let during = flex.backend_load_views()[&d.url].active_decode_reqs;
+    let during = spd.backend_load_views()[&d.url].active_decode_reqs;
     let body = res.into_body().collect().await.unwrap().to_bytes();
-    let after = flex.backend_load_views()[&d.url].active_decode_reqs;
+    let after = spd.backend_load_views()[&d.url].active_decode_reqs;
     eprintln!(
         "active_decode_reqs while the decode streams={during} after the stream={after} \
          stream_bytes={}",

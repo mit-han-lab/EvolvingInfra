@@ -87,7 +87,8 @@ that is given wins.
 
 | Feature | Flags it sets |
 |---|---|
-| Prefill placement by predicted time to first token, with peer pulls | `--symmetric-pd-p-select cost-function`, `--symmetric-pd-pull-hint`, `--symmetric-pd-pull-from-any-holder`, `--kv-pull-hint-min-incremental-tokens 512`, `--trade-load-poll-ms 100`. On when `--kv-indexer-url` is set and `--kv-worker-map` names the servicers; otherwise `cache-first` |
+| Prefill placement by predicted time to first token, with peer pulls | `--symmetric-pd-p-select cost-function`, `--symmetric-pd-pull-hint`, `--symmetric-pd-pull-from-any-holder`, `--kv-pull-hint-min-incremental-tokens 512`, `--prefill-poll-ms 100`. On when `--kv-indexer-url` is set and `--kv-worker-map` names the servicers; otherwise `cache-first` |
+| Prefill completion forecast and global queue (with the cost function) | `--prefill-wait forecast`, `--global-queue`, `--global-queue-room forecast`, `--forecast-next-pass-lag`, `--move-margin 0`, `--max-state-age-ms 5000`, and the error table built into the router. The paper's runs used `--prefill-wait tokens --global-queue=false`; the GLM-5.2 and DeepSeek-V4-Flash configs pin these |
 | Late decode choice | `--pd-late-decode choose --pd-late-decode-rule fit_req --pd-late-decode-candidates all --pd-late-decode-local off --pd-late-decode-fit-native --pd-native-decode-state` |
 | KV session retention | `--symmetric-pd-kv-session-retention`; `--symmetric-pd-no-kv-session-retention` keeps it off for a model whose engine does not support it (DeepSeek-V4) |
 | Placement basics | `--symmetric-pd-force-split`, `--symmetric-pd-d-select round-robin`, `--symmetric-pd-load-poll-ms 100`, `--symmetric-pd-import-cache-policy retain` (a D may become a P later, so imported KV follows the host write policy), `--kv-indexer-timeout-ms 200` |
@@ -96,17 +97,31 @@ that is given wins.
 
 | Flag | Description |
 |---|---|
-| `--trade-copy-lambda X\|auto` | Price per pulled token of the second copy a pull creates (default 4.6). `auto` measures it while serving; `--trade-copy-lambda-min`, `-max` and `-fallback` bound it and give the value before the first measurement. |
-| `--trade-rate-tokens-per-s R\|auto` | Prefill tokens one P computes per second, which turns pull time into tokens (default 13500). `auto` measures it. |
-| `--trade-pull-fixed-ms N`, `--trade-pull-ms-per-100k N` | Time of one KV pull: a fixed part (default 450 ms) and a part per 100k pulled tokens (default 100 ms). |
-| `--trade-wait ledger\|e3` | Where a P's wait comes from. `ledger` (default): the router's count of uncached tokens routed to it. `e3`: a forecast from the engine's state, for a model whose prefill time is not proportional to tokens (images); needs `--trade-e3-bound-table FILE`. |
-| `--trade-e3-frozen-fit FILE`, `--trade-e3-push-port PORT`, `--trade-e3-next-pass-lag`, `--trade-e3-max-view-age-ms N`, `--trade-gate-m M` | With `--trade-wait e3`: the offline constants of the forecast, the port of the engines' state push, the lag of a request's next pass, the oldest engine state the forecast uses (default 1500 ms), and how far a gain must exceed the forecast's error bound before a request leaves the worker that holds its cache. |
-| `--symmetric-pd-gwq-auto`, `--symmetric-pd-gwq-room tokens\|predicted` | Hold a request that no P is bound to in a router queue until its P has room, by queued tokens or by the forecast drain time. |
-| `--trade-load-poll-ms N` | How often the router reads each P's prefill progress (default 100). |
-| `--trade-cost-trace FILE` | Write every placement decision to a new JSONL file. |
+| `--copy-price X\|auto` | Price per fetched token of the second copy a KV fetch creates (default 4.6). `auto` measures it while serving; `--copy-price-min`, `-max` and `-fallback` bound it and give the value before the first measurement. |
+| `--prefill-rate-tokens-per-s R\|auto` | Prefill tokens one P computes per second, which turns wait and fetch time into tokens (default 13500). `auto` measures it. |
+| `--fetch-fixed-ms N`, `--fetch-ms-per-100k-tokens N` | Time of one KV fetch: a fixed part (default 450 ms) and a part per 100k fetched tokens (default 100 ms). |
+| `--prefill-wait tokens\|forecast` | Where a P's wait comes from. `tokens`: the router's count of uncached tokens routed to it. `forecast` (the preset's default): the prefill completion forecast from the engine's reported state, which also fits a model whose prefill time is not proportional to tokens (images). A P that cannot have a forecast (chunk or page size outside the error table, no routing snapshot) is placed exactly as with `tokens`, with a warning naming the reason. |
+| `--forecast-error-table FILE` | The forecast's error bounds (schema `forecast-error-table.v2`). Default: the table built into the router, fitted for engines with 8192-token chunks and 64-token pages; a P with another chunk or page size has no forecast. |
+| `--forecast-fit FILE`, `--forecast-push-port PORT`, `--forecast-next-pass-lag[=false]`, `--max-state-age-ms N`, `--move-margin M` | Forecast settings: offline step-model constants in place of the online fits (needed for a P that is never idle), the port of the engines' state push (engine `SGLANG_PREFILL_STATE_PUSH_PORT`), the lag of a request's next pass, the oldest engine state the forecast uses (default 1500 ms; 5000 with the preset), and how far a gain must exceed the forecast's error bound before a request leaves the worker that holds its cache (default 1; 0 with the preset). |
+| `--global-queue[=false]`, `--global-queue-room tokens\|forecast` | Hold a request that no P is bound to in one router queue until its cheapest P has room, by queued tokens or also by the forecast drain time. On with the preset. |
+| `--prefill-poll-ms N` | How often the router reads each P's prefill progress (default 100). |
+| `--placement-trace FILE` | Write every placement decision to a new JSONL file (schema `placement-trace.v1`). |
 | `--symmetric-pd-p-select cache-first\|cost-function` | `cache-first`: the worker with the best cache hit unless it is overloaded. `cost-function`: the lowest predicted wait plus compute plus pull cost. See [Placement](placement.md). |
 | `--pd-late-decode-rule fit_req\|d1` | How late decode choice picks D. Late decode choice applies to `/v1/completions` and `/v1/chat/completions`; a native `/generate` request gets its D at arrival. A chat request with `n` above 1 is refused, as a batch prompt is. |
 | `--chat-tools-tokenize` | A chat request with `tools` is placed on token ids from an engine's `/v1/tokenize` (prompt length, KV directory query, pull hint). The router's chat encoder renders messages only, so without the flag such a request matches no cached prefix. The ids are not forwarded to the engine; a tokenize that fails or takes over 3 s leaves the request placed as without the flag. Off by default; the configs in `examples/agents` turn it on. |
+
+### Reproduction flags
+
+These flags are hidden from `--help`. They reproduce or compare runs and are not needed to serve.
+
+| Flag | Description |
+|---|---|
+| `--symmetric-pd-decision-replay FILE`, `--symmetric-pd-decision-replay-header NAME` | Replay the per-request (P, D) choices of a reference run, keyed by the routing-key header. |
+| `--pd-decision-replay FILE`, `--pd-decision-replay-header NAME` | The same for the traditional P/D path (not `--policy symmetric_pd`). |
+| `--symmetric-pd-trace-session-moves` | Add a `session_move` record to the placement trace for each request with a session identity. |
+| `--symmetric-pd-w-hit`, `--symmetric-pd-w-backlog`, `--symmetric-pd-w-role`, `--symmetric-pd-w-xfer`, `--symmetric-pd-w-dload` | Weights of `--symmetric-pd-p-select score`. |
+| `--gateway-ca-cache-threshold`, `--gateway-ca-balance-abs-threshold`, `--gateway-ca-balance-rel-threshold`, `--gateway-ca-eviction-interval-secs`, `--gateway-ca-max-tree-size` | The sgl-model-gateway cache-aware baseline (`--policy gateway_cache_aware` or `--symmetric-pd-p-select gateway-cache-aware`). |
+| `--pd-late-decode-local off` | Accepted for command lines of sgl-model-gateway; only `off` is supported. |
 
 ### Dynamic P/D
 

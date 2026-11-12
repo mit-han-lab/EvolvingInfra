@@ -67,7 +67,7 @@ pub struct ServerInfo {
     pub kv_capacity_tokens: Option<u64>,
     /// The engine chunk in tokens (`ServerArgs.chunked_prefill_size`, top
     /// level); None when absent, 0, negative (chunking off) or not an
-    /// integer. Read by `--symmetric-pd-gwq-auto`.
+    /// integer. Read by `--global-queue`.
     pub chunk_tokens: Option<u64>,
     /// `/server_info` `late_d` block (late D engines); `None` when absent.
     pub late_d: Option<crate::workers::LateDWorkerInfo>,

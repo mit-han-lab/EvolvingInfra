@@ -259,26 +259,26 @@ pub async fn chat_completions(
         .with_request_tokens(request_tokens.as_ref().map(|t| t.ids.as_slice()))
         .with_external_prefix(external_prefix.as_ref())
         .with_cache_salt(route_cache_salt);
-    // Worker selection: co-schedule admission (router-side queue + backlog
-    // cap + co-decided pull) when configured, `Policy::select` otherwise.
-    // The co-scheduler may HOLD the request here until capacity frees or
-    // its starvation guard fires.
-    let mut flex_decision: Option<crate::scheduler::Decision> = None;
+    // Worker selection: symmetric_pd admission (router-side queue, backlog
+    // cap and the pull decided with the placement) when configured,
+    // `Policy::select` otherwise. The admission may HOLD the request here
+    // until capacity frees or its starvation guard fires.
+    let mut spd_decision: Option<crate::scheduler::Decision> = None;
     // Traditional-PD decision replay: the pinned decode peer (routes/pd_replay.rs).
     let mut pd_replay_decode: Option<Arc<Worker>> = None;
-    let worker = if let Some(flex) = ctx.symmetric_pd.as_ref() {
+    let worker = if let Some(spd) = ctx.symmetric_pd.as_ref() {
         // symmetric_pd placement: the ingress tokens are the prompt length and
         // the indexer key (text fallback estimates from bytes).
         let ids = request_tokens.as_ref().map(|t| t.ids.as_slice());
-        let prompt_len = crate::server::routes::completions::flex_prompt_len(
+        let prompt_len = crate::server::routes::completions::spd_prompt_len(
             request_value.as_ref(),
             ids,
             &body,
-            flex.cost_function_enabled(),
+            spd.cost_function_enabled(),
         );
         let (session_id, turn) =
             crate::server::routes::completions::extract_session(request_value.as_ref());
-        let d = flex
+        let d = spd
             .admit(crate::scheduler::PlaceInput {
                 tokens: ids.map(<[u32]>::to_vec),
                 hashes: None,
@@ -289,28 +289,28 @@ pub async fn chat_completions(
                 turn,
                 rid: crate::server::routes::completions::extract_rid(request_value.as_ref()),
                 routing_key: crate::server::routes::completions::replay_routing_key(
-                    flex.replay_header(),
+                    spd.replay_header(),
                     &headers,
                 ),
                 ingress_ms: start.elapsed().as_secs_f64() * 1e3,
                 // The cost function's copy price auto (N_active) and the
                 // session-move trace.
-                trade_session: if flex.cost_function_wants_session() {
-                    crate::agent_identity::trade_session_key(&headers)
+                placement_session: if spd.cost_function_wants_session() {
+                    crate::agent_identity::placement_session_key(&headers)
                 } else {
                     None
                 },
-                // The cost function's wait e3: the session key of the
+                // The cost function's wait forecast: the session key of the
                 // target host rule (the header's identity).
-                e3_session: if flex.cost_function_wants_e3_session() {
-                    crate::trade_e3::session_key(&headers, None)
+                forecast_session: if spd.cost_function_wants_forecast_session() {
+                    crate::prefill_forecast::session_key(&headers, None)
                 } else {
                     None
                 },
             })
             .await?;
         let w = Arc::clone(&d.p_worker);
-        flex_decision = Some(d);
+        spd_decision = Some(d);
         w
     } else {
         let pinned = ctx.pd_replay.as_ref().and_then(|replay| {
@@ -376,8 +376,8 @@ pub async fn chat_completions(
     );
     let mut decode_charge: Option<crate::workers::DecodeTokenCharge> = None;
     let mut decode_token_log: Option<crate::policies::decode_tokens::DecodeTokenLog> = None;
-    let mut pending_flex_reservation = flex_decision.as_ref().map(|d| d.ledger.pending_guard());
-    let decode_peer: Option<Arc<Worker>> = if let Some(d) = flex_decision.as_ref() {
+    let mut pending_spd_reservation = spd_decision.as_ref().map(|d| d.ledger.pending_guard());
+    let decode_peer: Option<Arc<Worker>> = if let Some(d) = spd_decision.as_ref() {
         (!d.is_local()).then(|| Arc::clone(&d.d_worker))
     } else if let Some(d) = pd_replay_decode.take() {
         (decode_charge, decode_token_log) =
@@ -432,7 +432,7 @@ pub async fn chat_completions(
     let plain_usage = match (usage_asked, ctx.external_workload.as_ref()) {
         (Some(_), Some(workload)) => Some(crate::backend::plain_usage::PlainUsage::new(
             Arc::clone(workload),
-            flex_decision
+            spd_decision
                 .as_ref()
                 .map_or(0, |d| d.prompt_len.saturating_sub(d.ledger.tokens())),
         )),
@@ -470,7 +470,7 @@ pub async fn chat_completions(
     // `sgl_router_request_duration_seconds`. The proxy drops the hook for
     // non-2xx responses so error bodies don't pollute TTFT.
     // (The TTFT hook factory is built AFTER the kv-pull-hint block below —
-    // it also retires the co-schedule backlog ledger entry at first byte.)
+    // it also retires the cost-function backlog ledger entry at first byte.)
 
     // Builds the end-to-end-latency guard for streaming requests. Packed into
     // `stream_guards` so it records when the SSE pump finishes (stream end or
@@ -515,7 +515,7 @@ pub async fn chat_completions(
     // PD-disagg bootstrap fields (prefill worker address + a per-request
     // room). Present only when a decode peer was resolved; symmetric_pd Splits
     // carry marks instead.
-    let bootstrap = if flex_decision.is_some() {
+    let bootstrap = if spd_decision.is_some() {
         None
     } else {
         decode_peer.as_ref().map(|_| BootstrapFields {
@@ -526,8 +526,8 @@ pub async fn chat_completions(
     };
     let bootstrap_room = bootstrap.as_ref().map(|b| b.room);
 
-    let admission_queue_wait_ms = flex_decision.as_ref().map_or(0, |d| d.queue_wait_ms);
-    let admission_branch = flex_decision.as_ref().map_or("policy", |d| d.branch());
+    let admission_queue_wait_ms = spd_decision.as_ref().map_or(0, |d| d.queue_wait_ms);
+    let admission_branch = spd_decision.as_ref().map_or("policy", |d| d.branch());
 
     // kv-p2p pull hint: ask the indexer which peers own this request's
     // token prefix, then (below the gates) hint the EXECUTING worker to
@@ -539,12 +539,12 @@ pub async fn chat_completions(
         Option<serde_json::Value>,
         Option<AdmissionLedger>,
         Option<_>,
-    ) = if let Some(d) = flex_decision.as_mut() {
+    ) = if let Some(d) = spd_decision.as_mut() {
         // symmetric_pd: hint decided at admit, P-leg body only. With the
         // cost function the P-leg task owns the cost reservation.
         (
             d.pull_hint.clone(),
-            Some(AdmissionLedger::Flex(d.ledger.clone())),
+            Some(AdmissionLedger::Symmetric(d.ledger.clone())),
             d.cost_reservation.take(),
         )
     } else {
@@ -568,14 +568,14 @@ pub async fn chat_completions(
         (hint, None, None)
     };
 
-    if let Some(flex) = &ctx.symmetric_pd {
-        let d_url = flex_decision
+    if let Some(spd) = &ctx.symmetric_pd {
+        let d_url = spd_decision
             .as_ref()
             .map(|d| d.d_worker.url.as_str())
             .or_else(|| decode_peer.as_ref().map(|d| d.url.as_str()))
             .unwrap_or(&worker.url);
         crate::backend::sglang::request::attach_kv_session(
-            flex.kv_sessions().map(Arc::as_ref),
+            spd.kv_sessions().map(Arc::as_ref),
             &headers,
             &worker.url,
             d_url,
@@ -594,7 +594,7 @@ pub async fn chat_completions(
             .unwrap_or(""),
         policy: ctx.config.model.policy,
         prefill_worker: &worker.url,
-        decode_worker: flex_decision
+        decode_worker: spd_decision
             .as_ref()
             .map(|d| d.d_worker.url.as_str())
             .or_else(|| decode_peer.as_ref().map(|d| d.url.as_str()))
@@ -603,13 +603,13 @@ pub async fn chat_completions(
         branch: admission_branch,
         ingress_to_dispatch_ms: start.elapsed().as_millis() as u64,
         owner_hint: kv_pull_hint.as_ref(),
-        flex: flex_decision.as_ref(),
+        spd: spd_decision.as_ref(),
         decode_tokens: decode_token_log.as_ref(),
         late_d: None,
     });
 
     // First streamed byte = the decode (or plain worker) started producing,
-    // which implies this request's prefill work is done — the co-schedule
+    // which implies this request's prefill work is done — the cost-function
     // ledger entry stops counting toward the worker's backlog then. Each
     // dispatch path gets its own clone (retire is idempotent; a clone that
     // never fires is subsumed by the next /v1/loads poll).
@@ -635,7 +635,7 @@ pub async fn chat_completions(
     // the prefill (the prefill side in PD mode, the sole worker otherwise).
     // symmetric_pd: `executing_body` is the P-leg (`kv_export`), `outgoing_body`
     // the D-leg (`kv_import`); Local leaves only `input_ids` injected.
-    let (outgoing_body, executing_body) = if let Some(d) = flex_decision.as_ref() {
+    let (outgoing_body, executing_body) = if let Some(d) = spd_decision.as_ref() {
         let (p_body, d_body) = crate::scheduler::build_leg_bodies(
             &body,
             request_value,
@@ -675,7 +675,7 @@ pub async fn chat_completions(
 
     // Body construction and validation above have not submitted anything.
     // From here P may execute independently of the client's connection.
-    if let Some(pending) = pending_flex_reservation.as_mut() {
+    if let Some(pending) = pending_spd_reservation.as_mut() {
         pending.mark_dispatched();
     }
     let result = if let Some(decode_worker) = decode_peer {
@@ -759,11 +759,11 @@ pub async fn chat_completions(
             };
             if let Some(cost) = prefill_cost.as_mut() {
                 if let Err(error) = cost.mark_dispatched() {
-                    tracing::error!(target: "cost_balance", %error, "cost trace failed before P dispatch");
+                    tracing::error!(target: "prefill_work", %error, "placement trace failed before P dispatch");
                     if let Some(failure) = &prefill_failure_p {
                         failure.fail_and_log(
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            "prefill leg not dispatched: cost trace failed".to_string(),
+                            "prefill leg not dispatched: placement trace failed".to_string(),
                             &legs,
                         );
                     }
@@ -825,7 +825,7 @@ pub async fn chat_completions(
         let (smg_load, smg_arm) = ctx.decode_smg_load(&decode_worker.url, streaming);
         // symmetric_pd: the D-leg's place in its worker's in-flight count
         // lasts as long as the leg (the stream, when streaming).
-        let d_reservation = flex_decision.as_mut().and_then(|d| d.d_reservation.take());
+        let d_reservation = spd_decision.as_mut().and_then(|d| d.d_reservation.take());
         let decode_guard = (
             decode_worker.load_guard(),
             decode_charge.take(),
@@ -921,7 +921,7 @@ pub async fn chat_completions(
             _ = stale_token.cancelled() => Err(ApiError::StaleRequestExpired { model: model_str }),
         };
         // Non-streaming plain: full generation done — retire the
-        // co-schedule ledger entry (only completion signal on this path).
+        // cost-function ledger entry (only completion signal on this path).
         if let Some(l) = co_ledger.take() {
             l.retire();
         }
@@ -1208,7 +1208,7 @@ pub(crate) async fn chat_request_tokens(
         return tokens;
     }
     let engines = match ctx.symmetric_pd.as_ref() {
-        Some(flex) => flex.role_members_all(),
+        Some(spd) => spd.role_members_all(),
         None => workers.to_vec(),
     };
     match crate::engine_tokenize::chat_ids(&engines, value).await {

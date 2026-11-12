@@ -1,57 +1,50 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! `--symmetric-pd-p-select cost-function`: the TRADE cost model of the
-//! co-schedule policy as the symmetric_pd P selection on symmetric workers.
+//! `--symmetric-pd-p-select cost-function`: the placement cost function of the
+//! cost-function policy as the symmetric_pd P selection on symmetric workers.
 //!
-//! The cost function keeps its own [`CostBook`] (the uncached ledger with the
-//! TRADE cost, lambda and R fixed or auto) and its own per-RID progress poll
+//! The cost function keeps its own [`PrefillWorkBook`] (the work book with the
+//! placement cost, lambda and R fixed or auto) and its own per-RID progress poll
 //! of the P-role workers: `GET /v1/loads?include=core,queues,prefill_work`
-//! every `--trade-load-poll-ms`, with one query per worker in flight.
+//! every `--prefill-poll-ms`, with one query per worker in flight.
 //! It does not read the symmetric_pd Backend load view. Each request makes one
-//! cost-book transaction: it selects the P-leg among the healthy P-role
+//! work-book transaction: it selects the P-leg among the healthy P-role
 //! workers, decides the pull (the P-leg's `kv_pull_hint`) and reserves the
 //! request's work. The runtime then leaves that P as the only prefill
 //! candidate of the placement; the D-leg follows `--symmetric-pd-d-select`. The
 //! routes own the reservation as on the PD path: dispatched before the P-leg
 //! send, finished on the P answer, unknown on a transport error, rolled back
 //! on a drop before dispatch. An unknown reservation expires and leaves the
-//! ledger when a progress reply of its P omits its RID for
+//! work book when a progress reply of its P omits its RID for
 //! `--symmetric-pd-unknown-expire-secs` (default 60; 0 = never; see
-//! [`crate::cost_balance`]); a P without replies keeps it.
+//! [`crate::prefill_work`]); a P without replies keeps it.
 //!
-//! The price (lambda, R and the TRADE cost) is computed only behind the
-//! cost-book API ([`CostBook::reserve_trade_session`]). This module builds
-//! the candidates, runs the poll and labels the trace. The candidate rule is
-//! the CoScheduler's (`admit_reserved` in [`crate::co_schedule`]) on the
-//! P-role workers only: every hit and every pull source is a P-role worker.
+//! The price (lambda, R and the placement cost) is computed only behind the
+//! work-book API ([`PrefillWorkBook::reserve_cost_session`]). This module builds
+//! the candidates, runs the poll and labels the trace. The candidates are
+//! the P-role workers only: every hit and every pull source is a P-role
+//! worker (unless `--symmetric-pd-pull-from-any-holder`).
 //!
-//! With `--symmetric-pd-loads-host-room` the poll also asks for the engine's
-//! `host_room` section (`include=core,queues,prefill_work,host_room`) and
-//! hands it to the cost book, which traces it ([`CostBook::note_host_room`]).
-//! An engine that rejects the include (HTTP 4xx or 500: no such section) is
-//! polled again at once without it, and asked again after
-//! [`HOST_ROOM_REPROBE`].
-//!
-//! With `--symmetric-pd-gwq-auto` a request that is free to go to any P waits in
-//! the global waiting queue of [`gwq_auto`] until its TRADE argmin P is about
+//! With `--global-queue` a request that is free to go to any P waits in
+//! the global waiting queue of [`global_queue`] until its cost argmin P is about
 //! to run out of queued work; a request bound to its cache owner is reserved
 //! at arrival as without the queue.
 //!
-//! With `--trade-wait e3` the TRADE decisions price each
-//! candidate with the E3 step-time-model P completion forecast and its
-//! prediction gate; with `--symmetric-pd-gwq-room predicted` the queue also gives
+//! With `--prefill-wait forecast` the cost-function decisions price each
+//! candidate with the step-time-model P completion forecast and its
+//! prediction gate; with `--global-queue-room forecast` the queue also gives
 //! a P room while its forecast drain is within its lead. Both read the
 //! engine `prefill_routing` snapshot of the progress poll and, with
-//! `--trade-e3-push-port`, the engines' state push ([`e3`]).
+//! `--forecast-push-port`, the engines' state push ([`forecast`]).
 //!
 //! With `--symmetric-pd-pull-from-any-holder` the targets and their hits stay the
 //! P-role pool's, but the pull source may be any holder of the indexer answer
 //! that is a registered worker of any role (breaker allowing when the
 //! breaker is on), also a D-role worker (a former P after a P->D role switch).
 
-mod e3;
-mod gwq_auto;
+mod forecast;
+mod queue;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -59,24 +52,18 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::trade::{
-    trade_pull_tokens, TradeLambdaMode, TradePullPrice, TradeWait, TRADE_MIN_PULL_TOKENS,
-};
+use super::placement_cost::{fetch_tokens, PrefillWait, MIN_FETCH_TOKENS};
 use super::{PlaceInput, SymmetricPdError};
 use crate::config::SymmetricPdCostFunctionConfig;
-use crate::cost_balance::{Candidate, CostBook, Reservation};
 use crate::kv_hint::{HintCandidate, IndexerAnswer, KvHintConfig, KvHintInjector};
 use crate::load_refresh::{fetch_progress_poll, include_rejected};
 use crate::load_refresh::{LoadRefresh, Query};
+use crate::prefill_work::{Candidate, PrefillWorkBook, Reservation};
 use crate::workers::Worker;
 use tokio::task::JoinHandle;
 
 /// The `policy` label of every row of the cost-function trace.
 pub const TRACE_POLICY: &str = "symmetric_pd_cost_function";
-
-/// `--symmetric-pd-loads-host-room`: after an engine rejected the `host_room`
-/// include, the poll of that worker asks for it again after this long.
-pub const HOST_ROOM_REPROBE: Duration = Duration::from_secs(30);
 
 /// The `policy` name of the cost-function line of
 /// [`KvHintInjector::log_decision`] (target `kv_hint`).
@@ -86,96 +73,77 @@ pub const HINT_LOG_POLICY: &str = "SymmetricPdCostFunction";
 /// that endpoint reports neither the dispatch nor the end of a request.
 pub const PLACE_REFUSAL: &str =
     "/symmetric_pd/place is not available with --symmetric-pd-p-select \
-                                 cost-function: the cost ledger needs each request's dispatch \
+                                 cost-function: the work book needs each request's dispatch \
                                  and end";
 
-/// The TRADE cost function of one symmetric_pd runtime.
+/// The placement cost function of one symmetric_pd runtime.
 pub struct CostFunction {
     cfg: SymmetricPdCostFunctionConfig,
-    book: Arc<CostBook>,
-    /// The TRADE pull floor: max(`--kv-pull-hint-min-incremental-tokens`, 512).
-    trade_floor: u64,
+    book: Arc<PrefillWorkBook>,
+    /// The cost-function pull floor: max(`--kv-pull-hint-min-incremental-tokens`, 512).
+    fetch_floor: u64,
     /// The progress poll client: 500 ms connect, 800 ms in total.
     poll_client: reqwest::Client,
     /// One progress query per P-role worker in flight; stale sequences dropped.
     progress_refresh: Arc<LoadRefresh>,
-    /// `--symmetric-pd-loads-host-room`: worker URL -> the last time its engine
-    /// rejected the `host_room` include.
-    host_room_rejections: parking_lot::Mutex<HashMap<String, Instant>>,
-    /// `--symmetric-pd-gwq-auto` (None: off): the global waiting queue.
-    gwq: Option<gwq_auto::GwqAuto>,
-    /// `--trade-wait e3` or `--symmetric-pd-gwq-room predicted`
-    /// (None: neither): the E3 forecast state.
-    e3: Option<e3::FlexE3>,
+    /// `--global-queue` (None: off): the global waiting queue.
+    queue: Option<queue::GlobalQueue>,
+    /// `--prefill-wait forecast` or `--global-queue-room forecast`
+    /// (None: neither): the forecast state.
+    forecast: Option<forecast::ForecastState>,
 }
 
 impl std::fmt::Debug for CostFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CostFunction")
-            .field("trade", &self.cfg.trade)
-            .field("cost_trace", &self.cfg.cost_trace)
+            .field("cost_function", &self.cfg.cost_params)
+            .field("placement_trace", &self.cfg.placement_trace)
             .field("load_poll_ms", &self.cfg.load_poll_ms)
-            .field("trade_floor", &self.trade_floor)
+            .field("fetch_floor", &self.fetch_floor)
             .finish_non_exhaustive()
     }
 }
 
 impl CostFunction {
-    /// Create the cost ledger (a new trace file) and log the cost model.
+    /// Create the work book (a new trace file) and log the cost model.
     ///
     /// # Inputs
-    /// `cfg`: the TRADE parameters, the trace path, the poll period, the
-    /// unknown expiry and the `host_room` switch;
+    /// `cfg`: the cost-function parameters, the trace path, the poll period and the
+    /// unknown expiry;
     /// `kv`: the runtime's indexer config (its incremental gate raises the
     /// pull floor above 512 tokens).
     ///
     /// # Outputs
     /// The cost function without background tasks (see [`Self::start`]).
     /// Panics when a configured trace file exists or cannot be created: a run
-    /// that asked for its cost trace must not serve requests without it.
+    /// that asked for its placement trace must not serve requests without it.
     pub fn new(cfg: SymmetricPdCostFunctionConfig, kv: &KvHintConfig) -> Arc<Self> {
-        let (trace, secs) = (cfg.cost_trace.as_deref(), cfg.unknown_expire_secs);
+        let (trace, secs) = (cfg.placement_trace.as_deref(), cfg.unknown_expire_secs);
         let expire = (secs > 0).then_some(Duration::from_secs(secs));
-        let book = CostBook::new_uncached_with_policy(trace, TRACE_POLICY, expire)
-            .expect("create new cost trace before serving requests");
-        if cfg.trace_async {
-            book.enable_async_trace()
-                .expect("start the background cost trace writer before serving requests");
-        }
-        if cfg.loads_host_room {
-            book.enable_host_room();
-        }
-        if cfg.trade.pull_price == TradePullPrice::Phi {
-            // phi of each P from its host_room counters (the CLI requires
-            // --symmetric-pd-loads-host-room).
-            book.enable_host_room_phi(cfg.trade.auto_tau_s);
-        }
-        let gwq = cfg
-            .gwq_auto
-            .map(|gwq| gwq_auto::GwqAuto::new(gwq, cfg.load_poll_ms));
-        if let Some(gwq) = &gwq {
-            book.enable_gwq_lead(cfg.trade.auto_tau_s, gwq.fallback_react_s);
-            if cfg.loads_host_room {
-                // The shadow counters read phi of each P.
-                book.enable_host_room_phi(cfg.trade.auto_tau_s);
-            }
+        let book = PrefillWorkBook::new(trace, TRACE_POLICY, expire)
+            .expect("create new placement trace before serving requests");
+        let queue = cfg
+            .global_queue
+            .map(|queue| queue::GlobalQueue::new(queue, cfg.load_poll_ms));
+        if let Some(queue) = &queue {
+            book.enable_queue_lead(cfg.cost_params.auto_tau_s, queue.fallback_react_s);
         }
         if cfg.trace_session_moves {
             book.enable_session_moves();
         }
-        // The E3 forecast state: the decisions (`wait = e3`) or the queue
-        // drain (`--symmetric-pd-gwq-room predicted`).
-        let decides = cfg.trade.wait == TradeWait::E3;
+        // The forecast state: the decisions (the forecast wait) or the queue
+        // drain (`--global-queue-room forecast`).
+        let decides = cfg.cost_params.wait == PrefillWait::Forecast;
         let drain = cfg
-            .gwq_auto
-            .is_some_and(|g| g.room == crate::global_queue::GlobalQueueRoom::Predicted);
-        let e3 = cfg
-            .trade_e3
+            .global_queue
+            .is_some_and(|g| g.room == crate::global_queue::GlobalQueueRoom::Forecast);
+        let forecast = cfg
+            .forecast
             .as_ref()
             .filter(|_| decides || drain)
-            .map(|t| e3::FlexE3::new(Arc::clone(&t.0), decides, &book));
-        let trade_floor = u64::from(kv.min_incremental_tokens).max(TRADE_MIN_PULL_TOKENS);
-        log_cost_model(&cfg, kv, trade_floor);
+            .map(|t| forecast::ForecastState::new(Arc::clone(&t.0), decides, &book));
+        let fetch_floor = u64::from(kv.min_incremental_tokens).max(MIN_FETCH_TOKENS);
+        log_cost_model(&cfg, kv, fetch_floor);
         let poll_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(500))
             .timeout(Duration::from_millis(800))
@@ -184,19 +152,18 @@ impl CostFunction {
         let this = Arc::new(Self {
             cfg,
             book,
-            trade_floor,
+            fetch_floor,
             poll_client,
             progress_refresh: Arc::new(LoadRefresh::default()),
-            host_room_rejections: parking_lot::Mutex::new(HashMap::new()),
-            gwq,
-            e3,
+            queue,
+            forecast,
         });
-        if this.gwq.is_some() {
+        if this.queue.is_some() {
             // Each terminal status frees work on its P: a release pass.
             let weak = Arc::downgrade(&this);
             this.book.set_terminal_hook(Box::new(move || {
                 if let Some(cf) = weak.upgrade() {
-                    cf.gwq_wake_retire();
+                    cf.queue_wake_retire();
                 }
             }));
         }
@@ -210,23 +177,23 @@ impl CostFunction {
         self.cfg.pull_from_any_holder
     }
 
-    /// `--symmetric-pd-pull-from-any-holder` with `--symmetric-pd-gwq-auto`: the
+    /// `--symmetric-pd-pull-from-any-holder` with `--global-queue`: the
     /// registered workers of any role (breaker allowing when the breaker is
     /// on) at each queue step (`donors`), so that a held request keeps a pull
     /// hint whose source is still one of them. No-op without the queue.
-    pub fn set_gwq_donors(&self, donors: impl Fn() -> Vec<Arc<Worker>> + Send + Sync + 'static) {
-        if let Some(gwq) = &self.gwq {
-            gwq.set_donors(Box::new(donors));
+    pub fn set_queue_donors(&self, donors: impl Fn() -> Vec<Arc<Worker>> + Send + Sync + 'static) {
+        if let Some(queue) = &self.queue {
+            queue.set_donors(Box::new(donors));
         }
     }
 
     /// Start the per-RID progress poll of the P-role workers, the one-second
-    /// cost-book snapshot and, with `--symmetric-pd-gwq-auto`, the release
+    /// work-book snapshot and, with `--global-queue`, the release
     /// dispatcher and the one-second queue statistics.
     ///
     /// # Inputs
     /// `members`: the poll set at each tick (the P-role workers whatever
-    /// their breaker state, so the ledger of a tripped P stays current);
+    /// their breaker state, so the work book of a tripped P stays current);
     /// `pool`: the healthy P-role pool of each queue step (the pool of the
     /// admissions).
     ///
@@ -239,8 +206,8 @@ impl CostFunction {
         members: impl Fn() -> Vec<Arc<Worker>> + Send + Sync + 'static,
         pool: impl Fn() -> Vec<Arc<Worker>> + Send + Sync + 'static,
     ) {
-        if let Some(gwq) = &self.gwq {
-            gwq.set_pool(Box::new(pool));
+        if let Some(queue) = &self.queue {
+            queue.set_pool(Box::new(pool));
         }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             tracing::warn!(
@@ -255,23 +222,30 @@ impl CostFunction {
             Arc::downgrade(self),
             Arc::clone(&members),
         ));
-        if self.e3.as_ref().is_some_and(e3::FlexE3::push_on) {
-            handle.spawn(e3::push_supervisor_loop(Arc::downgrade(self), members));
+        if self
+            .forecast
+            .as_ref()
+            .is_some_and(forecast::ForecastState::push_on)
+        {
+            handle.spawn(forecast::push_supervisor_loop(
+                Arc::downgrade(self),
+                members,
+            ));
         }
         handle.spawn(snapshot_loop(Arc::downgrade(self)));
-        if self.gwq.is_some() {
-            handle.spawn(gwq_auto::dispatcher_loop(Arc::downgrade(self)));
-            handle.spawn(gwq_auto::stats_loop(Arc::downgrade(self)));
+        if self.queue.is_some() {
+            handle.spawn(queue::dispatcher_loop(Arc::downgrade(self)));
+            handle.spawn(queue::stats_loop(Arc::downgrade(self)));
         }
     }
 
-    /// True when the TRADE copy price or R comes from the router's
+    /// True when the cost-function copy price or R comes from the router's
     /// measurements (`auto`); the routes then pass the session identity.
     pub fn is_auto(&self) -> bool {
-        self.cfg.trade.is_auto()
+        self.cfg.cost_params.is_auto()
     }
 
-    /// The routes pass the session identity ([`PlaceInput::trade_session`]):
+    /// The routes pass the session identity ([`PlaceInput::placement_session`]):
     /// the copy price or R `auto` (N_active) or
     /// `--symmetric-pd-trace-session-moves`.
     pub fn wants_session(&self) -> bool {
@@ -283,27 +257,29 @@ impl CostFunction {
         self.cfg.trace_session_moves
     }
 
-    /// The cost book (tests of the runtime).
+    /// The work book (tests of the runtime).
     #[cfg(test)]
-    pub(crate) fn book_for_test(&self) -> &Arc<CostBook> {
+    pub(crate) fn book_for_test(&self) -> &Arc<PrefillWorkBook> {
         &self.book
     }
 
-    /// The routes pass the E3 session key ([`PlaceInput::e3_session`], the
-    /// host rule of the forecast target): `--trade-wait e3`.
-    pub fn wants_e3_session(&self) -> bool {
-        self.e3.as_ref().is_some_and(|e3| e3.decides)
+    /// The routes pass the forecast session key ([`PlaceInput::forecast_session`], the
+    /// host rule of the forecast target): `--prefill-wait forecast`.
+    pub fn wants_forecast_session(&self) -> bool {
+        self.forecast
+            .as_ref()
+            .is_some_and(|forecast| forecast.decides)
     }
 
     /// The client ended `session` (`POST /kv_sessions/end`; the identity of
-    /// [`crate::scheduler::trade::trade_session_key`]): it leaves
+    /// [`crate::scheduler::placement_cost::placement_session_key`]): it leaves
     /// N_active of the copy price `auto` at once. Returns whether it was
-    /// counted (always false with both TRADE modes fixed).
+    /// counted (always false with both cost-function modes fixed).
     pub fn session_end(&self, session: &str) -> bool {
-        self.is_auto() && self.book.trade_auto_end_session(session)
+        self.is_auto() && self.book.auto_price_end_session(session)
     }
 
-    /// The TRADE candidates of one request: the CoScheduler's rule on the
+    /// The cost-function candidates of one request: the cost function's rule on the
     /// P-role pool.
     ///
     /// # Inputs
@@ -338,7 +314,7 @@ impl CostFunction {
                     .and_then(|h| h.get("expected_hit_tokens"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
-                if trade_pull_tokens(local_hit, remote_hit, tokens, self.trade_floor) == 0 {
+                if fetch_tokens(local_hit, remote_hit, tokens, self.fetch_floor) == 0 {
                     hint = None;
                     remote_hit = 0;
                 }
@@ -403,7 +379,7 @@ impl CostFunction {
                     .and_then(|h| h.get("expected_hit_tokens"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
-                if trade_pull_tokens(local_hit, remote_hit, tokens, self.trade_floor) == 0 {
+                if fetch_tokens(local_hit, remote_hit, tokens, self.fetch_floor) == 0 {
                     hint = None;
                     remote_hit = 0;
                 }
@@ -422,12 +398,12 @@ impl CostFunction {
             .collect()
     }
 
-    /// Select and reserve the P-leg of one request (one cost-book
+    /// Select and reserve the P-leg of one request (one work-book
     /// transaction; no await inside).
     ///
     /// # Inputs
     /// `ix`: the runtime's injector; `input`: the request (its `rid` keys the
-    /// engine progress, its `trade_session` counts in N_active of the copy
+    /// engine progress, its `placement_session` counts in N_active of the copy
     /// price `auto`); `tokens`: the prompt length; `reply`/`indexer_ms`: the
     /// raw indexer reply of the request and its latency; `pool`: the healthy
     /// P-role workers; `donors`: with `--symmetric-pd-pull-from-any-holder`, the
@@ -437,7 +413,7 @@ impl CostFunction {
     ///
     /// # Outputs
     /// The selected candidate (its `hint` is the P-leg's pull hint), the
-    /// unique reservation and the trade decision record. A missing or reused
+    /// unique reservation and the placement decision record. A missing or reused
     /// rid, an empty pool or a failed trace gives
     /// [`SymmetricPdError::CostFunction`]; nothing is reserved then.
     #[allow(clippy::too_many_arguments)]
@@ -471,65 +447,65 @@ impl CostFunction {
         Ok((selected, reservation, decision))
     }
 
-    /// One TRADE reservation of `candidates` (one cost-book transaction).
-    /// With `--trade-wait e3` the E3 inputs are built before the
+    /// One cost-function reservation of `candidates` (one work-book transaction).
+    /// With `--prefill-wait forecast` the forecast inputs are built before the
     /// lock and the routed request is recorded after it (shadow line, online
-    /// state); otherwise the ledger or copy-price terms of the parameters.
-    /// `gwq_note`: the `gwq` object of the reserve event (a request that the
+    /// state); otherwise the token-count or copy-price terms of the parameters.
+    /// `queue_note`: the `queue` object of the reserve event (a request that the
     /// queue does not hold).
     pub(super) fn reserve_candidates(
         &self,
         input: &PlaceInput,
         tokens: u64,
         candidates: Vec<Candidate>,
-        gwq_note: Option<Value>,
+        queue_note: Option<Value>,
     ) -> Result<(Candidate, Reservation, Value), SymmetricPdError> {
-        let Some(e3) = self.e3.as_ref().filter(|e3| e3.decides) else {
+        let Some(forecast) = self.forecast.as_ref().filter(|forecast| forecast.decides) else {
             return self
                 .book
-                .reserve_trade_session_noted(
+                .reserve_cost_session_noted(
                     tokens,
                     input.rid.clone(),
                     candidates,
-                    self.cfg.trade,
-                    input.trade_session.as_deref(),
-                    gwq_note,
+                    self.cfg.cost_params,
+                    input.placement_session.as_deref(),
+                    queue_note,
                 )
                 .map_err(SymmetricPdError::CostFunction);
         };
-        // Fits, targets, snapshots and pushed states before the cost-book lock.
-        let ctx = e3.context(
+        // Fits, targets, snapshots and pushed states before the work-book lock.
+        let ctx = forecast.context(
             &self.book,
             &candidates,
             tokens,
             input.rid.as_deref(),
-            input.e3_session.as_deref(),
+            input.forecast_session.as_deref(),
         );
         let (selected, reservation, decision) = self
             .book
-            .reserve_trade_e3_session_noted(
+            .reserve_cost_forecast_session_noted(
                 tokens,
                 input.rid.clone(),
                 candidates,
-                self.cfg.trade,
+                self.cfg.cost_params,
                 Some(&ctx),
-                input.trade_session.as_deref(),
-                gwq_note,
+                input.placement_session.as_deref(),
+                queue_note,
             )
             .map_err(SymmetricPdError::CostFunction)?;
-        e3.record_route(
+        forecast.record_route(
             &decision,
             input.rid.as_deref(),
             &selected.worker_url,
             tokens,
-            input.e3_session.clone(),
+            input.forecast_session.clone(),
         );
         Ok((selected, reservation, decision))
     }
 
-    /// One progress query per P-role worker (the CoScheduler's
-    /// `refresh_progress`; the `prefill_routing` section only with the E3
-    /// forecast state): apply each reply to the cost book; a stale sequence or
+    /// One progress query per P-role worker (the cost function's
+    /// `refresh_progress`; the `prefill_routing` section only with the forecast
+    /// forecast state): apply each reply to the work book; a stale sequence or
     /// a failed query retains the reservations.
     fn refresh_progress(self: &Arc<Self>, members: Vec<Arc<Worker>>) -> Vec<JoinHandle<()>> {
         let age = Duration::from_millis(self.cfg.load_poll_ms);
@@ -550,64 +526,33 @@ impl CostFunction {
             .collect()
     }
 
-    /// One progress query of `worker`: the `prefill_routing` section with
-    /// the E3 forecast state, the `host_room` section with
-    /// `--symmetric-pd-loads-host-room`. The reply updates the cost book (and the
-    /// E3 state). Returns the engine cursor it applied.
+    /// One progress query of `worker`, with the `prefill_routing` section
+    /// when the forecast state wants it. The reply updates the work book
+    /// (and the forecast state). Returns the engine cursor it applied.
     async fn poll_progress(&self, worker: &Worker, query: &Query) -> anyhow::Result<(String, u64)> {
-        let room_wanted = self.host_room_wanted(&worker.url);
-        let routing_wanted = self
-            .e3
+        let mut routing = self
+            .forecast
             .as_ref()
-            .is_some_and(|e3| e3.routing_wanted(&worker.url));
-        let (mut routing, mut room, mut room_rejected) = (routing_wanted, room_wanted, false);
+            .is_some_and(|forecast| forecast.routing_wanted(&worker.url));
         let fetched = loop {
-            match fetch_progress_poll(&self.poll_client, &worker.url, routing, room).await {
-                // An engine without a section rejects the include (HTTP 4xx
-                // or 500; the reply does not say which section): poll again
-                // without the rejected one, so the progress goes on;
-                // re-probe later. With both sections asked, the routing
-                // snapshot alone tells which: accepted, host_room was the
-                // rejected one (an engine with the snapshot but without
-                // host_room keeps its E3 view); rejected, the snapshot was,
-                // and host_room is asked alone next. A failed probe fails
-                // the poll and marks nothing.
-                Err(error) if routing && room && include_rejected(&error) => {
-                    match fetch_progress_poll(&self.poll_client, &worker.url, true, false).await {
-                        Err(alone) if include_rejected(&alone) => {
-                            if let Some(e3) = &self.e3 {
-                                e3.note_routing_rejected(&worker.url, &alone);
-                            }
-                            routing = false;
-                        }
-                        alone => {
-                            if alone.is_ok() {
-                                self.note_host_room_rejected(&worker.url, &error);
-                                room_rejected = true;
-                            }
-                            break alone;
-                        }
-                    }
-                }
+            match fetch_progress_poll(&self.poll_client, &worker.url, routing).await {
+                // An engine without the section rejects the include (HTTP 4xx
+                // or 500): poll again without it, so the progress goes on;
+                // re-probe later.
                 Err(error) if routing && include_rejected(&error) => {
-                    if let Some(e3) = &self.e3 {
-                        e3.note_routing_rejected(&worker.url, &error);
+                    if let Some(forecast) = &self.forecast {
+                        forecast.note_routing_rejected(&worker.url, &error);
                     }
                     routing = false;
-                }
-                Err(error) if room && include_rejected(&error) => {
-                    self.note_host_room_rejected(&worker.url, &error);
-                    room = false;
-                    room_rejected = true;
                 }
                 fetched => break fetched,
             }
         };
         let received = Instant::now();
-        let (progress, load, routing_raw, room_raw) = fetched?;
+        let (progress, load, routing_raw) = fetched?;
         if routing {
-            if let Some(e3) = &self.e3 {
-                e3.note_routing_accepted(&worker.url);
+            if let Some(forecast) = &self.forecast {
+                forecast.note_routing_accepted(&worker.url);
             }
         }
         query.check(&progress.epoch, progress.sequence)?;
@@ -615,64 +560,13 @@ impl CostFunction {
         self.book
             .apply_progress_received(&worker.url, progress, load, query.sent_at, received)
             .map_err(anyhow::Error::msg)?;
-        if let (Some(e3), Some(raw)) = (&self.e3, routing_raw) {
-            // Parsed here, off the cost-book lock.
-            e3.observe(&worker.url, &raw, query.sent_at, received);
-        }
-        match room_raw {
-            Some(room) => self.book.note_host_room(&worker.url, room, query.sent_at),
-            None if room_wanted && !room_rejected => self.note_host_room_missing(&worker.url),
-            None => {}
+        if let (Some(forecast), Some(raw)) = (&self.forecast, routing_raw) {
+            // Parsed here, off the work-book lock.
+            forecast.observe(&worker.url, &raw, query.sent_at, received);
         }
         // An applied view can give room: a release pass.
-        self.gwq_wake_poll();
+        self.queue_wake_poll();
         Ok(cursor)
-    }
-
-    /// `--symmetric-pd-loads-host-room`, except for a worker whose engine rejected
-    /// the section less than [`HOST_ROOM_REPROBE`] ago.
-    fn host_room_wanted(&self, worker: &str) -> bool {
-        self.cfg.loads_host_room
-            && self
-                .host_room_rejections
-                .lock()
-                .get(worker)
-                .is_none_or(|at| at.elapsed() >= HOST_ROOM_REPROBE)
-    }
-
-    /// The engine of `worker` accepted `include=...,host_room` but its reply
-    /// has no host_room section: counted per P (snapshot host_room_missing);
-    /// the first one of each P is logged as a warning. The phi of that P
-    /// falls back (no_host_room) until a section comes.
-    fn note_host_room_missing(&self, worker: &str) {
-        if self.book.note_host_room_missing(worker) {
-            tracing::warn!(
-                target: "symmetric_pd",
-                worker,
-                "symmetric_pd cost_function: the engine reply has no host_room section although \
-                 the include was accepted (an engine without session retention or without a host \
-                 pool); with the pull price phi this P uses phi_P = 1 (no_host_room) until a \
-                 section comes; count: host_room_missing in the cost snapshot"
-            );
-        }
-    }
-
-    /// The engine of `worker` rejected `include=...,host_room`; the first
-    /// rejection of each worker is logged as a warning.
-    fn note_host_room_rejected(&self, worker: &str, error: &anyhow::Error) {
-        self.host_room_rejections
-            .lock()
-            .insert(worker.to_string(), Instant::now());
-        if self.book.note_host_room_rejected(worker) {
-            tracing::warn!(
-                target: "symmetric_pd",
-                worker,
-                %error,
-                reprobe_s = HOST_ROOM_REPROBE.as_secs(),
-                "symmetric_pd cost_function: the engine rejected include=host_room (no host_room \
-                 section); this poll and the next ones until the re-probe go without it"
-            );
-        }
     }
 }
 
@@ -735,9 +629,9 @@ fn log_decision_line(input: &PlaceInput, selected: &Candidate, decision: &Value)
         source_worker = %source_worker,
         expected_hit_tokens = selected.expected_hit,
         local_hit_tokens = selected.local_hit,
-        trade_cost = decision["trade_cost"].as_f64().unwrap_or(0.0),
-        copy_lambda = decision["copy_lambda"].as_f64().unwrap_or(0.0),
-        rate_tokens_per_s = decision["rate_tokens_per_s"].as_f64().unwrap_or(0.0),
+        placement_cost = decision["cost"].as_f64().unwrap_or(0.0),
+        copy_price = decision["copy_price"].as_f64().unwrap_or(0.0),
+        prefill_rate_tokens_per_s = decision["prefill_rate_tokens_per_s"].as_f64().unwrap_or(0.0),
         fallback_reason = decision["fallback_reason"].as_str().unwrap_or("none"),
         "symmetric_pd cost_function decision"
     );
@@ -804,8 +698,8 @@ async fn progress_poller_loop(
     }
 }
 
-/// The one-second cost-book snapshot (trace row `snapshot`, with
-/// `trade_auto` when the copy price or R is `auto`).
+/// The one-second work-book snapshot (trace row `snapshot`, with
+/// `auto_price` when the copy price or R is `auto`).
 async fn snapshot_loop(weak: Weak<CostFunction>) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -816,93 +710,43 @@ async fn snapshot_loop(weak: Weak<CostFunction>) {
     }
 }
 
-/// The startup lines of the cost model (target `symmetric_pd`). The text is the
-/// CoScheduler's (`co_schedule TRADE ...`) behind the prefix
-/// `symmetric_pd cost_function:`, so the logs of both paths read alike.
-fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_floor: u64) {
-    let trade = cfg.trade;
-    // Empty with hol_weight 0.
-    let hol = if trade.hol_weight > 0.0 {
-        format!(
-            " + mu*R*a_w*S*(B + S/2) (HOL: extra wait of the later arrivals at P; \
-             mu = {}, a_w = TRADE placements per s on P over the last {} s)",
-            trade.hol_weight, trade.hol_rate_window_s,
-        )
-    } else {
-        String::new()
-    };
+/// The startup lines of the cost model (target `symmetric_pd`).
+fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, fetch_floor: u64) {
+    let cost_params = cfg.cost_params;
     tracing::info!(
         target: "symmetric_pd",
-        rate_tokens_per_s = trade.rate_tokens_per_s,
-        pull_fixed_ms = trade.pull_fixed_ms,
-        pull_ms_per_100k = trade.pull_ms_per_100k,
-        copy_lambda = trade.copy_lambda,
-        exclude_unlaunched = trade.exclude_unlaunched,
-        pull_floor_tokens = trade_floor,
+        prefill_rate_tokens_per_s = cost_params.prefill_rate_tokens_per_s,
+        fetch_fixed_ms = cost_params.fetch_fixed_ms,
+        fetch_ms_per_100k_tokens = cost_params.fetch_ms_per_100k_tokens,
+        copy_price = cost_params.copy_price,
+        wait = cost_params.wait.as_str(),
+        pull_floor_tokens = fetch_floor,
         local_prefix_fallback = kv.local_prefix_fallback,
-        "symmetric_pd cost_function: TRADE cost model enabled: cost = backlog + uncached \
-         + R*max(0, pull_s - backlog/R) + lambda*pulled{hol}; no pull cap",
+        "symmetric_pd cost_function: placement cost function on: cost = backlog + uncached \
+         + R*max(0, fetch_s - backlog/R) + copy_price*fetched; no fetch cap",
     );
-    if !trade.is_original() {
+    if cost_params.is_auto() {
+        let (lambda, rate) = cost_params.auto_description();
+        let (tau, idle) = (cost_params.auto_tau_s, cost_params.auto_session_idle_s);
         tracing::info!(
             target: "symmetric_pd",
-            wait = trade.wait.as_str(),
-            dup_charge = trade.dup_charge.as_str(),
-            margin_noise_k = trade.margin_noise_k,
-            hol_weight = trade.hol_weight,
-            "symmetric_pd cost_function: TRADE options: dup all = lambda also on recomputed copies; \
-             noise margin = keep owner unless gain_s > k*sqrt(B_o^2 + B_best^2)",
-        );
-    }
-    if cfg.trace_async {
-        tracing::info!(
-            target: "symmetric_pd",
-            "symmetric_pd cost_function: cost trace writer async (background thread; rows in order, \
-             flushed per batch, off the cost-book lock)"
-        );
-    }
-    if trade.is_auto() {
-        let (lambda, rate) = trade.auto_description();
-        let (tau, idle) = (trade.auto_tau_s, trade.auto_session_idle_s);
-        tracing::info!(
-            target: "symmetric_pd",
-            lambda_mode = trade.copy_lambda_mode.as_str(),
-            rate_mode = trade.rate_mode.as_str(),
+            copy_price_mode = cost_params.copy_price_mode.as_str(),
+            prefill_rate_mode = cost_params.prefill_rate_mode.as_str(),
             tau_s = tau,
             session_idle_s = idle,
-            "symmetric_pd cost_function: TRADE copy price auto: {lambda}; {rate}; tau = {tau} s, \
-             session idle = {idle} s. Inputs from the router ledger: busy = time with a \
+            "symmetric_pd cost_function: copy price auto: {lambda}; {rate}; tau = {tau} s, \
+             session idle = {idle} s. Inputs from the prefill work book: busy = time with a \
              request dispatched to the P and its prefill not ended, R_hat = computed \
              prefill tokens per busy second, N_active = sessions with a request on a P \
              or an event in the idle window and no END. The fallback applies for the \
              first tau seconds and when an input is missing",
         );
     }
-    if trade.pull_price == TradePullPrice::Phi {
-        let floor = match trade.copy_lambda_mode {
-            TradeLambdaMode::Auto { min, .. } => min,
-            TradeLambdaMode::Fixed => 0.0,
-        };
-        tracing::info!(
-            target: "symmetric_pd",
-            pull_price = trade.pull_price.as_str(),
-            tau_s = trade.auto_tau_s,
-            lambda_min = floor,
-            "symmetric_pd cost_function: TRADE pull price phi: lambda_P = max(min, lambda_q * phi_P) \
-             for the target P with min = {floor} (--trade-copy-lambda-min; the max \
-             does not apply); lambda_q = mu*q*R/R_hat before the clamp (the fallback lambda \
-             while the auto price falls back); phi_P = live share (class 1) of the host tokens \
-             that P evicted, EWMA (tau = {} s) of the host_room counter increments, 0 without \
-             an eviction in the last tau; a P without host_room data uses phi_P = 1 \
-             (no_host_room). A pull discount on the pulled tokens only",
-            trade.auto_tau_s,
-        );
-    }
     if kv.local_prefix_fallback {
-        // The CLI rejects this with TRADE; a config built in code can set it.
+        // The CLI rejects this with cost-function; a config built in code can set it.
         tracing::warn!(
             target: "symmetric_pd",
-            "symmetric_pd cost_function: TRADE drops engine-side local-prefix fallback hints: a \
+            "symmetric_pd cost_function: the cost function drops engine-side local-prefix fallback hints: a \
              hint is sent only for a pull of at least the floor"
         );
     }
@@ -916,67 +760,46 @@ fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_
         );
     }
     let trace = cfg
-        .cost_trace
+        .placement_trace
         .as_ref()
         .map_or_else(|| "off".to_string(), |p| p.display().to_string());
     let poll_ms = cfg.load_poll_ms;
     tracing::info!(
         target: "symmetric_pd",
         load_poll_ms = poll_ms,
-        cost_trace = %trace,
+        placement_trace = %trace,
         "symmetric_pd cost_function: P progress poll every {poll_ms} ms \
          (GET /v1/loads?include=core,queues,prefill_work on each P-role worker); \
-         cost trace {trace}",
+         placement trace {trace}",
     );
-    if cfg.loads_host_room {
-        let used_by = if trade.pull_price == TradePullPrice::Phi {
-            "the TRADE pull price phi reads its evicted counters"
-        } else {
-            "no decision uses it"
-        };
-        tracing::info!(
-            target: "symmetric_pd",
-            loads_host_room = true,
-            "symmetric_pd cost_function: the progress poll also asks for the engine host_room \
-             section (GET /v1/loads?include=core,queues,prefill_work,host_room); the cost \
-             trace records the latest one per P (host_room_by_p in the snapshot and in each \
-             decision); {used_by}",
-        );
-    }
-    if let Some(gwq) = cfg.gwq_auto {
+    if let Some(queue) = cfg.global_queue {
         let fallback_ms = cfg
             .load_poll_ms
             .saturating_add(crate::global_queue::AUTO_DISPATCH_DELAY_MS);
-        let (tau, max_wait_s) = (trade.auto_tau_s, gwq.max_wait_ms as f64 / 1000.0);
-        let shadow = if cfg.loads_host_room {
-            "phi, class-0 and free host tokens and the (ii) hold of each release are traced \
-             (shadow, no action)"
-        } else {
-            "no shadow counters (needs --symmetric-pd-loads-host-room)"
-        };
+        let (tau, max_wait_s) = (cost_params.auto_tau_s, queue.max_wait_ms as f64 / 1000.0);
         tracing::info!(
             target: "symmetric_pd",
-            gwq_auto = true,
+            global_queue = true,
             tau_s = tau,
-            max_wait_ms = gwq.max_wait_ms,
+            max_wait_ms = queue.max_wait_ms,
             fallback_react_ms = fallback_ms,
-            "symmetric_pd cost_function: global waiting queue GWQ-AUTO on: a request bound to one \
+            "symmetric_pd cost_function: global queue on: a request bound to one \
              P (h1 - h2 >= C, C = the engine chunk from /server_info, 8192 when not reported) \
              is reserved at arrival; a free request waits, in HRRN order with the held work \
-             ahead as virtual backlog, until its TRADE argmin P has W <= lead, W = queued / R, \
+             ahead as virtual backlog, until its cheapest P has W <= lead, W = queued / R, \
              lead = C / R + T_react; T_react = time-weighted mean (tau = {tau} s) of release to \
              first sighting, sampled at an empty engine queue ({fallback_ms} ms before the \
-             first sample); max wait {max_wait_s} s; {shadow}; exact TRADE ties of a release \
+             first sample); max wait {max_wait_s} s; exact cost ties of a release \
              go to the P with room, the larger own hit, the fewest outstanding requests, then \
              in rotation; each step reads the current P-role pool",
         );
     }
-    log_e3(cfg);
+    log_forecast(cfg);
     if cfg.trace_session_moves {
         tracing::info!(
             target: "symmetric_pd",
             trace_session_moves = true,
-            "symmetric_pd cost_function: each TRADE reserve event with a session identity has a \
+            "symmetric_pd cost_function: each reserve event with a session identity has a \
              session_move record (the P of the session's last decision, the hits, the pull)",
         );
     }
@@ -996,28 +819,28 @@ fn log_cost_model(cfg: &SymmetricPdCostFunctionConfig, kv: &KvHintConfig, trade_
             target: "symmetric_pd",
             unknown_expire_secs = 0,
             "symmetric_pd cost_function: unknown P-leg reservations never expire \
-             (--symmetric-pd-unknown-expire-secs 0): their work stays in the ledger until a \
+             (--symmetric-pd-unknown-expire-secs 0): their work stays in the work book until a \
              terminal result",
         );
     }
 }
 
-/// The startup lines of the E3 forecast state (target `symmetric_pd`): the
-/// decisions with `--trade-wait e3`, the queue drain with
-/// `--symmetric-pd-gwq-room predicted`, the state push.
-fn log_e3(cfg: &SymmetricPdCostFunctionConfig) {
-    let trade = cfg.trade;
-    let decides = trade.wait == TradeWait::E3;
+/// The startup lines of the forecast state (target `symmetric_pd`): the
+/// decisions with `--prefill-wait forecast`, the queue drain with
+/// `--global-queue-room forecast`, the state push.
+fn log_forecast(cfg: &SymmetricPdCostFunctionConfig) {
+    let cost_params = cfg.cost_params;
+    let decides = cost_params.wait == PrefillWait::Forecast;
     let drain = cfg
-        .gwq_auto
-        .is_some_and(|g| g.room == crate::global_queue::GlobalQueueRoom::Predicted);
-    let Some(e3) = cfg.trade_e3.as_ref().map(|t| &*t.0) else {
+        .global_queue
+        .is_some_and(|g| g.room == crate::global_queue::GlobalQueueRoom::Forecast);
+    let Some(forecast) = cfg.forecast.as_ref().map(|t| &*t.0) else {
         if decides || drain {
-            // The CLI requires the bound table; a config built in code may omit it.
+            // The CLI always attaches the forecast state; a config built in code may omit it.
             tracing::error!(
                 target: "symmetric_pd",
-                "symmetric_pd cost_function: wait e3 or GWQ room predicted without the E3 forecast \
-                 state (--trade-e3-bound-table): every P uses the ledger terms \
+                "symmetric_pd cost_function: forecast wait or global queue room forecast without the \
+                 forecast state: every P uses the token-count terms \
                  (fallback no_context) and the queue keeps the token rule"
             );
         }
@@ -1026,33 +849,43 @@ fn log_e3(cfg: &SymmetricPdCostFunctionConfig) {
     if !(decides || drain) {
         return;
     }
-    let shadow = e3
-        .shadow_path
-        .as_ref()
-        .map_or_else(|| "cost trace".to_string(), |p| p.display().to_string());
+    let shadow = forecast.shadow_path.as_ref().map_or_else(
+        || "placement trace".to_string(),
+        |p| p.display().to_string(),
+    );
     tracing::info!(
         target: "symmetric_pd",
-        bound_table = %e3.bound_path.display(),
-        bound_sha256 = %e3.bound_sha256,
-        bound_mode = %e3.mode,
-        bound_level = %e3.level,
-        rq_margin_s = e3.rq_margin_s,
-        next_pass_lag = e3.next_pass_lag,
-        max_view_age_s = trade.eft_max_view_age_s,
-        e3_schema = crate::e3::SCHEMA,
+        error_table = %forecast.bound_path.display(),
+        error_table_sha256 = %forecast.bound_sha256,
+        bound_mode = %forecast.mode,
+        bound_level = %forecast.level,
+        rq_margin_s = forecast.rq_margin_s,
+        next_pass_lag = forecast.next_pass_lag,
+        max_view_age_s = cost_params.max_state_age_s,
+        forecast_schema = crate::forecast::SCHEMA,
         shadow = %shadow,
-        "symmetric_pd cost_function: E3 forecast state on (step-time-model P completion forecast, \
+        "symmetric_pd cost_function: forecast state on (step-time-model P completion forecast, \
          online fits from the engine timeline samples): the progress poll also asks for the \
          engine prefill_routing snapshot (GET /v1/loads?include=...,prefill_routing; a symmetric \
-         worker needs SGLANG_SYMMETRIC_ROUTING_SNAPSHOT=1); e3_shadow / e3_label lines go to the \
+         worker needs SGLANG_SYMMETRIC_ROUTING_SNAPSHOT=1); forecast_shadow / forecast_label lines go to the \
          {shadow}",
     );
-    if let Some(frozen) = e3.frozen_fit.as_ref() {
+    let (chunk, page) = crate::prefill_forecast::BOUND_FIT_POLICY;
+    tracing::info!(
+        target: "symmetric_pd",
+        covered_chunk_tokens = chunk,
+        covered_page_tokens = page,
+        "symmetric_pd cost_function: the forecast error table covers engines with chunk {chunk} / \
+         page {page} tokens; a worker with other sizes, or without a routing snapshot, has no \
+         forecast and placement uses the token count for it (one warning per worker); if no \
+         worker has a forecast the decision is the token-count decision",
+    );
+    if let Some(frozen) = forecast.frozen_fit.as_ref() {
         tracing::info!(
             target: "symmetric_pd",
             frozen_fit = %frozen.path.display(),
             frozen_sha256 = %frozen.sha256,
-            "symmetric_pd cost_function: E3 frozen fit: every P's GPU model, launch model and \
+            "symmetric_pd cost_function: forecast fit file: every P's GPU model, launch model and \
              calibration constants come from this file, not from the online fits (the online \
              samples give the arrival rates only): {}",
             frozen.summary(),
@@ -1061,40 +894,37 @@ fn log_e3(cfg: &SymmetricPdCostFunctionConfig) {
     if decides {
         tracing::info!(
             target: "symmetric_pd",
-            gate_m = trade.gate_m,
-            gate_gmin_s = trade.gate_gmin_s,
-            hol_weight = trade.hol_weight,
-            "symmetric_pd cost_function: TRADE wait e3: C_w = R*(pred_s + max(0, pull_s - wait_s)) \
+            move_margin = cost_params.move_margin,
+            "symmetric_pd cost_function: forecast wait: C_w = R*(pred_s + max(0, fetch_s - wait_s)) \
              + copy; leave owner o for best w only if (C_o - C_w)/R - m*sqrt(b_o^2 + b_w^2) > \
-             g_min (b = error bound at the level, m = {}, g_min = {} s); a P without a usable \
-             forecast keeps the ledger terms and never wins a move",
-            trade.gate_m,
-            trade.gate_gmin_s,
+             0 (b = error bound at the level, m = {}); a P without a usable forecast keeps the \
+             token-count terms and never wins a move",
+            cost_params.move_margin,
         );
     }
     if drain {
         tracing::info!(
             target: "symmetric_pd",
-            gwq_room = "predicted",
-            trade_wait = trade.wait.as_str(),
-            "symmetric_pd cost_function: GWQ room predicted: a P also has room while the E3 drain of \
+            queue_room = "forecast",
+            prefill_wait = cost_params.wait.as_str(),
+            "symmetric_pd cost_function: global queue room forecast: a P also has room while the forecast drain of \
              a cold {}-token probe (newest pushed or polled state + router rows) is at most its \
-             lead C / R + T_react, and the walk prices its wait as min(R x drain, ledger \
+             lead C / R + T_react, and the walk prices its wait as min(R x drain, work-book \
              backlog); a P without a usable forecast keeps the token rule; the walk and its \
-             releases use the ledger terms ({} wait for the requests reserved at arrival)",
-            crate::cost_balance::GWQ_PROBE_TOKENS,
-            trade.wait.as_str(),
+             releases use the token-count terms ({} wait for the requests reserved at arrival)",
+            crate::prefill_work::QUEUE_PROBE_TOKENS,
+            cost_params.wait.as_str(),
         );
     }
-    if let Some(push) = e3.push.as_ref() {
+    if let Some(push) = forecast.push.as_ref() {
         tracing::info!(
             target: "symmetric_pd",
             push_port = push.port,
             push_bound_mode = %push.mode,
             push_bound_level = %push.level,
-            offset_window_s = crate::trade_e3_push::OFFSET_WINDOW_S,
-            wire_schema = crate::trade_e3_push::WIRE_SCHEMA,
-            "symmetric_pd cost_function: E3 state push on: one ZMQ SUB per P-role worker at \
+            offset_window_s = crate::prefill_state_push::OFFSET_WINDOW_S,
+            wire_schema = crate::prefill_state_push::WIRE_SCHEMA,
+            "symmetric_pd cost_function: forecast state push on: one ZMQ SUB per P-role worker at \
              tcp://<P host>:{} (topic prefill_state, routing rank 0; engine \
              SGLANG_PREFILL_STATE_PUSH_PORT); a P's forecast starts from its newest pushed state \
              when it is fresh, has the polled snapshot's epoch and is usable, else from the polled \
@@ -1109,7 +939,7 @@ mod tests {
     use super::*;
     use crate::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
     use crate::kv_hint::KvWorkerMapEntry;
-    use crate::scheduler::trade::{TradeAutoQ, TradeLambdaMode, TradeParams, TradeWait};
+    use crate::scheduler::placement_cost::{CopyPriceMode, PlacementCostParams, PrefillWait};
     use serde_json::json;
 
     const P1: &str = "http://p1:30000";
@@ -1154,31 +984,29 @@ mod tests {
 
     fn cost_function(
         dir: &tempfile::TempDir,
-        trade: TradeParams,
+        cost_params: PlacementCostParams,
         kv: &KvHintConfig,
     ) -> Arc<CostFunction> {
-        cost_function_with(dir, trade, kv, false)
+        cost_function_with(dir, cost_params, kv, false)
     }
 
     /// As [`cost_function`], with `--symmetric-pd-pull-from-any-holder` set or not.
     fn cost_function_with(
         dir: &tempfile::TempDir,
-        trade: TradeParams,
+        cost_params: PlacementCostParams,
         kv: &KvHintConfig,
         pull_from_any_holder: bool,
     ) -> Arc<CostFunction> {
         CostFunction::new(
             SymmetricPdCostFunctionConfig {
-                trade,
-                cost_trace: Some(dir.path().join("cost.jsonl")),
+                cost_params,
+                placement_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
-                loads_host_room: false,
-                gwq_auto: None,
+                global_queue: None,
                 trace_session_moves: false,
-                trade_e3: None,
+                forecast: None,
                 pull_from_any_holder,
-                trace_async: false,
             },
             kv,
         )
@@ -1212,7 +1040,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let kv = kv(512, &[D1, P1, P3]);
         let ix = KvHintInjector::new(&kv);
-        let cf = cost_function(&dir, TradeParams::default(), &kv);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
         let a = answer(&[(D1, 30_000), (P1, 18_000), (P3, 300)], &[]);
         let c = cf.candidates(&ix, Some(&a), 40_000, &pool());
         let urls: Vec<&str> = c.iter().map(|c| c.worker_url.as_str()).collect();
@@ -1227,7 +1055,7 @@ mod tests {
         assert_eq!(c[2].local_hit, 300);
     }
 
-    /// P3 holds 17,600 and P1 18,000: the gain 400 is below the TRADE floor
+    /// P3 holds 17,600 and P1 18,000: the gain 400 is below the cost-function floor
     /// (512), so P3 recomputes those tokens without a hint. The same holds
     /// when the injector gate is 0 and pick() returns the hint.
     #[test]
@@ -1236,7 +1064,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let kv = kv(gate, &[P1, P2, P3]);
             let ix = KvHintInjector::new(&kv);
-            let cf = cost_function(&dir, TradeParams::default(), &kv);
+            let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
             let a = answer(&[(P1, 18_000), (P3, 17_600)], &[]);
             assert_eq!(ix.pick(&a, P3).is_some(), gate == 0);
             let c = cf.candidates(&ix, Some(&a), 40_000, &pool());
@@ -1247,17 +1075,17 @@ mod tests {
         }
     }
 
-    /// The CoScheduler rule (`admit_reserved`) on fixed answers: the local
+    /// The cost function rule (`admit_reserved`) on fixed answers: the local
     /// hit is the target's own match (clamped to the prompt), the GPU hit
     /// the observation, the expected hit max(local, pulled source match)
     /// clamped to the prompt. An answer URL with a trailing `/` maps to the
     /// registry URL. Without an answer every hit is 0 and no hint is sent.
     #[test]
-    fn candidates_follow_the_co_scheduler_rule() {
+    fn candidates_follow_the_cost_function_rule() {
         let dir = tempfile::tempdir().unwrap();
         let kv = kv(512, &[P1, P2, P3]);
         let ix = KvHintInjector::new(&kv);
-        let cf = cost_function(&dir, TradeParams::default(), &kv);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
         let p2_slash = "http://p2:30000/";
         let a = answer(
             &[(P1, 20_000), (p2_slash, 6_000)],
@@ -1291,7 +1119,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let kv = kv(512, &[D1, P1, P3]);
         let ix = KvHintInjector::new(&kv);
-        let cf = cost_function_with(&dir, TradeParams::default(), &kv, true);
+        let cf = cost_function_with(&dir, PlacementCostParams::default(), &kv, true);
         let a = answer(&[(D1, 30_000), (P1, 18_000), (P3, 300)], &[(P1, 9_000)]);
         let c = cf.candidates_any_holder(&ix, Some(&a), 40_000, &pool(), &[worker(D1)]);
         // (worker, local hit, GPU hit, expected hit, pull source) per candidate.
@@ -1343,7 +1171,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let kv = kv(512, &[D1, P1, P2, P3]);
         let ix = KvHintInjector::new(&kv);
-        let cf = cost_function_with(&dir, TradeParams::default(), &kv, true);
+        let cf = cost_function_with(&dir, PlacementCostParams::default(), &kv, true);
         let p2_slash = "http://p2:30000/";
         let a = answer(&[(p2_slash, 25_000), (D1, 20_000)], &[(p2_slash, 25_000)]);
         let c = cf.candidates_any_holder(&ix, Some(&a), 40_000, &pool(), &[worker(D1)]);
@@ -1372,7 +1200,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let kv = kv(512, &[D1, D2, P1, P2, P3]);
         let ix = KvHintInjector::new(&kv);
-        let cf = cost_function_with(&dir, TradeParams::default(), &kv, true);
+        let cf = cost_function_with(&dir, PlacementCostParams::default(), &kv, true);
         let a = answer(&[(D1, 30_000), (D2, 25_000), (P1, 18_000)], &[]);
         // D1 dead: every target pulls from the healthy D2 (P1: 25,000 - 18,000
         // = 7,000 above the floor).
@@ -1412,7 +1240,7 @@ mod tests {
     }
 
     /// The body of `reserve` before the flag existed: the answer
-    /// restricted to the pool, `candidates`, one cost-book transaction.
+    /// restricted to the pool, `candidates`, one work-book transaction.
     fn reserve_baseline(
         cf: &CostFunction,
         ix: &KvHintInjector,
@@ -1424,12 +1252,12 @@ mod tests {
         let answer = reply.map(|r| restrict_to_pool(&ix.answer_from_reply(r, 1.0), pool));
         let candidates = cf.candidates(ix, answer.as_ref(), tokens, pool);
         cf.book
-            .reserve_trade_session(
+            .reserve_cost_session(
                 tokens,
                 input.rid.clone(),
                 candidates,
-                cf.cfg.trade,
-                input.trade_session.as_deref(),
+                cf.cfg.cost_params,
+                input.placement_session.as_deref(),
             )
             .unwrap()
     }
@@ -1445,8 +1273,8 @@ mod tests {
         let kv = kv(512, &urls);
         let ix = KvHintInjector::new(&kv);
         let (dir_new, dir_old) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let new = cost_function_with(&dir_new, TradeParams::default(), &kv, false);
-        let old = cost_function_with(&dir_old, TradeParams::default(), &kv, false);
+        let new = cost_function_with(&dir_new, PlacementCostParams::default(), &kv, false);
+        let old = cost_function_with(&dir_old, PlacementCostParams::default(), &kv, false);
         // Worker ids follow kv(): D1 = 1, P1 = 2, P2 = 3, P3 = 4.
         let replies = [
             Some(reply(&[(1, 30_000, 0), (2, 18_000, 9_000), (4, 300, 0)])),
@@ -1461,7 +1289,7 @@ mod tests {
             let input = PlaceInput {
                 prompt_len: 60_000,
                 rid: Some(format!("r{i}")),
-                trade_session: Some(format!("{i}/agent")),
+                placement_session: Some(format!("{i}/agent")),
                 ..Default::default()
             };
             let (sel_new, res_new, dec_new) = new
@@ -1522,24 +1350,22 @@ mod tests {
     fn session_end_counts_only_with_auto() {
         let kv = kv(512, &[P1]);
         let ix = KvHintInjector::new(&kv);
-        let auto = TradeParams {
-            copy_lambda: 18.4,
-            copy_lambda_mode: TradeLambdaMode::Auto {
-                q: TradeAutoQ::Sat,
-                mu: 1.0,
+        let auto = PlacementCostParams {
+            copy_price: 18.4,
+            copy_price_mode: CopyPriceMode::Auto {
                 min: 4.6,
                 max: 1000.0,
             },
-            ..TradeParams::default()
+            ..PlacementCostParams::default()
         };
-        for (trade, counted) in [(TradeParams::default(), false), (auto, true)] {
+        for (cost_params, counted) in [(PlacementCostParams::default(), false), (auto, true)] {
             let dir = tempfile::tempdir().unwrap();
-            let cf = cost_function(&dir, trade, &kv);
+            let cf = cost_function(&dir, cost_params, &kv);
             assert_eq!(cf.is_auto(), counted);
             let input = PlaceInput {
                 prompt_len: 1_000,
                 rid: Some("r1".into()),
-                trade_session: Some("0/agent".into()),
+                placement_session: Some("0/agent".into()),
                 ..Default::default()
             };
             let (selected, reservation, _) = cf
@@ -1552,7 +1378,7 @@ mod tests {
         }
     }
 
-    // ---- --symmetric-pd-gwq-auto ----
+    // ---- --global-queue ----
 
     fn cand(url: &str, hit: u64) -> Candidate {
         Candidate {
@@ -1568,41 +1394,41 @@ mod tests {
     /// chunk of the owner P (from /server_info, 8192 when not reported). A
     /// tie of the two largest hits, or no hit at all, is free.
     #[test]
-    fn gwq_classify_uses_the_owner_chunk() {
+    fn queue_classify_uses_the_owner_chunk() {
         let pool = pool();
         let c = [cand(P1, 20_000), cand(P2, 5_000), cand(P3, 0)];
-        let (bound, h1, h2, chunk, source, owner) = gwq_auto::classify(&c, &pool, 40_000);
+        let (bound, h1, h2, chunk, source, owner) = queue::classify(&c, &pool, 40_000);
         assert!(bound, "15,000 >= 8,192");
         assert_eq!((h1, h2, chunk, source), (20_000, 5_000, 8192, "default"));
         assert_eq!(owner.as_deref(), Some(P1));
         pool[0].set_chunk_tokens(16_384);
-        let (bound, _, _, chunk, source, _) = gwq_auto::classify(&c, &pool, 40_000);
+        let (bound, _, _, chunk, source, _) = queue::classify(&c, &pool, 40_000);
         assert!(!bound, "15,000 < 16,384");
         assert_eq!((chunk, source), (16_384, "server_info"));
         // The hits are clamped to the prompt: 12,000 - 5,000 < 8,192.
         pool[0].set_chunk_tokens(0);
-        assert!(!gwq_auto::classify(&c, &pool, 12_000).0);
+        assert!(!queue::classify(&c, &pool, 12_000).0);
         let tie = [cand(P1, 20_000), cand(P2, 20_000), cand(P3, 0)];
-        assert!(!gwq_auto::classify(&tie, &pool, 40_000).0);
+        assert!(!queue::classify(&tie, &pool, 40_000).0);
         let cold = [cand(P1, 0), cand(P2, 0), cand(P3, 0)];
-        let (bound, h1, _, _, _, owner) = gwq_auto::classify(&cold, &pool, 40_000);
+        let (bound, h1, _, _, _, owner) = queue::classify(&cold, &pool, 40_000);
         assert!(!bound && h1 == 0 && owner.is_none());
     }
 
-    /// A cost function with GWQ-AUTO over the pool [P1] (load poll 100 ms,
+    /// A cost function with global queue over the pool [P1] (load poll 100 ms,
     /// so T_react falls back to 0.6 s), P1 running a launched request with
     /// `remaining` tokens left.
-    fn gwq_cost_function(
+    fn queue_cost_function(
         dir: &tempfile::TempDir,
         max_wait_ms: u64,
         remaining: u64,
     ) -> (Arc<CostFunction>, KvHintConfig, Reservation) {
-        gwq_cost_function_with(dir, max_wait_ms, remaining, &[P1, P2], false)
+        queue_cost_function_with(dir, max_wait_ms, remaining, &[P1, P2], false)
     }
 
-    /// As [`gwq_cost_function`], with the indexer worker map `urls` and
+    /// As [`queue_cost_function`], with the indexer worker map `urls` and
     /// `--symmetric-pd-pull-from-any-holder` set or not.
-    fn gwq_cost_function_with(
+    fn queue_cost_function_with(
         dir: &tempfile::TempDir,
         max_wait_ms: u64,
         remaining: u64,
@@ -1612,28 +1438,31 @@ mod tests {
         let kv = kv(512, urls);
         let cf = CostFunction::new(
             SymmetricPdCostFunctionConfig {
-                trade: TradeParams {
-                    copy_lambda: 9.2,
-                    ..TradeParams::default()
+                cost_params: PlacementCostParams {
+                    copy_price: 9.2,
+                    ..PlacementCostParams::default()
                 },
-                cost_trace: Some(dir.path().join("cost.jsonl")),
+                placement_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
-                loads_host_room: false,
-                gwq_auto: Some(crate::config::SymmetricPdGwqAutoConfig {
+                global_queue: Some(crate::config::GlobalQueueConfig {
                     max_wait_ms,
                     ..Default::default()
                 }),
                 trace_session_moves: false,
-                trade_e3: None,
+                forecast: None,
                 pull_from_any_holder,
-                trace_async: false,
             },
             &kv,
         );
         let mut busy = cf
             .book
-            .reserve_uncached(remaining, Some("busy".into()), vec![cand(P1, 0)], 12288)
+            .reserve_cost(
+                remaining,
+                Some("busy".into()),
+                vec![cand(P1, 0)],
+                Default::default(),
+            )
             .unwrap()
             .1;
         busy.mark_dispatched().unwrap();
@@ -1642,7 +1471,7 @@ mod tests {
     }
 
     fn set_remaining(cf: &CostFunction, sequence: u64, remaining: u64) {
-        let progress = crate::cost_balance::PrefillProgress {
+        let progress = crate::prefill_work::PrefillProgress {
             epoch: "e".into(),
             sequence,
             remaining: [("busy".to_string(), remaining)].into_iter().collect(),
@@ -1656,7 +1485,7 @@ mod tests {
     fn place(rid: &str, session: Option<&str>) -> PlaceInput {
         PlaceInput {
             rid: Some(rid.into()),
-            trade_session: session.map(str::to_string),
+            placement_session: session.map(str::to_string),
             ..PlaceInput::default()
         }
     }
@@ -1680,16 +1509,16 @@ mod tests {
 
     /// P1 has 100,000 tokens left (queued 91,808 > the lead depth 16,293):
     /// a bound request (P1 owns 20,000 of it, P2 none) is reserved at
-    /// arrival anyway (`gwq.class` bound, not held); a free one is held.
+    /// arrival anyway (`queue.class` bound, not held); a free one is held.
     #[tokio::test]
-    async fn gwq_bound_request_is_never_held() {
+    async fn queue_bound_request_is_never_held() {
         let dir = tempfile::tempdir().unwrap();
-        let (cf, kv, busy) = gwq_cost_function(&dir, 300_000, 100_000);
+        let (cf, kv, busy) = queue_cost_function(&dir, 300_000, 100_000);
         let ix = KvHintInjector::new(&kv);
         let pool = vec![worker(P1), worker(P2)];
         let reply = json!({"instances": {"1": {"cpu": 20_000}}});
         let (selected, reservation, _, queued) = cf
-            .reserve_gwq(
+            .reserve_queue(
                 &ix,
                 &place("bound-1", None),
                 30_000,
@@ -1702,7 +1531,7 @@ mod tests {
             .unwrap();
         assert!(!queued);
         assert_eq!(selected.worker_url, P1);
-        let g = reserve_event(&dir, "bound-1").unwrap()["gwq"].clone();
+        let g = reserve_event(&dir, "bound-1").unwrap()["global_queue"].clone();
         assert_eq!(
             (g["class"].clone(), g["held"].clone()),
             (json!("bound"), json!(false))
@@ -1715,17 +1544,17 @@ mod tests {
     }
 
     /// The guard: a free request on a P without room waits until the max
-    /// wait (200 ms), then goes to its TRADE argmin P (release `starved`).
+    /// wait (200 ms), then goes to its cost argmin P (release `starved`).
     #[tokio::test]
-    async fn gwq_guard_releases_after_the_max_wait() {
+    async fn queue_guard_releases_after_the_max_wait() {
         let dir = tempfile::tempdir().unwrap();
-        let (cf, kv, busy) = gwq_cost_function(&dir, 200, 100_000);
-        tokio::spawn(gwq_auto::dispatcher_loop(Arc::downgrade(&cf)));
+        let (cf, kv, busy) = queue_cost_function(&dir, 200, 100_000);
+        tokio::spawn(queue::dispatcher_loop(Arc::downgrade(&cf)));
         let ix = KvHintInjector::new(&kv);
         let pool = vec![worker(P1)];
         let started = Instant::now();
         let (selected, reservation, _, queued) = cf
-            .reserve_gwq(&ix, &place("free-1", None), 5_000, None, 1.0, &pool, &[])
+            .reserve_queue(&ix, &place("free-1", None), 5_000, None, 1.0, &pool, &[])
             .await
             .unwrap();
         let waited = started.elapsed();
@@ -1733,13 +1562,13 @@ mod tests {
         assert_eq!(selected.worker_url, P1);
         assert!(waited >= Duration::from_millis(200), "{waited:?}");
         assert!(waited < Duration::from_secs(3), "{waited:?}");
-        let g = reserve_event(&dir, "free-1").unwrap()["gwq"].clone();
+        let g = reserve_event(&dir, "free-1").unwrap()["global_queue"].clone();
         assert_eq!(
             (g["release"].clone(), g["held"].clone()),
             (json!("starved"), json!(true))
         );
         assert_eq!(g["class"], "free");
-        assert_eq!(cf.gwq_len(), 0);
+        assert_eq!(cf.queue_len(), 0);
         drop((reservation, busy));
     }
 
@@ -1749,17 +1578,17 @@ mod tests {
     /// releases it with its arrival candidates) both pull from the donor D1.
     /// Flag off: the donor is ignored and D1 is never a pull source.
     #[tokio::test]
-    async fn gwq_any_holder_pulls_from_a_d_role_donor() {
+    async fn queue_any_holder_pulls_from_a_d_role_donor() {
         for flag in [true, false] {
             let dir = tempfile::tempdir().unwrap();
-            let (cf, kv, busy) = gwq_cost_function_with(&dir, 200, 100_000, &[P1, P2, D1], flag);
-            tokio::spawn(gwq_auto::dispatcher_loop(Arc::downgrade(&cf)));
+            let (cf, kv, busy) = queue_cost_function_with(&dir, 200, 100_000, &[P1, P2, D1], flag);
+            tokio::spawn(queue::dispatcher_loop(Arc::downgrade(&cf)));
             let ix = KvHintInjector::new(&kv);
             let donors = [worker(D1)];
             // Worker ids follow kv(): P1 = 1, P2 = 2, D1 = 3.
             let reply = json!({"instances": {"1": {"cpu": 20_000}, "3": {"cpu": 40_000}}});
             let (selected, reservation, _, queued) = cf
-                .reserve_gwq(
+                .reserve_queue(
                     &ix,
                     &place("bound-d", None),
                     40_000,
@@ -1772,7 +1601,7 @@ mod tests {
                 .unwrap();
             assert!(!queued);
             assert_eq!(
-                reserve_event(&dir, "bound-d").unwrap()["gwq"]["class"],
+                reserve_event(&dir, "bound-d").unwrap()["global_queue"]["class"],
                 "bound"
             );
             if flag {
@@ -1783,7 +1612,7 @@ mod tests {
             drop(reservation);
             let reply = json!({"instances": {"3": {"cpu": 30_000}}});
             let (selected, reservation, _, queued) = cf
-                .reserve_gwq(
+                .reserve_queue(
                     &ix,
                     &place("free-d", None),
                     40_000,
@@ -1796,7 +1625,7 @@ mod tests {
                 .unwrap();
             assert!(queued);
             assert_eq!(selected.worker_url, P1);
-            let g = reserve_event(&dir, "free-d").unwrap()["gwq"].clone();
+            let g = reserve_event(&dir, "free-d").unwrap()["global_queue"].clone();
             assert_eq!(
                 (g["class"].clone(), g["release"].clone()),
                 (json!("free"), json!("starved"))
@@ -1818,20 +1647,20 @@ mod tests {
     /// the hold (removed from the registry). It is released with no hint, its
     /// own hit only and nothing pulled.
     #[tokio::test]
-    async fn gwq_any_holder_drops_the_hint_of_a_donor_that_left_during_the_hold() {
+    async fn queue_any_holder_drops_the_hint_of_a_donor_that_left_during_the_hold() {
         let dir = tempfile::tempdir().unwrap();
-        let (cf, kv, busy) = gwq_cost_function_with(&dir, 200, 100_000, &[P1, P2, D1], true);
+        let (cf, kv, busy) = queue_cost_function_with(&dir, 200, 100_000, &[P1, P2, D1], true);
         let listed = Arc::new(parking_lot::Mutex::new(vec![worker(D1)]));
         let provider = Arc::clone(&listed);
-        cf.set_gwq_donors(move || provider.lock().clone());
-        tokio::spawn(gwq_auto::dispatcher_loop(Arc::downgrade(&cf)));
+        cf.set_queue_donors(move || provider.lock().clone());
+        tokio::spawn(queue::dispatcher_loop(Arc::downgrade(&cf)));
         let task = {
             let cf = Arc::clone(&cf);
             tokio::spawn(async move {
                 let ix = KvHintInjector::new(&kv);
                 // Worker ids follow kv(): P1 = 1, P2 = 2, D1 = 3.
                 let reply = json!({"instances": {"3": {"cpu": 30_000}}});
-                cf.reserve_gwq(
+                cf.reserve_queue(
                     &ix,
                     &place("left-d", None),
                     40_000,
@@ -1844,10 +1673,10 @@ mod tests {
             })
         };
         let deadline = Instant::now() + Duration::from_secs(2);
-        while cf.gwq_len() == 0 && Instant::now() < deadline {
+        while cf.queue_len() == 0 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert_eq!(cf.gwq_len(), 1, "held: P1 has no room");
+        assert_eq!(cf.queue_len(), 1, "held: P1 has no room");
         listed.lock().clear();
         let (selected, reservation, decision, queued) = task.await.unwrap().unwrap();
         assert!(queued);
@@ -1862,16 +1691,16 @@ mod tests {
     /// (`room`) by the pass of the next applied view once P1 has 10,000
     /// left (queued 1,808).
     #[tokio::test]
-    async fn gwq_holds_until_the_p_has_room() {
+    async fn queue_holds_until_the_p_has_room() {
         let dir = tempfile::tempdir().unwrap();
-        let (cf, kv, busy) = gwq_cost_function(&dir, 300_000, 100_000);
-        tokio::spawn(gwq_auto::dispatcher_loop(Arc::downgrade(&cf)));
+        let (cf, kv, busy) = queue_cost_function(&dir, 300_000, 100_000);
+        tokio::spawn(queue::dispatcher_loop(Arc::downgrade(&cf)));
         let pool = vec![worker(P1)];
         let task = {
             let cf = Arc::clone(&cf);
             tokio::spawn(async move {
                 let ix = KvHintInjector::new(&kv);
-                cf.reserve_gwq(&ix, &place("free-2", None), 5_000, None, 1.0, &pool, &[])
+                cf.reserve_queue(&ix, &place("free-2", None), 5_000, None, 1.0, &pool, &[])
                     .await
                     .map(|(selected, reservation, _, queued)| {
                         (selected.worker_url, reservation, queued)
@@ -1879,21 +1708,21 @@ mod tests {
             })
         };
         let deadline = Instant::now() + Duration::from_secs(2);
-        while cf.gwq_len() == 0 && Instant::now() < deadline {
+        while cf.queue_len() == 0 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(cf.gwq_len(), 1, "held: no room");
+        assert_eq!(cf.queue_len(), 1, "held: no room");
         assert!(reserve_event(&dir, "free-2").is_none());
         set_remaining(&cf, 2, 10_000);
-        cf.gwq_wake_poll();
+        cf.queue_wake_poll();
         let (url, reservation, queued) = tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("released")
             .unwrap()
             .unwrap();
         assert!(queued && url == P1);
-        let g = reserve_event(&dir, "free-2").unwrap()["gwq"].clone();
+        let g = reserve_event(&dir, "free-2").unwrap()["global_queue"].clone();
         assert_eq!(
             (g["release"].clone(), g["queued_tokens"].clone()),
             (json!("room"), json!("1808"))
@@ -1909,38 +1738,41 @@ mod tests {
     /// goes to P2 without the pull from P1, with no walk mismatch. Otherwise
     /// the reservation would score P1 too and choose it.
     #[tokio::test]
-    async fn gwq_release_follows_a_breaker_trip_during_the_hold() {
+    async fn queue_release_follows_a_breaker_trip_during_the_hold() {
         let dir = tempfile::tempdir().unwrap();
         let kv = kv(512, &[P1, P2]);
         let cf = CostFunction::new(
             SymmetricPdCostFunctionConfig {
-                trade: TradeParams::default(),
-                cost_trace: Some(dir.path().join("cost.jsonl")),
+                cost_params: PlacementCostParams::default(),
+                placement_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
-                loads_host_room: false,
-                gwq_auto: Some(crate::config::SymmetricPdGwqAutoConfig {
+                global_queue: Some(crate::config::GlobalQueueConfig {
                     max_wait_ms: 300_000,
                     ..Default::default()
                 }),
                 trace_session_moves: false,
-                trade_e3: None,
+                forecast: None,
                 pull_from_any_holder: false,
-                trace_async: false,
             },
             &kv,
         );
         let busy = |url: &str, rid: &str, tokens: u64| {
             let mut r = cf
                 .book
-                .reserve_uncached(tokens, Some(rid.into()), vec![cand(url, 0)], 12288)
+                .reserve_cost(
+                    tokens,
+                    Some(rid.into()),
+                    vec![cand(url, 0)],
+                    Default::default(),
+                )
                 .unwrap()
                 .1;
             r.mark_dispatched().unwrap();
             r
         };
         let left = |url: &str, rid: &str, sequence: u64, remaining: u64| {
-            let progress = crate::cost_balance::PrefillProgress {
+            let progress = crate::prefill_work::PrefillProgress {
                 epoch: format!("e-{url}"),
                 sequence,
                 remaining: [(rid.to_string(), remaining)].into_iter().collect(),
@@ -1955,11 +1787,11 @@ mod tests {
         left(P2, "busy-2", 1, 100_000);
         let pool = Arc::new(parking_lot::Mutex::new(vec![worker(P1), worker(P2)]));
         let provider = Arc::clone(&pool);
-        cf.gwq
+        cf.queue
             .as_ref()
             .unwrap()
             .set_pool(Box::new(move || provider.lock().clone()));
-        tokio::spawn(gwq_auto::dispatcher_loop(Arc::downgrade(&cf)));
+        tokio::spawn(queue::dispatcher_loop(Arc::downgrade(&cf)));
         let task = {
             let cf = Arc::clone(&cf);
             let kv = kv.clone();
@@ -1967,7 +1799,7 @@ mod tests {
                 let ix = KvHintInjector::new(&kv);
                 let reply = json!({"instances": {"1": {"cpu": 7_000}}});
                 let arrival = vec![worker(P1), worker(P2)];
-                cf.reserve_gwq(
+                cf.reserve_queue(
                     &ix,
                     &place("free-4", None),
                     20_000,
@@ -1981,14 +1813,14 @@ mod tests {
             })
         };
         let deadline = Instant::now() + Duration::from_secs(2);
-        while cf.gwq_len() == 0 && Instant::now() < deadline {
+        while cf.queue_len() == 0 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert_eq!(cf.gwq_len(), 1, "held: no room on P1 or P2");
+        assert_eq!(cf.queue_len(), 1, "held: no room on P1 or P2");
         *pool.lock() = vec![worker(P2)];
         left(P2, "busy-2", 2, 10_000);
         left(P1, "busy-1", 2, 30_000);
-        cf.gwq_wake_poll();
+        cf.queue_wake_poll();
         let (selected, reservation, decision) = tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("released")
@@ -1996,7 +1828,7 @@ mod tests {
             .unwrap();
         assert_eq!(selected.worker_url, P2, "{decision}");
         assert!(selected.hint.is_none(), "no pull from the tripped P1");
-        let g = reserve_event(&dir, "free-4").unwrap()["gwq"].clone();
+        let g = reserve_event(&dir, "free-4").unwrap()["global_queue"].clone();
         assert!(g.get("walk_mismatch").is_none(), "{g}");
         assert_eq!(
             (g["release"].clone(), g["p_release"].clone()),
@@ -2006,22 +1838,22 @@ mod tests {
     }
 
     /// The drop guard: a client that leaves while its request is held takes
-    /// it out of the queue (`gwq_drop`, reason client_gone); nothing is
+    /// it out of the queue (`queue_drop`, reason client_gone); nothing is
     /// reserved for it.
     #[tokio::test]
-    async fn gwq_drop_guard_removes_a_left_request() {
+    async fn queue_drop_guard_removes_a_left_request() {
         let dir = tempfile::tempdir().unwrap();
-        let (cf, kv, busy) = gwq_cost_function(&dir, 300_000, 100_000);
+        let (cf, kv, busy) = queue_cost_function(&dir, 300_000, 100_000);
         let ix = KvHintInjector::new(&kv);
         let pool = vec![worker(P1)];
         let left = tokio::time::timeout(
             Duration::from_millis(100),
-            cf.reserve_gwq(&ix, &place("gone-1", None), 5_000, None, 1.0, &pool, &[]),
+            cf.reserve_queue(&ix, &place("gone-1", None), 5_000, None, 1.0, &pool, &[]),
         )
         .await;
         assert!(left.is_err(), "still held when the client left");
-        assert_eq!(cf.gwq_len(), 0);
-        let drops = trace_events(&dir, "gwq_drop");
+        assert_eq!(cf.queue_len(), 0);
+        let drops = trace_events(&dir, "queue_drop");
         assert_eq!(drops.len(), 1, "{drops:?}");
         assert_eq!(
             (drops[0]["rid"].clone(), drops[0]["reason"].clone()),
@@ -2031,23 +1863,21 @@ mod tests {
         drop(busy);
     }
 
-    /// A cost function with GWQ-AUTO (guard 300 s) over `urls`.
-    fn gwq_auto_cost_function(dir: &tempfile::TempDir, kv: &KvHintConfig) -> Arc<CostFunction> {
+    /// A cost function with global queue (guard 300 s) over `urls`.
+    fn queue_auto_cost_function(dir: &tempfile::TempDir, kv: &KvHintConfig) -> Arc<CostFunction> {
         CostFunction::new(
             SymmetricPdCostFunctionConfig {
-                trade: TradeParams::default(),
-                cost_trace: Some(dir.path().join("cost.jsonl")),
+                cost_params: PlacementCostParams::default(),
+                placement_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
-                loads_host_room: false,
-                gwq_auto: Some(crate::config::SymmetricPdGwqAutoConfig {
+                global_queue: Some(crate::config::GlobalQueueConfig {
                     max_wait_ms: 300_000,
                     ..Default::default()
                 }),
                 trace_session_moves: false,
-                trade_e3: None,
+                forecast: None,
                 pull_from_any_holder: false,
-                trace_async: false,
             },
             kv,
         )
@@ -2055,7 +1885,7 @@ mod tests {
 
     /// A fresh progress view of `url` listing `rids` (rid, remaining).
     fn view(cf: &CostFunction, url: &str, sequence: u64, rids: &[(&str, u64)]) {
-        let progress = crate::cost_balance::PrefillProgress {
+        let progress = crate::prefill_work::PrefillProgress {
             epoch: format!("e-{url}"),
             sequence,
             remaining: rids.iter().map(|(r, n)| (r.to_string(), *n)).collect(),
@@ -2068,17 +1898,17 @@ mod tests {
 
     /// The release tie-break: every P idle at
     /// each release (each request ends before the next one arrives). The
-    /// plain TRADE tie-break sends every cold request to the smallest URL;
-    /// GWQ-AUTO releases them in rotation over the P (`gwq.tie`: 3 tied,
+    /// plain cost-function tie-break sends every cold request to the smallest URL;
+    /// global queue releases them in rotation over the P (`queue.tie`: 3 tied,
     /// decided by the rotation), and the walk and the reservation agree.
     #[tokio::test]
-    async fn gwq_cold_releases_on_idle_p_spread_over_the_p() {
+    async fn queue_cold_releases_on_idle_p_spread_over_the_p() {
         let urls = [P1, P2, P3];
         let kv = kv(512, &urls);
         let ix = KvHintInjector::new(&kv);
         let pool = pool();
         let dir = tempfile::tempdir().unwrap();
-        let plain = cost_function(&dir, TradeParams::default(), &kv);
+        let plain = cost_function(&dir, PlacementCostParams::default(), &kv);
         let mut chosen = Vec::new();
         for i in 0..3 {
             let rid = format!("plain-{i}");
@@ -2092,10 +1922,10 @@ mod tests {
         assert_eq!(
             chosen,
             [P1, P1, P1],
-            "plain TRADE: every tie to the smallest URL"
+            "plain cost function: every tie to the smallest URL"
         );
         let dir = tempfile::tempdir().unwrap();
-        let cf = gwq_auto_cost_function(&dir, &kv);
+        let cf = queue_auto_cost_function(&dir, &kv);
         let mut chosen = Vec::new();
         for i in 0..6u64 {
             for url in urls {
@@ -2103,14 +1933,14 @@ mod tests {
             }
             let rid = format!("cold-{i}");
             let (selected, mut reservation, _, queued) = cf
-                .reserve_gwq(&ix, &place(&rid, None), 5_000, None, 1.0, &pool, &[])
+                .reserve_queue(&ix, &place(&rid, None), 5_000, None, 1.0, &pool, &[])
                 .await
                 .unwrap();
             assert!(queued, "free: released through the queue at arrival");
             chosen.push(selected.worker_url);
             reservation.mark_dispatched().unwrap();
             reservation.finish("prefill_response_success").unwrap();
-            let g = reserve_event(&dir, &rid).unwrap()["gwq"].clone();
+            let g = reserve_event(&dir, &rid).unwrap()["global_queue"].clone();
             assert_eq!(g["release"], "room", "{g}");
             assert_eq!(
                 (g["tie"]["tied"].clone(), g["tie"]["decided_by"].clone()),
@@ -2120,7 +1950,7 @@ mod tests {
             assert!(g.get("walk_mismatch").is_none(), "{g}");
         }
         assert_eq!(chosen, [P1, P2, P3, P1, P2, P3], "rotation over the idle P");
-        let c = cf.gwq_counters();
+        let c = cf.queue_counters();
         assert_eq!(
             (c["tie_breaks"].clone(), c["tie_rotations"].clone()),
             (json!(6), json!(6)),
@@ -2132,20 +1962,20 @@ mod tests {
     /// drain end, a breaker that closed) restarts its T_react: its measured
     /// estimate is dropped and the fallback applies until a new sample.
     #[tokio::test]
-    async fn gwq_t_react_restarts_when_a_p_joins_the_pool_again() {
+    async fn queue_t_react_restarts_when_a_p_joins_the_pool_again() {
         let kv = kv(512, &[P1, P2]);
         let ix = KvHintInjector::new(&kv);
         let dir = tempfile::tempdir().unwrap();
-        let cf = gwq_auto_cost_function(&dir, &kv);
+        let cf = queue_auto_cost_function(&dir, &kv);
         let pool = Arc::new(parking_lot::Mutex::new(vec![worker(P2)]));
         let provider = Arc::clone(&pool);
-        cf.gwq
+        cf.queue
             .as_ref()
             .unwrap()
             .set_pool(Box::new(move || provider.lock().clone()));
         view(&cf, P2, 1, &[]);
         let (selected, mut reservation, _, _) = cf
-            .reserve_gwq(
+            .reserve_queue(
                 &ix,
                 &place("s-1", None),
                 5_000,
@@ -2161,32 +1991,32 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         view(&cf, P2, 2, &[("s-1", 5_000)]);
         let urls = [P2.to_string()];
-        let lead = cf.book.gwq_lead_rows(&urls);
+        let lead = cf.book.queue_lead_rows(&urls);
         assert_eq!(lead["by_p"][P2]["react_source"], "measured", "{lead}");
         // P2 leaves the pool (P1 only), then joins it again.
         *pool.lock() = vec![worker(P1)];
-        cf.gwq_pass(0, 100);
-        let lead = cf.book.gwq_lead_rows(&urls);
+        cf.queue_pass(0, 100);
+        let lead = cf.book.queue_lead_rows(&urls);
         assert_eq!(lead["by_p"][P2]["react_source"], "measured", "left: kept");
         *pool.lock() = vec![worker(P1), worker(P2)];
-        cf.gwq_pass(0, 101);
-        let lead = cf.book.gwq_lead_rows(&urls);
+        cf.queue_pass(0, 101);
+        let lead = cf.book.queue_lead_rows(&urls);
         assert_eq!(lead["by_p"][P2]["react_source"], "fallback", "{lead}");
         assert_eq!(lead["restarts"], 1, "{lead}");
         drop(reservation);
     }
 
-    /// The E3 forecast state of the cost function from the shipped bound
-    /// table (tests/fixtures/e3).
-    fn e3_state() -> crate::config::SymmetricPdTradeE3 {
+    /// The forecast state of the cost function from the shipped bound
+    /// table (tests/fixtures/forecast).
+    fn forecast_state() -> crate::config::SymmetricPdForecast {
         let table = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/e3/bound-params.json"
+            "/tests/fixtures/forecast/bound-params.json"
         );
-        crate::config::SymmetricPdTradeE3(Arc::new(
-            crate::trade_e3::TradeE3Config::load(
+        crate::config::SymmetricPdForecast(Arc::new(
+            crate::prefill_forecast::ForecastConfig::load(
                 std::path::Path::new(table),
-                crate::trade_e3::DEFAULT_BOUND_MODE,
+                crate::prefill_forecast::DEFAULT_BOUND_MODE,
                 None,
                 0.0,
                 None,
@@ -2195,66 +2025,64 @@ mod tests {
         ))
     }
 
-    /// A recorded `prefill_routing` section (tests/fixtures/e3).
-    fn e3_snapshot() -> Value {
+    /// A recorded `prefill_routing` section (tests/fixtures/forecast).
+    fn forecast_snapshot() -> Value {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/e3/routing-snapshot-recorded.json"
+            "/tests/fixtures/forecast/routing-snapshot-recorded.json"
         );
         let rec: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         rec["candidate"]["snapshot"]["raw_prefill_routing"].clone()
     }
 
-    fn e3_cost_function(
+    fn forecast_cost_function(
         dir: &tempfile::TempDir,
-        trade: TradeParams,
-        gwq_room: Option<crate::global_queue::GlobalQueueRoom>,
+        cost_params: PlacementCostParams,
+        queue_room: Option<crate::global_queue::GlobalQueueRoom>,
         kv: &KvHintConfig,
     ) -> Arc<CostFunction> {
         CostFunction::new(
             SymmetricPdCostFunctionConfig {
-                trade,
-                cost_trace: Some(dir.path().join("cost.jsonl")),
+                cost_params,
+                placement_trace: Some(dir.path().join("cost.jsonl")),
                 load_poll_ms: 100,
                 unknown_expire_secs: 60,
-                loads_host_room: false,
-                gwq_auto: gwq_room.map(|room| crate::config::SymmetricPdGwqAutoConfig {
+                global_queue: queue_room.map(|room| crate::config::GlobalQueueConfig {
                     room,
                     ..Default::default()
                 }),
                 trace_session_moves: false,
-                trade_e3: Some(e3_state()),
+                forecast: Some(forecast_state()),
                 pull_from_any_holder: false,
-                trace_async: false,
             },
             kv,
         )
     }
 
-    /// `--trade-wait e3` (gate m 0): the TRADE decision has the
-    /// e3 terms, the routed request an `e3_shadow` line, and the routes are
-    /// asked for the E3 session key. With the ledger wait and no predicted
+    /// `--prefill-wait forecast` (gate m 0): the cost-function decision has the
+    /// forecast terms, the routed request an `forecast_shadow` line, and the routes are
+    /// asked for the forecast session key. With the token-count wait and no predicted
     /// room the bound table alone turns nothing on.
     #[test]
-    fn e3_wait_prices_with_the_forecast() {
+    fn forecast_wait_prices_with_the_forecast() {
         let dir = tempfile::tempdir().unwrap();
         let kv = kv(512, &[P1, P2]);
         let ix = KvHintInjector::new(&kv);
-        let trade = TradeParams {
-            wait: TradeWait::E3,
-            gate_m: 0.0,
-            ..TradeParams::default()
+        let cost_params = PlacementCostParams {
+            wait: PrefillWait::Forecast,
+            move_margin: 0.0,
+            ..PlacementCostParams::default()
         };
-        let cf = e3_cost_function(&dir, trade, None, &kv);
-        assert!(cf.wants_e3_session());
-        let e3 = cf.e3.as_ref().unwrap();
-        assert!(e3.decides && !e3.push_on());
-        assert!(e3.routing_wanted(P1));
+        let cf = forecast_cost_function(&dir, cost_params, None, &kv);
+        assert!(cf.wants_forecast_session());
+        let forecast = cf.forecast.as_ref().unwrap();
+        assert!(forecast.decides && !forecast.push_on());
+        assert!(forecast.routing_wanted(P1));
         let now = Instant::now();
-        e3.observe(P1, &e3_snapshot(), now, now);
+        forecast.observe(P1, &forecast_snapshot(), now, now);
         let input = PlaceInput {
-            rid: Some("e3-1".into()),
-            e3_session: Some("0/agent-e3".into()),
+            rid: Some("fc-1".into()),
+            forecast_session: Some("0/agent-fc".into()),
             ..PlaceInput::default()
         };
         let (_, reservation, decision) = cf
@@ -2268,26 +2096,26 @@ mod tests {
                 &[],
             )
             .unwrap();
-        assert!(decision["e3_decision_s"].is_number(), "{decision}");
-        assert_eq!(decision["e3_gate_m"], json!(0.0));
-        assert!(decision["e3_chosen"].is_object(), "{decision}");
-        let shadows = trace_events(&dir, "e3_shadow");
+        assert!(decision["forecast_decision_s"].is_number(), "{decision}");
+        assert_eq!(decision["move_margin"], json!(0.0));
+        assert!(decision["forecast_chosen"].is_object(), "{decision}");
+        let shadows = trace_events(&dir, "forecast_shadow");
         assert_eq!(shadows.len(), 1, "{shadows:?}");
-        assert_eq!(shadows[0]["rid"], "e3-1");
+        assert_eq!(shadows[0]["rid"], "fc-1");
         drop(reservation);
         // The engine rejected the section: no snapshot until the re-probe.
-        e3.note_routing_rejected(P2, &anyhow::anyhow!("HTTP 400"));
-        assert!(!e3.routing_wanted(P2) && e3.routing_wanted(P1));
-        e3.note_routing_accepted(P2);
-        assert!(e3.routing_wanted(P2));
+        forecast.note_routing_rejected(P2, &anyhow::anyhow!("HTTP 400"));
+        assert!(!forecast.routing_wanted(P2) && forecast.routing_wanted(P1));
+        forecast.note_routing_accepted(P2);
+        assert!(forecast.routing_wanted(P2));
 
         let dir = tempfile::tempdir().unwrap();
-        let cf = e3_cost_function(&dir, TradeParams::default(), None, &kv);
-        assert!(cf.e3.is_none() && !cf.wants_e3_session());
+        let cf = forecast_cost_function(&dir, PlacementCostParams::default(), None, &kv);
+        assert!(cf.forecast.is_none() && !cf.wants_forecast_session());
         let (_, reservation, decision) = cf
             .reserve(
                 &ix,
-                &place("ledger-1", None),
+                &place("tokens-1", None),
                 5_000,
                 None,
                 1.0,
@@ -2295,56 +2123,54 @@ mod tests {
                 &[],
             )
             .unwrap();
-        assert!(decision.get("e3_decision_s").is_none(), "{decision}");
-        assert!(trace_events(&dir, "e3_shadow").is_empty());
+        assert!(decision.get("forecast_decision_s").is_none(), "{decision}");
+        assert!(trace_events(&dir, "forecast_shadow").is_empty());
         drop(reservation);
     }
 
-    /// `--trade-e3-frozen-fit`: P1 and P2 have a polled view but
+    /// `--forecast-fit`: P1 and P2 have a polled view but
     /// no timeline sample. With the file both are priced by the forecast
-    /// (wait_source e3, a pred_s, e3_fit sources frozen); without it both
+    /// (wait_source forecast, a pred_s, forecast_fit sources frozen); without it both
     /// fall back (no_fit).
     #[test]
-    fn e3_frozen_fit_prices_without_timeline_samples() {
+    fn forecast_frozen_fit_prices_without_timeline_samples() {
         let kv = kv(512, &[P1, P2]);
         let ix = KvHintInjector::new(&kv);
         let frozen = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/e3/kimi-frozen-fit.json"
+            "/tests/fixtures/forecast/kimi-k26-fit.json"
         );
         let path = std::path::Path::new(frozen);
-        let frozen = Arc::new(crate::trade_e3::FrozenFit::load(path).unwrap());
+        let frozen = Arc::new(crate::prefill_forecast::ForecastFit::load(path).unwrap());
         for with_file in [true, false] {
             let dir = tempfile::tempdir().unwrap();
-            let cfg = (*e3_state().0).clone();
+            let cfg = (*forecast_state().0).clone();
             let cfg = cfg.with_frozen_fit(with_file.then(|| Arc::clone(&frozen)));
-            let trade = TradeParams {
-                wait: TradeWait::E3,
-                gate_m: 0.0,
-                ..TradeParams::default()
+            let cost_params = PlacementCostParams {
+                wait: PrefillWait::Forecast,
+                move_margin: 0.0,
+                ..PlacementCostParams::default()
             };
             let cf = CostFunction::new(
                 SymmetricPdCostFunctionConfig {
-                    trade,
-                    cost_trace: Some(dir.path().join("cost.jsonl")),
+                    cost_params,
+                    placement_trace: Some(dir.path().join("cost.jsonl")),
                     load_poll_ms: 100,
                     unknown_expire_secs: 60,
-                    loads_host_room: false,
-                    gwq_auto: None,
+                    global_queue: None,
                     trace_session_moves: false,
-                    trade_e3: Some(crate::config::SymmetricPdTradeE3(Arc::new(cfg))),
+                    forecast: Some(crate::config::SymmetricPdForecast(Arc::new(cfg))),
                     pull_from_any_holder: false,
-                    trace_async: false,
                 },
                 &kv,
             );
-            let e3 = cf.e3.as_ref().unwrap();
+            let forecast = cf.forecast.as_ref().unwrap();
             let now = Instant::now();
-            e3.observe(P1, &e3_snapshot(), now, now);
-            e3.observe(P2, &e3_snapshot(), now, now);
+            forecast.observe(P1, &forecast_snapshot(), now, now);
+            forecast.observe(P2, &forecast_snapshot(), now, now);
             let input = PlaceInput {
                 rid: Some("fz-1".into()),
-                e3_session: Some("0/agent-fz".into()),
+                forecast_session: Some("0/agent-fz".into()),
                 ..PlaceInput::default()
             };
             let pool = [worker(P1), worker(P2)];
@@ -2353,12 +2179,15 @@ mod tests {
                 .unwrap();
             let rows = decision["candidates"].as_array().unwrap();
             let source = |key: &str| rows.iter().map(|r| r[key].clone()).collect::<Vec<_>>();
-            let fits = trace_events(&dir, "e3_fit");
+            let fits = trace_events(&dir, "forecast_fit");
             assert_eq!(fits.len(), 2, "{fits:?}");
             if with_file {
-                let both_e3 = [json!("e3"), json!("e3")];
-                assert_eq!(source("wait_source"), both_e3, "{decision}");
-                assert!(decision["e3_chosen"]["pred_s"].is_number(), "{decision}");
+                let both_forecast = [json!("forecast"), json!("forecast")];
+                assert_eq!(source("wait_source"), both_forecast, "{decision}");
+                assert!(
+                    decision["forecast_chosen"]["pred_s"].is_number(),
+                    "{decision}"
+                );
                 for fit in &fits {
                     assert_eq!(fit["gpu_large"], "frozen", "{fit}");
                     assert_eq!(fit["launch"], "frozen", "{fit}");
@@ -2371,166 +2200,46 @@ mod tests {
         }
     }
 
-    /// A mock engine `/v1/loads` for the progress poll: it records the
-    /// `include` of each query and rejects (HTTP 400, as the engine's
-    /// section check) an include that names a section of `rejects`; it
-    /// answers the others with a progress row (sequence = the query count)
-    /// and, when asked, the recorded `prefill_routing` section and a
-    /// `host_room` section. Returns its URL and the includes it saw.
-    async fn mock_loads(rejects: &[&str]) -> (String, Arc<parking_lot::Mutex<Vec<String>>>) {
-        use axum::extract::Query as Params;
-        use axum::http::StatusCode;
-        use axum::response::IntoResponse;
-        let rejects: Arc<Vec<String>> = Arc::new(rejects.iter().map(|s| s.to_string()).collect());
-        let includes: Arc<parking_lot::Mutex<Vec<String>>> = Arc::default();
-        let snapshot = e3_snapshot();
-        let app = axum::Router::new().route(
-            "/v1/loads",
-            axum::routing::get({
-                let includes = Arc::clone(&includes);
-                move |Params(query): Params<HashMap<String, String>>| {
-                    let (includes, rejects) = (Arc::clone(&includes), Arc::clone(&rejects));
-                    let snapshot = snapshot.clone();
-                    async move {
-                        let include = query.get("include").cloned().unwrap_or_default();
-                        let sequence = {
-                            let mut seen = includes.lock();
-                            seen.push(include.clone());
-                            seen.len() as u64
-                        };
-                        let sections: Vec<&str> = include.split(',').collect();
-                        let rejected = rejects.iter().find(|s| sections.contains(&s.as_str()));
-                        if let Some(bad) = rejected {
-                            let body = format!("Invalid include sections: {{'{bad}'}}");
-                            return (StatusCode::BAD_REQUEST, body).into_response();
-                        }
-                        let mut row = json!({"prefill_work": {"epoch": "boot1",
-                            "sequence": sequence, "remaining": {}, "truncated": false}});
-                        if sections.contains(&"prefill_routing") {
-                            row["prefill_routing"] = snapshot;
-                        }
-                        if sections.contains(&"host_room") {
-                            row["host_room"] = json!({"free_tokens": 1_000, "class1_tokens": 0});
-                        }
-                        axum::Json(json!({"loads": [row]})).into_response()
-                    }
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (url, includes)
-    }
-
-    /// E3 (`--trade-wait e3`) with `--symmetric-pd-loads-host-room`:
-    /// the engine rejects the combined include without naming the section.
-    /// The routing snapshot alone tells which one: an engine without the
-    /// host_room section keeps its E3 view (rather than losing it at
-    /// every re-probe); one without the snapshot gets host_room alone; one
-    /// without both is polled plain. The second poll asks only the accepted
-    /// sections (the rejected ones wait for their re-probe).
-    #[tokio::test]
-    async fn combined_include_rejection_names_the_rejected_section() {
-        const BOTH: &str = "core,queues,prefill_work,prefill_routing,host_room";
-        const SNAP: &str = "core,queues,prefill_work,prefill_routing";
-        const ROOM: &str = "core,queues,prefill_work,host_room";
-        const PLAIN: &str = "core,queues,prefill_work";
-        // (rejected sections, includes of two polls, E3 view kept, host_room kept)
-        let cases: [(&[&str], &[&str], bool, bool); 4] = [
-            (&[], &[BOTH, BOTH], true, true),
-            (&["host_room"], &[BOTH, SNAP, SNAP], true, false),
-            (&["prefill_routing"], &[BOTH, SNAP, ROOM, ROOM], false, true),
-            (
-                &["prefill_routing", "host_room"],
-                &[BOTH, SNAP, ROOM, PLAIN, PLAIN],
-                false,
-                false,
-            ),
-        ];
-        for (rejects, asked, routing_kept, room_kept) in cases {
-            let why = format!("rejects {rejects:?}");
-            let (url, includes) = mock_loads(rejects).await;
-            let dir = tempfile::tempdir().unwrap();
-            let kv = kv(512, &[url.as_str()]);
-            let trade = TradeParams {
-                wait: TradeWait::E3,
-                gate_m: 0.0,
-                ..TradeParams::default()
-            };
-            let cf = CostFunction::new(
-                SymmetricPdCostFunctionConfig {
-                    trade,
-                    cost_trace: Some(dir.path().join("cost.jsonl")),
-                    load_poll_ms: 100,
-                    unknown_expire_secs: 60,
-                    loads_host_room: true,
-                    gwq_auto: None,
-                    trace_session_moves: false,
-                    trade_e3: Some(e3_state()),
-                    pull_from_any_holder: false,
-                    trace_async: false,
-                },
-                &kv,
-            );
-            let e3 = cf.e3.as_ref().unwrap();
-            for _ in 0..2 {
-                for poll in cf.refresh_progress(vec![worker(&url)]) {
-                    poll.await.unwrap();
-                }
-            }
-            assert_eq!(*includes.lock(), asked, "{why}");
-            assert_eq!(e3.routing_wanted(&url), routing_kept, "{why}");
-            assert_eq!(e3.has_snapshot(&url), routing_kept, "{why}");
-            assert_eq!(cf.host_room_wanted(&url), room_kept, "{why}");
-            let snapshot = cf.book.snapshot();
-            let rejected = if room_kept { json!([]) } else { json!([url]) };
-            assert_eq!(snapshot["host_room_rejected"], rejected, "{why}");
-            assert_eq!(
-                snapshot["host_room_by_p"].get(url.as_str()).is_some(),
-                room_kept,
-                "{why}: {snapshot}"
-            );
-        }
-    }
-
-    /// `--symmetric-pd-gwq-room predicted` with the ledger wait: the E3 state
-    /// gives the queue drain only (decisions keep the ledger terms, no E3
+    /// `--global-queue-room forecast` with the token-count wait: the forecast state
+    /// gives the queue drain only (decisions keep the token-count terms, no forecast
     /// session key). A free request on a P without room is held; the step
-    /// records the predicted room rule with each P's drain and fallback.
+    /// records the forecast room rule with each P's drain and fallback.
     /// Without timeline samples no P has a forecast, so the token rule (the
     /// work-conserving floor) releases it once P1 has room.
     #[tokio::test]
-    async fn gwq_room_predicted_falls_back_to_the_token_rule() {
+    async fn queue_room_forecast_falls_back_to_the_token_rule() {
         let dir = tempfile::tempdir().unwrap();
         let kv = kv(512, &[P1]);
-        let cf = e3_cost_function(
+        let cf = forecast_cost_function(
             &dir,
-            TradeParams::default(),
-            Some(crate::global_queue::GlobalQueueRoom::Predicted),
+            PlacementCostParams::default(),
+            Some(crate::global_queue::GlobalQueueRoom::Forecast),
             &kv,
         );
-        assert!(!cf.wants_e3_session());
-        let e3 = cf.e3.as_ref().unwrap();
-        assert!(!e3.decides);
+        assert!(!cf.wants_forecast_session());
+        let forecast = cf.forecast.as_ref().unwrap();
+        assert!(!forecast.decides);
         let now = Instant::now();
-        e3.observe(P1, &e3_snapshot(), now, now);
+        forecast.observe(P1, &forecast_snapshot(), now, now);
         let mut busy = cf
             .book
-            .reserve_uncached(100_000, Some("busy".into()), vec![cand(P1, 0)], 12288)
+            .reserve_cost(
+                100_000,
+                Some("busy".into()),
+                vec![cand(P1, 0)],
+                Default::default(),
+            )
             .unwrap()
             .1;
         busy.mark_dispatched().unwrap();
         set_remaining(&cf, 1, 100_000);
-        tokio::spawn(gwq_auto::dispatcher_loop(Arc::downgrade(&cf)));
+        tokio::spawn(queue::dispatcher_loop(Arc::downgrade(&cf)));
         let pool = vec![worker(P1)];
         let task = {
             let cf = Arc::clone(&cf);
             tokio::spawn(async move {
                 let ix = KvHintInjector::new(&kv);
-                cf.reserve_gwq(&ix, &place("free-p", None), 5_000, None, 1.0, &pool, &[])
+                cf.reserve_queue(&ix, &place("free-p", None), 5_000, None, 1.0, &pool, &[])
                     .await
                     .map(|(selected, reservation, decision, queued)| {
                         (selected.worker_url, reservation, decision, queued)
@@ -2538,17 +2247,17 @@ mod tests {
             })
         };
         let deadline = Instant::now() + Duration::from_secs(2);
-        while cf.gwq_len() == 0 && Instant::now() < deadline {
+        while cf.queue_len() == 0 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(
-            cf.gwq_len(),
+            cf.queue_len(),
             1,
             "held: no room by tokens or by a forecast drain"
         );
         set_remaining(&cf, 2, 10_000);
-        cf.gwq_wake_poll();
+        cf.queue_wake_poll();
         let (url, reservation, decision, queued) =
             tokio::time::timeout(Duration::from_secs(2), task)
                 .await
@@ -2556,9 +2265,9 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert!(queued && url == P1);
-        assert!(decision.get("e3_decision_s").is_none(), "{decision}");
-        let g = reserve_event(&dir, "free-p").unwrap()["gwq"].clone();
-        assert_eq!(g["room_rule"], "predicted", "{g}");
+        assert!(decision.get("forecast_decision_s").is_none(), "{decision}");
+        let g = reserve_event(&dir, "free-p").unwrap()["global_queue"].clone();
+        assert_eq!(g["room_rule"], "forecast", "{g}");
         // The recorded snapshot's 33 waiting rows and the router's busy row
         // keep any forecast drain above the lead: the token rule releases.
         assert_eq!(g["release"], "room", "{g}");
@@ -2569,20 +2278,20 @@ mod tests {
                 || (g["drain_s"].is_number() && fallbacks[0].is_null()),
             "{g}"
         );
-        // The released P's lead is GWQ-AUTO's C / R + T_react.
+        // The released P's lead is global queue's C / R + T_react.
         assert!(g["lead_s"].as_f64().unwrap() > 0.0, "{g}");
         drop((reservation, busy));
     }
 
     /// Flag off: no queue, no lead book, no session-move book; the trace has
-    /// no GWQ or session_move key.
+    /// no global queue or session_move key.
     #[test]
-    fn gwq_off_adds_nothing() {
+    fn queue_off_adds_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let kv = kv(512, &[P1]);
         let ix = KvHintInjector::new(&kv);
-        let cf = cost_function(&dir, TradeParams::default(), &kv);
-        assert!(!cf.gwq_enabled() && !cf.wants_session());
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        assert!(!cf.queue_enabled() && !cf.wants_session());
         let (_, reservation, decision) = cf
             .reserve(
                 &ix,
@@ -2596,10 +2305,10 @@ mod tests {
             .unwrap();
         let event = reserve_event(&dir, "off-1").unwrap();
         assert!(
-            event.get("gwq").is_none() && event.get("session_move").is_none(),
+            event.get("global_queue").is_none() && event.get("session_move").is_none(),
             "{event}"
         );
-        assert!(decision.get("gwq_room").is_none());
+        assert!(decision.get("queue_room").is_none());
         let snapshot = cf.book.snapshot();
         assert!(snapshot.get("session_moves").is_none());
         drop(reservation);

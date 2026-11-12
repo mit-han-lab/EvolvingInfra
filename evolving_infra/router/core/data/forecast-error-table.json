@@ -1,6 +1,6 @@
 {
- "schema": "router-e3-bound-params.v2",
- "bound_tables_sha256": "9df02c05d5d4b1334f3e35ce17bfd29302122c7f9792c02052b38175c89cf239",
+ "schema": "forecast-error-table.v2",
+ "bound_tables_sha256": "64dbbfdc5812e603d31c2a3d54ef2df765ba696ebecd3175cb2e64a2e358cb8a",
  "fit_cells": [
   "GB300 replay cell 1",
   "GB300 replay cell 2"
@@ -14,7 +14,7 @@
    "z_equivalent_two_sided": 1.2816,
    "level_meets_nominal": true,
    "table": {
-    "schema": "router-e3-bound.v2",
+    "schema": "forecast-error-bound.v2",
     "scheme": "idle",
     "min_bound_s": 0.0,
     "min_n": 50,
@@ -279,7 +279,7 @@
    "z_equivalent_two_sided": 1.2816,
    "level_meets_nominal": true,
    "table": {
-    "schema": "router-e3-bound.v2",
+    "schema": "forecast-error-bound.v2",
     "scheme": "idle",
     "min_bound_s": 0.0,
     "min_n": 50,
@@ -547,7 +547,7 @@
    "z_equivalent_two_sided": 1.2816,
    "level_meets_nominal": true,
    "table": {
-    "schema": "router-e3-bound.v2",
+    "schema": "forecast-error-bound.v2",
     "scheme": "idle",
     "min_bound_s": 0.0,
     "min_n": 50,
@@ -818,7 +818,7 @@
    "z_equivalent_two_sided": 1.2816,
    "level_meets_nominal": true,
    "table": {
-    "schema": "router-e3-bound.v2",
+    "schema": "forecast-error-bound.v2",
     "scheme": "idle",
     "min_bound_s": 0.0,
     "min_n": 50,
@@ -1089,7 +1089,7 @@
    "z_equivalent_two_sided": 1.2816,
    "level_meets_nominal": true,
    "table": {
-    "schema": "router-e3-bound.v2",
+    "schema": "forecast-error-bound.v2",
     "scheme": "idle",
     "min_bound_s": 0.0,
     "min_n": 50,
@@ -1363,7 +1363,7 @@
    "z_equivalent_two_sided": 1.2816,
    "level_meets_nominal": true,
    "table": {
-    "schema": "router-e3-bound.v2",
+    "schema": "forecast-error-bound.v2",
     "scheme": "idle",
     "min_bound_s": 0.0,
     "min_n": 50,
@@ -1637,7 +1637,7 @@
    "z_equivalent_two_sided": 1.2816,
    "level_meets_nominal": true,
    "table": {
-    "schema": "router-e3-bound.v2",
+    "schema": "forecast-error-bound.v2",
     "scheme": "idle",
     "min_bound_s": 0.0,
     "min_n": 50,
@@ -1914,7 +1914,7 @@
    "z_equivalent_two_sided": 1.2816,
    "level_meets_nominal": true,
    "table": {
-    "schema": "router-e3-bound.v2",
+    "schema": "forecast-error-bound.v2",
     "scheme": "idle",
     "min_bound_s": 0.0,
     "min_n": 50,
@@ -2188,7 +2188,7 @@
    "z_equivalent_two_sided": 1.2816,
    "level_meets_nominal": true,
    "table": {
-    "schema": "router-e3-bound.v2",
+    "schema": "forecast-error-bound.v2",
     "scheme": "idle",
     "min_bound_s": 0.0,
     "min_n": 50,

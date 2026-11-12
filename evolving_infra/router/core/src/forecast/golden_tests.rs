@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Golden tests: the port against the outputs of the Python reference
-//! `router_e3.py` r5. Fixtures in `tests/fixtures/e3/` (provenance and
+//! `router_forecast.py` r5. Fixtures in `tests/fixtures/forecast/` (provenance and
 //! selection rule in `PROVENANCE.md` there):
 //! - `goldens-subset.jsonl`: 600 forecast goldens of the r5 reference run
 //!   (every mode and category, every replay run x mode pair);
@@ -12,10 +12,10 @@
 //! - `bound-tables.json`, `bound-params.json`: the r5 bound tables.
 //!
 //! Every float must be within 1e-9 of the reference (the port is expected to
-//! be exact; set `E3_GOLDENS_EXACT=1` to require exact equality). Integers,
+//! be exact; set `FORECAST_GOLDENS_EXACT=1` to require exact equality). Integers,
 //! booleans, strings, nulls and key sets must be equal. The ignored test
-//! `full_nsc_goldens_match_the_reference` runs all 8,880 forecast and 445
-//! fit goldens from `E3_GOLDENS_DIR` (the r5 bounds directory; not committed).
+//! `full_goldens_match_the_reference` runs all 8,880 forecast and 445
+//! fit goldens from `FORECAST_GOLDENS_DIR` (the r5 bounds directory; not committed).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -44,7 +44,7 @@ const DEPLOY_MODES: [&str; 9] = [
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/e3")
+        .join("tests/fixtures/forecast")
         .join(name)
 }
 
@@ -92,7 +92,8 @@ struct Check {
 
 impl Check {
     fn new() -> Self {
-        let strict = std::env::var("E3_GOLDENS_EXACT").is_ok_and(|v| !v.is_empty() && v != "0");
+        let strict =
+            std::env::var("FORECAST_GOLDENS_EXACT").is_ok_and(|v| !v.is_empty() && v != "0");
         Self {
             strict,
             cases: 0,
@@ -187,8 +188,8 @@ impl Check {
     }
 }
 
-/// One reference call (`router_e3_bounds.recompute_fit` and
-/// `router_e3_synth.run_case`) on the port, as JSON.
+/// One reference call (`router_forecast_bounds.recompute_fit` and
+/// `router_forecast_synth.run_case`) on the port, as JSON.
 fn run_case(kind: &str, inp: &Value, id: &str) -> Value {
     match kind {
         "forecast" => {
@@ -383,8 +384,8 @@ fn synthetic_goldens_match_the_reference() {
 fn bound_params_match_the_bound_tables() {
     let tables_text = read(&fixture("bound-tables.json"));
     let params_text = read(&fixture("bound-params.json"));
-    let bp: BoundParams = serde_json::from_str(&params_text).expect("bound-params.json");
-    assert_eq!(bp.schema, BOUND_PARAMS_SCHEMA);
+    let bp: ErrorTable = serde_json::from_str(&params_text).expect("bound-params.json");
+    assert_eq!(bp.schema, ERROR_TABLE_SCHEMA);
     assert_eq!(bp.bound_tables_sha256, sha256_hex(tables_text.as_bytes()));
     assert_eq!(bp.g_min_s, 0.1);
     let modes: BTreeSet<&str> = bp.modes.keys().map(String::as_str).collect();
@@ -428,7 +429,7 @@ fn bound_params_match_the_bound_tables() {
             assert_eq!(&m.table, t, "{mode}");
         }
     }
-    // BoundParams::bound uses the mode's shipped level.
+    // ErrorTable::bound uses the mode's shipped level.
     let view = BucketView {
         pred_s: Some(1.0),
         ..BucketView::default()
@@ -442,10 +443,10 @@ fn bound_params_match_the_bound_tables() {
 }
 
 #[test]
-#[ignore = "needs the full r5 goldens: E3_GOLDENS_DIR=<dir with goldens.jsonl, fit-goldens.jsonl, bound-tables.json>"]
-fn full_nsc_goldens_match_the_reference() {
-    let dir = PathBuf::from(std::env::var_os("E3_GOLDENS_DIR").expect(
-        "set E3_GOLDENS_DIR to the r5 bounds dir (goldens.jsonl, fit-goldens.jsonl, bound-tables.json)",
+#[ignore = "needs the full r5 goldens: FORECAST_GOLDENS_DIR=<dir with goldens.jsonl, fit-goldens.jsonl, bound-tables.json>"]
+fn full_goldens_match_the_reference() {
+    let dir = PathBuf::from(std::env::var_os("FORECAST_GOLDENS_DIR").expect(
+        "set FORECAST_GOLDENS_DIR to the r5 bounds dir (goldens.jsonl, fit-goldens.jsonl, bound-tables.json)",
     ));
     let (tables, sha) = load_tables(&dir.join("bound-tables.json"));
     let rows = jsonl(&dir.join("goldens.jsonl"));
@@ -457,7 +458,7 @@ fn full_nsc_goldens_match_the_reference() {
     check_cases(&fits, &mut fit_check);
     // r5: 8,880 forecast goldens and 445 fit goldens.
     eprintln!(
-        "E3_GOLDENS_DIR {}: {} forecast rows, {} fit rows",
+        "FORECAST_GOLDENS_DIR {}: {} forecast rows, {} fit rows",
         dir.display(),
         rows.len(),
         fits.len()

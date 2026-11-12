@@ -3,10 +3,10 @@
 //! remains the owner of worker observations, reservations, and execution state.
 pub mod cost_function;
 pub mod placement;
+pub mod placement_cost;
 pub mod policy;
 pub mod role_drain;
 mod runtime;
-pub mod trade;
 pub use placement::*;
 pub use policy::*;
 pub use runtime::*;

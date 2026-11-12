@@ -13,7 +13,7 @@ use crate::server::error::ApiError;
 
 pub const CONTEXT_HEADER: &str = "x-agent-context";
 
-/// Identity header of session KV retention on the co_schedule PD path
+/// Identity header of session KV retention on the cost function PD path
 /// (`--kv-session-retention`). Same JSON as [`CONTEXT_HEADER`], but the
 /// router never derives, inserts or checks a body `rid` from it, so the
 /// client's `rid` reaches the engines unchanged. The proxy header whitelist
@@ -103,18 +103,21 @@ pub fn from_header(headers: &HeaderMap, name: &str) -> Result<Option<RequestIden
     Ok(Some(identity))
 }
 
-/// The session identity of a request for the TRADE copy price `auto`
+/// The session identity of a request for the cost-function copy price `auto`
 /// (N_active): the identity of [`KV_SESSION_HEADER`], else of
 /// [`CONTEXT_HEADER`], as
-/// [`crate::scheduler::trade::trade_session_key`]. A missing or
+/// [`crate::scheduler::placement_cost::placement_session_key`]. A missing or
 /// invalid header gives None; this never rejects a request (the routes
 /// validate the headers they use themselves).
-pub fn trade_session_key(headers: &HeaderMap) -> Option<String> {
+pub fn placement_session_key(headers: &HeaderMap) -> Option<String> {
     [KV_SESSION_HEADER, CONTEXT_HEADER]
         .into_iter()
         .find_map(|name| from_header(headers, name).ok().flatten())
         .map(|identity| {
-            crate::scheduler::trade::trade_session_key(&identity.agent_id, identity.subagent_id)
+            crate::scheduler::placement_cost::placement_session_key(
+                &identity.agent_id,
+                identity.subagent_id,
+            )
         })
 }
 
@@ -295,37 +298,37 @@ mod tests {
         }
     }
 
-    /// The TRADE auto session key: the kv-session identity first, then the
+    /// The cost-function auto session key: the kv-session identity first, then the
     /// agent identity; the request step does not change it; a missing
     /// or invalid header gives None instead of an error.
     #[test]
-    fn trade_auto_session_key_prefers_the_kv_session_header() {
+    fn cost_auto_session_key_prefers_the_kv_session_header() {
         let mut headers = HeaderMap::new();
-        assert_eq!(trade_session_key(&headers), None);
+        assert_eq!(placement_session_key(&headers), None);
         headers.insert(
             CONTEXT_HEADER,
             r#"{"agent_id":"m","subagent_id":2,"request_id":5}"#
                 .parse()
                 .unwrap(),
         );
-        assert_eq!(trade_session_key(&headers).as_deref(), Some("2/m"));
+        assert_eq!(placement_session_key(&headers).as_deref(), Some("2/m"));
         headers.insert(
             KV_SESSION_HEADER,
             r#"{"agent_id":"k","subagent_id":0,"request_id":9}"#
                 .parse()
                 .unwrap(),
         );
-        assert_eq!(trade_session_key(&headers).as_deref(), Some("0/k"));
+        assert_eq!(placement_session_key(&headers).as_deref(), Some("0/k"));
         headers.insert(
             KV_SESSION_HEADER,
             r#"{"agent_id":"k","subagent_id":0,"request_id":10}"#
                 .parse()
                 .unwrap(),
         );
-        assert_eq!(trade_session_key(&headers).as_deref(), Some("0/k"));
+        assert_eq!(placement_session_key(&headers).as_deref(), Some("0/k"));
         headers.insert(KV_SESSION_HEADER, "not json".parse().unwrap());
-        assert_eq!(trade_session_key(&headers).as_deref(), Some("2/m"));
+        assert_eq!(placement_session_key(&headers).as_deref(), Some("2/m"));
         headers.remove(CONTEXT_HEADER);
-        assert_eq!(trade_session_key(&headers), None);
+        assert_eq!(placement_session_key(&headers), None);
     }
 }

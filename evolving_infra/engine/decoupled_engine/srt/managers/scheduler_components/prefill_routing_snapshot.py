@@ -887,7 +887,7 @@ class PrefillRoutingTracker:
             omitted_inflight_batches=max(0, total_batches - len(pending_batches)),
             inflight_requests_known=isinstance(inflight, list),
             total_inflight_requests=len(inflight) if isinstance(inflight, list) else 0,
-            engine_revision=_short_string(os.getenv("WXU_ENGINE_REVISION")),
+            engine_revision=_short_string(os.getenv("EVOLVING_INFRA_ENGINE_REVISION")),
             model_id=_short_string(getattr(args, "served_model_name", None)),
             policy=RoutingPolicy(
                 chunk_tokens=_int(getattr(scheduler, "chunked_prefill_size", None)),

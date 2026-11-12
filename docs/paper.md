@@ -16,7 +16,7 @@ and `--policy symmetric_pd` on the router, every mechanism below is on by defaul
 | §5.1 Prefill and decode iteration-time models, fitted online | Engine `--sched-trace-dir`; the planner fits during the learning window | `evolving_infra/planner/perf_model/` (`step_fit.py`, `worker_model.py`, `calibration.py`) |
 | §5.2 Online phase-split planner | `python -m evolving_infra.planner control` ([Dynamic P/D](dynamic-pd.md)) | `evolving_infra/planner/managers/planner_manager.py`, `evolving_infra/planner/policy/` |
 | §5.3 Eviction: unreferenced KV first; among referenced KV, the branch predicted to return last | Engine `--enable-kv-session-retention` | `mem_cache/unified_cache/retention_order.py` |
-| §5.3 Routing by predicted time to first token, with the fetch cost and the copy price | Router `--symmetric-pd-p-select cost-function`. Engine `--enable-prefill-work-snapshot` | `evolving_infra/router/core/src/scheduler/cost_function.rs`, `evolving_infra/router/core/src/scheduler/trade.rs`, `managers/scheduler_components/prefill_routing_snapshot.py` |
+| §5.3 Routing by predicted time to first token, with the fetch cost and the copy price | Router `--symmetric-pd-p-select cost-function`. Engine `--enable-prefill-work-snapshot` | `evolving_infra/router/core/src/scheduler/cost_function.rs`, `evolving_infra/router/core/src/scheduler/placement_cost.rs`, `evolving_infra/router/core/src/prefill_forecast.rs`, `managers/scheduler_components/prefill_routing_snapshot.py` |
 | §5.3 Decode bound when the prefill starts | Router `--pd-late-decode choose --pd-late-decode-rule fit_req`. Engine `--disaggregation-late-d choose` | `disaggregation/late_d.py` |
 
 ## Parameters (Appendix E.3)
@@ -29,10 +29,10 @@ and `--policy symmetric_pd` on the router, every mechanism below is on by defaul
 | Switch rule | Mean gain above 2 standard errors | Planner `--switch-standard-errors` (default) |
 | Pause after a switch | 120 s | Planner `--post-switch-exclusion-secs` (default) |
 | Chunk size | 8192 tokens | Engine `--chunked-prefill-size 8192` |
-| Fetch time τ(x) | 0.45 s + 1 µs per token | Router defaults `DEFAULT_TRADE_PULL_FIXED_MS`, `DEFAULT_TRADE_PULL_MS_PER_100K` |
+| Fetch time τ(x) | 0.45 s + 1 µs per token | Router defaults `DEFAULT_FETCH_FIXED_MS`, `DEFAULT_FETCH_MS_PER_100K_TOKENS` (`--fetch-fixed-ms`, `--fetch-ms-per-100k-tokens`) |
 | Smallest fetch | 512 tokens | Router `--kv-pull-hint-min-incremental-tokens 512` |
-| Copy price κ | 4.6 | Router default `DEFAULT_TRADE_COPY_LAMBDA` (`--trade-copy-lambda`) |
-| Age of a prefill worker's reported state | 1.5 s | Router default `DEFAULT_TRADE_EFT_MAX_VIEW_AGE_S` |
+| Copy price κ | 4.6 | Router default `DEFAULT_COPY_PRICE` (`--copy-price`) |
+| Age of a prefill worker's reported state | 1.5 s | Router default `DEFAULT_MAX_STATE_AGE_S` (`--max-state-age-ms`; the preset sets 5000 ms) |
 | Return-time table for eviction | Built-in table; a branch idle for 150 s or longer counts as finished | `retention_order.DEFAULT_FIXED_TABLE` |
 
 [Configuration](configuration.md) lists every flag above with the rest of the benchmark setup.

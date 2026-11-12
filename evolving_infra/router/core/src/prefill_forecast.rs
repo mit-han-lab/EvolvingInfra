@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! TRADE `--trade-wait e3`: the E3 P completion forecast
-//! ([`crate::e3`], a port of the Python reference `router_e3.py` r5) in the
-//! TRADE P selection, with the prediction gate.
+//! `--prefill-wait forecast`: the prefill completion forecast
+//! ([`crate::forecast`], a port of a Python reference model) in the
+//! placement cost function, with the move rule (`--move-margin`).
 //!
 //! # What the router does per decision
 //!
-//! For each P candidate `w` the router builds the E3 input
-//! from `w`'s latest polled `prefill_routing` snapshot ([`E3View`]) and from
-//! its own cost book, and forecasts `pred_s` (decision to `w`'s
+//! For each P candidate `w` the router builds the forecast input
+//! from `w`'s latest polled `prefill_routing` snapshot ([`ForecastView`]) and from
+//! its own work book, and forecasts `pred_s` (decision to `w`'s
 //! `prefill_finished_time` of the request) and `wait_s` (decision to the GPU
 //! start of the request's first pass). The deployed mode is
 //! `snap+prod` (poll, router calibration `rcal`, the production rules):
@@ -33,7 +33,7 @@
 //!   the router's own rows that the snapshot does not show, sorted by ready
 //!   time (ties by decision time). A row is kept only when its ready time is
 //!   at most the target's ready time minus the margin
-//!   (`--trade-e3-rq-margin-ms`, default 0).
+//!   ([`ForecastConfig::rq_margin_s`], 0 from the command line).
 //! - A snapshot row with a pending pull (`plan.pull_tokens`): the pulled
 //!   tokens count as cached and restored from host (the engine's
 //!   `remaining_compute_tokens` still counts them as compute until the pull
@@ -41,7 +41,7 @@
 //! - Null-prefix rule: a snapshot row without a published prefix
 //!   takes the router's own dispatch-time estimate of that RID, else it is
 //!   cold (prefix 0).
-//! - The router rows: active cost-book entries of `w` whose RID the snapshot
+//! - The router rows: active work-book entries of `w` whose RID the snapshot
 //!   does not show (rows, the partial request, the transfer queue, the
 //!   pending passes), except an entry that a progress poll received before
 //!   `t0` already listed (it launched before the snapshot); plus finished
@@ -56,14 +56,14 @@
 //!
 //! # Online fits (rcal)
 //!
-//! [`E3Online`] keeps the engine timeline samples (`timeline.samples` of
+//! [`ForecastOnline`] keeps the engine timeline samples (`timeline.samples` of
 //! each snapshot, deduplicated by engine epoch and sequence) per P, as
 //! router-clock time-keyed windows. It drops samples older than
 //! `CAL_S + WINDOW_S` (1,500 s), except the calibration-window copies and
 //! the service samples, which move to a per-class history
 //! ([`SERVICE_HISTORY_PER_CLASS`]). It refits once per (P, 60-s step),
 //! lazily on the first decision of a step, from copies of the windows taken
-//! under its own lock and fitted outside it (never under the cost-book
+//! under its own lock and fitted outside it (never under the work-book
 //! lock). The fits:
 //!
 //! - GPU (service) model per size class: samples of single-pass, batch-size-1
@@ -91,39 +91,39 @@
 //! Without a GPU model (no service sample yet) a P has no forecast
 //! (`no_fit`): the selection keeps the cache-aware owner.
 //!
-//! With `--trade-e3-frozen-fit FILE` ([`FrozenFit`]) every fit
+//! With `--forecast-fit FILE` ([`ForecastFit`]) every fit
 //! takes the GPU model, the launch model and the calibration constants of
-//! FILE (offline warmup constants, source `frozen` in the `e3_fit` event);
+//! FILE (offline warmup constants, source `frozen` in the `forecast_fit` event);
 //! the online samples still give the arrival rates. A P that is never idle
-//! (Kimi-K2.6 under CUA load) has almost no service samples, so without
-//! FILE it keeps `no_fit`.
+//! (for example Kimi-K2.6 under a saturating image-request load) has almost
+//! no service samples, so without FILE it keeps `no_fit`.
 //!
 //! # Shadow log and live MAPE
 //!
-//! Every routed request gets one `e3_shadow` line (rid, chosen P, its
-//! `pred_s`, decision time) in the cost trace, or in
-//! `--trade-e3-shadow PATH`. When the router later receives the
+//! Every routed request gets one `forecast_shadow` line (rid, chosen P, its
+//! `pred_s`, decision time) in the placement trace, or in the file of
+//! [`ForecastConfig::shadow_path`]. When the router later receives the
 //! request's `request_complete` timeline sample from the chosen P, it writes
-//! an `e3_label` line: `done` on the router clock is within
+//! an `forecast_label` line: `done` on the router clock is within
 //! `[poll sent, poll received] - age_s - completed_age_s`, so
 //! `label_lo_s <= label <= label_hi_s` and `label_s` is the midpoint (the
-//! evaluator's convention). Live MAPE = mean over `e3_label` lines of
+//! evaluator's convention). Live MAPE = mean over `forecast_label` lines of
 //! `|pred_s - label_s| / label_s`; coverage = labels / shadows. The same
 //! rows join the engine's `prefill_finished_time` (req_trace) by `rid` with
 //! the evaluator's clock-offset interval (`decision_unix_s` is the router
 //! wall clock at the decision).
 //!
-//! # State push (`--trade-e3-push-port`)
+//! # State push (`--forecast-push-port`)
 //!
-//! With the push on, [`crate::trade_e3_push`] subscribes to each P's state
+//! With the push on, [`crate::prefill_state_push`] subscribes to each P's state
 //! push (engine wire contract v1, `prefill_state_push.py`). A pushed
 //! message carries the same `prefill_routing` snapshot, so it parses into the
-//! same [`E3View`]; its state time is `sampled_monotonic_s + offset` (the
+//! same [`ForecastView`]; its state time is `sampled_monotonic_s + offset` (the
 //! offset per connection). A candidate's forecast starts from the
 //! newest pushed state when that state is fresh, has the epoch of the P's
 //! polled snapshot and is usable; otherwise from the polled snapshot as
 //! above. Its error bound is the table of its state source
-//! ([`TradeE3Config::bound_for`]). The pushed timeline samples feed the same
+//! ([`ForecastConfig::bound_for`]). The pushed timeline samples feed the same
 //! online fits (deduplicated by sequence with the polled ones); a label from
 //! a pushed sample has a zero-width interval (`label_source` `push`).
 
@@ -137,11 +137,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 
-use crate::e3::numeric::{py_cmp, py_max, quantile, sort_py};
-use crate::e3::{
+use crate::forecast::numeric::{py_cmp, py_max, quantile, sort_py};
+use crate::forecast::{
     arrival_rates, error_bound, features, fit_gpu_classes, fit_launch_intervals, make_params,
     receipt_delays, resolve_gpu, router_floor_ms, router_lag_next, row_ready, step_of, ArrivalRow,
-    Arrivals, BoundParams, BoundTable, BucketView, Constants, Features, GpuClasses, GpuModel,
+    Arrivals, BoundTable, BucketView, Constants, ErrorTable, Features, GpuClasses, GpuModel,
     GpuSample, GpuSources, InflightPass, Input, LagSample, LaunchAnchor, LaunchFit, LaunchSample,
     Output, Params, Partial, QueueRow, RowSource, RxLine, RxParams, Target,
 };
@@ -150,12 +150,12 @@ use crate::prefill_snapshot::{is_true, nonneg_int};
 /// The deploy mode of the router's poll path: snapshot poll,
 /// router calibration without GPU times, the production rules.
 pub const DEFAULT_BOUND_MODE: &str = "snap+prod";
-/// `e3_schema` of the `e3_shadow` and `e3_label` lines.
-pub const SHADOW_SCHEMA: &str = "trade-e3-shadow.v1";
+/// `forecast_schema` of the `forecast_shadow` and `forecast_label` lines.
+pub const SHADOW_SCHEMA: &str = "forecast-log.v1";
 /// The longest window any fit reads: the calibration window plus the refit
 /// window. Samples, routes and dispatch rows older than
 /// this are dropped.
-pub const RETAIN_S: f64 = crate::e3::CAL_S + crate::e3::WINDOW_S;
+pub const RETAIN_S: f64 = crate::forecast::CAL_S + crate::forecast::WINDOW_S;
 /// Size bins of the session host rule
 /// (`prefill_completion.HOST_SIZE_EDGES`): cached prefixes up to
 /// 32k, up to 128k and above.
@@ -187,13 +187,14 @@ pub const MAX_ROUTES: usize = 200_000;
 pub const SERVICE_HISTORY_PER_CLASS: usize = 8192;
 /// The engine policy (pass budget `chunk_tokens`, page size) of the
 /// forecasts that fitted the shipped bound tables: the replay simulated
-/// with the reference values ([`crate::e3::CHUNK_TOKENS`],
-/// [`crate::e3::PAGE_TOKENS`]), the settings of the replayed GB300 GLM-5.2 P
+/// with the reference values ([`crate::forecast::CHUNK_TOKENS`],
+/// [`crate::forecast::PAGE_TOKENS`]), the settings of the replayed GB300 GLM-5.2 P
 /// engines (`--chunked-prefill-size 8192`, page 64; the recorded
 /// snapshot). A bound file does not record it. A P whose snapshot has
 /// another policy gets no forecast (`policy_not_bound_fit`): its error
 /// bound is not calibrated.
-pub const BOUND_FIT_POLICY: (i64, i64) = (crate::e3::CHUNK_TOKENS, crate::e3::PAGE_TOKENS);
+pub const BOUND_FIT_POLICY: (i64, i64) =
+    (crate::forecast::CHUNK_TOKENS, crate::forecast::PAGE_TOKENS);
 
 /// Unix seconds of a [`SystemTime`].
 fn unix_s(at: SystemTime) -> f64 {
@@ -215,10 +216,10 @@ fn nonneg_f64(v: Option<&Value>) -> Option<f64> {
 // Configuration: the error-bound table.
 // ---------------------------------------------------------------------------
 
-/// `--trade-wait e3` settings that are not `Copy`
-/// ([`crate::scheduler::trade::TradeParams`] holds the gate numbers).
+/// `--prefill-wait forecast` settings that are not `Copy`
+/// ([`crate::scheduler::placement_cost::PlacementCostParams`] holds the gate numbers).
 #[derive(Debug, Clone)]
-pub struct TradeE3Config {
+pub struct ForecastConfig {
     /// Error-bound table of [`Self::mode`] (table v2).
     pub table: BoundTable,
     /// Bound level used by the gate (`"0.8"` or `"0.9"`).
@@ -228,40 +229,40 @@ pub struct TradeE3Config {
     /// The bound file and the sha256 of its bytes.
     pub bound_path: PathBuf,
     pub bound_sha256: String,
-    /// `router-e3-bound-params.v2` (bound-params.json) or `bound-tables`
+    /// `forecast-error-table.v2` (an error table) or `bound-tables`
     /// (the map of mode to table of bound-tables.json).
     pub bound_schema: String,
     /// The level that bound-params.json ships for the mode (None for a
     /// bound-tables.json file).
     pub file_level: Option<String>,
     /// `g_min_s` recorded in bound-params.json (the threshold of its pair
-    /// statistics; the gate uses `--trade-gate-gmin-ms`).
+    /// statistics; the move rule does not use it).
     pub file_g_min_s: Option<f64>,
     /// sha256 of the bound-tables.json that bound-params.json was cut from.
     pub file_tables_sha256: Option<String>,
     /// rq margin m (s): a router or bootstrap row is kept only when its
     /// ready time is at most the target's ready time minus m.
     pub rq_margin_s: f64,
-    /// `--trade-e3-shadow`: the shadow log; None = the cost trace.
+    /// The shadow log; None = the placement trace (the command line).
     pub shadow_path: Option<PathBuf>,
-    /// `--trade-e3-push-port`: the state push; None = poll only.
+    /// `--forecast-push-port`: the state push; None = poll only.
     pub push: Option<PushConfig>,
-    /// `--trade-e3-next-pass-lag`: forecasts take
-    /// [`crate::e3::Params::next_pass_lag`] (off = the reference).
+    /// `--forecast-next-pass-lag`: forecasts take
+    /// [`crate::forecast::Params::next_pass_lag`] (off = the reference).
     pub next_pass_lag: bool,
-    /// `--trade-e3-frozen-fit`: offline warmup constants in
+    /// `--forecast-fit`: offline warmup constants in
     /// place of the online GPU, launch and lag fits (None: the online fits).
-    pub frozen_fit: Option<Arc<FrozenFit>>,
+    pub frozen_fit: Option<Arc<ForecastFit>>,
 }
 
-/// `--trade-e3-push-port`: the port of each P's state push and
+/// `--forecast-push-port`: the port of each P's state push and
 /// the error-bound table of the forecasts that start from a pushed state.
 #[derive(Debug, Clone)]
 pub struct PushConfig {
     /// The router connects to `tcp://<P host>:port` (routing rank 0).
     pub port: u16,
-    /// Deploy mode of the push table (`--trade-e3-push-bound-mode`;
-    /// default: the poll mode).
+    /// Deploy mode of the push table (the command line uses the poll
+    /// mode).
     pub mode: String,
     pub level: String,
     pub table: BoundTable,
@@ -281,9 +282,9 @@ struct ModeTable {
 /// The table of `mode` in bound-params.json or bound-tables.json.
 fn mode_table(value: &Value, path: &Path, mode: &str) -> Result<ModeTable, String> {
     let params_schema =
-        value.get("schema").and_then(Value::as_str) == Some(crate::e3::BOUND_PARAMS_SCHEMA);
+        value.get("schema").and_then(Value::as_str) == Some(crate::forecast::ERROR_TABLE_SCHEMA);
     if params_schema {
-        let params: BoundParams = serde_json::from_value(value.clone())
+        let params: ErrorTable = serde_json::from_value(value.clone())
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let m = params.modes.get(mode).ok_or_else(|| {
             format!(
@@ -297,7 +298,7 @@ fn mode_table(value: &Value, path: &Path, mode: &str) -> Result<ModeTable, Strin
             file_level: Some(m.level.clone()),
             file_g_min_s: Some(params.g_min_s),
             tables_sha256: Some(params.bound_tables_sha256.clone()),
-            schema: crate::e3::BOUND_PARAMS_SCHEMA.to_string(),
+            schema: crate::forecast::ERROR_TABLE_SCHEMA.to_string(),
         })
     } else {
         let mut tables: BTreeMap<String, BoundTable> = serde_json::from_value(value.clone())
@@ -332,7 +333,7 @@ fn resolve_level(
         (None, Some(l)) => Ok(l.to_string()),
         (None, None) => Err(format!(
             "{}: a bound-tables.json file has no level; give \
-             --trade-e3-bound-level",
+             a level (ForecastConfig::load)",
             path.display()
         )),
     }
@@ -365,15 +366,33 @@ fn check_mode(mode: &str, pushed: bool) -> Result<(), String> {
     }
 }
 
-impl TradeE3Config {
-    /// Read the bound file and check that the table of `mode` gives a bound
-    /// at `level` (or at the file's level) for every bucket.
+/// The error table built into the router, used when `--forecast-error-table`
+/// is not given. It is `tests/fixtures/forecast/bound-params.json`.
+pub const BUILTIN_ERROR_TABLE: &str = include_str!("../data/forecast-error-table.json");
+
+/// The [`ForecastConfig::bound_path`] of [`BUILTIN_ERROR_TABLE`].
+pub const BUILTIN_ERROR_TABLE_PATH: &str = "<built-in>/forecast-error-table.json";
+
+/// The bytes of the error-table file `path` ([`BUILTIN_ERROR_TABLE`] for
+/// [`BUILTIN_ERROR_TABLE_PATH`]).
+fn error_table_bytes(path: &Path) -> Result<std::borrow::Cow<'static, [u8]>, String> {
+    if path == Path::new(BUILTIN_ERROR_TABLE_PATH) {
+        return Ok(std::borrow::Cow::Borrowed(BUILTIN_ERROR_TABLE.as_bytes()));
+    }
+    std::fs::read(path)
+        .map(std::borrow::Cow::Owned)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+impl ForecastConfig {
+    /// Read the error-table file and check that the table of `mode` gives a
+    /// bound at `level` (or at the file's level) for every bucket.
     ///
-    /// The file is either `bound-params.json` (schema
-    /// `router-e3-bound-params.v2`: per deploy mode a level and a table) or
-    /// `bound-tables.json` (a map of mode to table, without a level; then
-    /// `level` is required). `mode` must be a poll mode (`snap+prod` or
-    /// `snap+prodL`; `check_mode`).
+    /// The file is either an error table (schema `forecast-error-table.v2`:
+    /// per deploy mode a level and a table) or `bound-tables.json` (a map of
+    /// mode to table, without a level; then `level` is required). `mode`
+    /// must be a poll mode (`snap+prod` or `snap+prodL`; `check_mode`).
+    /// [`BUILTIN_ERROR_TABLE_PATH`] reads [`BUILTIN_ERROR_TABLE`].
     pub fn load(
         path: &Path,
         mode: &str,
@@ -381,7 +400,7 @@ impl TradeE3Config {
         rq_margin_s: f64,
         shadow_path: Option<PathBuf>,
     ) -> Result<Self, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let bytes = error_table_bytes(path)?;
         let value: Value =
             serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
         let sha = crate::sha256_hex(&bytes);
@@ -416,16 +435,16 @@ impl TradeE3Config {
         })
     }
 
-    /// `--trade-e3-frozen-fit`: every (P, step) fit takes the
-    /// GPU, launch and lag parameters of `frozen` ([`FrozenFit::apply`]).
-    pub fn with_frozen_fit(mut self, frozen: Option<Arc<FrozenFit>>) -> Self {
+    /// `--forecast-fit`: every (P, step) fit takes the
+    /// GPU, launch and lag parameters of `frozen` ([`ForecastFit::apply`]).
+    pub fn with_frozen_fit(mut self, frozen: Option<Arc<ForecastFit>>) -> Self {
         self.frozen_fit = frozen;
         self
     }
 
-    /// `--trade-e3-next-pass-lag`: on a busy P, the result of a
+    /// `--forecast-next-pass-lag`: on a busy P, the result of a
     /// request whose last pass leaves no known work waits for the next pass
-    /// of the expected arrivals ([`crate::e3::Params::next_pass_lag`]).
+    /// of the expected arrivals ([`crate::forecast::Params::next_pass_lag`]).
     pub fn with_next_pass_lag(mut self, on: bool) -> Self {
         self.next_pass_lag = on;
         self
@@ -448,10 +467,10 @@ impl TradeE3Config {
             return Err("the state push port must be 1 to 65535".into());
         }
         let path = self.bound_path.clone();
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let bytes = error_table_bytes(&path)?;
         if crate::sha256_hex(&bytes) != self.bound_sha256 {
             return Err(format!(
-                "{}: the bound file changed while it was read",
+                "{}: the error-table file changed while it was read",
                 path.display()
             ));
         }
@@ -483,7 +502,7 @@ impl TradeE3Config {
 
     /// The bucket of a forecast in the table's scheme.
     pub fn bucket(&self, out: &Output) -> &'static str {
-        crate::e3::bucket_of(&BucketView::from(out), self.table.scheme)
+        crate::forecast::bucket_of(&BucketView::from(out), self.table.scheme)
     }
 
     /// The (table, level, mode) of a forecast's state source: the push
@@ -505,7 +524,7 @@ impl TradeE3Config {
 
     /// [`Self::bucket`] with the table of the forecast's state source.
     pub fn bucket_for(&self, pushed: bool, out: &Output) -> &'static str {
-        crate::e3::bucket_of(&BucketView::from(out), self.source_table(pushed).0.scheme)
+        crate::forecast::bucket_of(&BucketView::from(out), self.source_table(pushed).0.scheme)
     }
 
     /// The deploy mode whose table bounds a forecast of this state source.
@@ -514,19 +533,19 @@ impl TradeE3Config {
     }
 }
 
-/// The source label of a parameter from `--trade-e3-frozen-fit`
-/// (the GPU sources of the `e3_fit` trace event).
+/// The source label of a parameter from `--forecast-fit`
+/// (the GPU sources of the `forecast_fit` trace event).
 pub const FROZEN_SOURCE: &str = "frozen";
 
-/// `--trade-e3-frozen-fit FILE`: offline warmup constants (the
-/// `e3_constants` of the offline step model) that replace the online GPU,
+/// `--forecast-fit FILE`: offline warmup constants (the
+/// `forecast_constants` of the offline step model) that replace the online GPU,
 /// launch and lag fits of every P; the online state still gives the arrival
 /// rates. For a P that is never idle: the online GPU fit takes only single
-/// passes launched after an idle gap ([`crate::e3::GPU_FIT_MIN`] per class),
-/// so a saturated P (Kimi-K2.6 under CUA load) keeps no fit and every
+/// passes launched after an idle gap ([`crate::forecast::GPU_FIT_MIN`] per class),
+/// so a saturated P keeps no fit and every
 /// forecast falls back (`no_fit`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct FrozenFit {
+pub struct ForecastFit {
     /// The file and the sha256 of its bytes.
     pub path: PathBuf,
     pub sha256: String,
@@ -540,7 +559,7 @@ pub struct FrozenFit {
     pub constants: Constants,
 }
 
-/// The `e3_constants` object of the offline step model (other keys, such as
+/// The `forecast_constants` object of the offline step model (other keys, such as
 /// `units` and `notes`, are ignored).
 #[derive(serde::Deserialize)]
 struct FrozenFitFile {
@@ -566,22 +585,22 @@ struct FrozenFitFile {
     graph_tokens: Option<i64>,
 }
 
-impl FrozenFit {
-    /// Read `path`: the offline step model (its `kimi.e3_constants` or
-    /// `e3_constants`) or the `e3_constants` object itself. Refused: no GPU
+impl ForecastFit {
+    /// Read `path`: the offline step model (its `kimi.forecast_constants` or
+    /// `forecast_constants`) or the `forecast_constants` object itself. Refused: no GPU
     /// class, a class without 5 finite coefficients, a floor that is not
     /// finite and at least 0, a `gpu_idle` other than `gpu_busy`, a launch
     /// model without 6 finite coefficients or with an anchor other than
     /// `launch`, a constant that is not finite, and a pass budget, page or
     /// graph size other than the router's.
     pub fn load(path: &Path) -> Result<Self, String> {
-        use crate::e3::{CHUNK_TOKENS, GRAPH_TOKENS, PAGE_TOKENS};
+        use crate::forecast::{CHUNK_TOKENS, GRAPH_TOKENS, PAGE_TOKENS};
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let value: Value =
             serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
         let body = value
-            .pointer("/kimi/e3_constants")
-            .or_else(|| value.get("e3_constants"))
+            .pointer("/kimi/forecast_constants")
+            .or_else(|| value.get("forecast_constants"))
             .unwrap_or(&value)
             .clone();
         let file: FrozenFitFile =
@@ -662,7 +681,7 @@ impl FrozenFit {
         fit.launch = LaunchFit {
             coef: self.launch_coef.clone(),
             resid_q: self.launch_resid_q.clone(),
-            source: crate::e3::LaunchSource::Frozen,
+            source: crate::forecast::LaunchSource::Frozen,
         };
         fit.constants = self.constants;
     }
@@ -699,9 +718,9 @@ fn check_table(table: &BoundTable, level: &str) -> Result<(), String> {
         .get(level)
         .ok_or_else(|| format!("no level {level}"))?;
     let buckets: &[&str] = match table.scheme {
-        crate::e3::BucketScheme::Idle => &["idle", "busy"],
-        crate::e3::BucketScheme::Wait => &["idle", "busy_w0", "busy_w1", "busy_w2"],
-        crate::e3::BucketScheme::Ahead => &["idle", "busy_a0", "busy_a1", "busy_a2"],
+        crate::forecast::BucketScheme::Idle => &["idle", "busy"],
+        crate::forecast::BucketScheme::Wait => &["idle", "busy_w0", "busy_w1", "busy_w2"],
+        crate::forecast::BucketScheme::Ahead => &["idle", "busy_a0", "busy_a1", "busy_a2"],
     };
     for bucket in buckets {
         let curve = curves
@@ -725,7 +744,7 @@ fn check_table(table: &BoundTable, level: &str) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// The engine snapshot as E3 inputs.
+// The engine snapshot as forecast inputs.
 // ---------------------------------------------------------------------------
 
 /// A pending in-flight pass of the snapshot, relative to its capture.
@@ -846,10 +865,10 @@ impl TimelineRow {
     }
 }
 
-/// One parsed `prefill_routing` snapshot in E3 form. Parsed once
-/// per poll, off the cost-book lock.
+/// One parsed `prefill_routing` snapshot in forecast form. Parsed once
+/// per poll, off the work-book lock.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct E3View {
+pub struct ForecastView {
     pub epoch: Option<String>,
     pub sequence: Option<u64>,
     /// The engine's snapshot age at the reply (`age_s`).
@@ -885,12 +904,12 @@ pub struct E3View {
     pub samples: Vec<TimelineRow>,
 }
 
-impl E3View {
+impl ForecastView {
     /// Parse one `loads[0].prefill_routing` value.
     pub fn parse(raw: &Value) -> Self {
         let mut v = Self {
-            page: crate::e3::PAGE_TOKENS,
-            chunk: crate::e3::CHUNK_TOKENS,
+            page: crate::forecast::PAGE_TOKENS,
+            chunk: crate::forecast::CHUNK_TOKENS,
             ..Self::default()
         };
         if !raw.is_object() {
@@ -904,21 +923,21 @@ impl E3View {
         let policy = raw.get("policy");
         let page = positive_int(policy.and_then(|p| p.get("page_size")));
         let chunk = positive_int(policy.and_then(|p| p.get("chunk_tokens")));
-        v.page = page.unwrap_or(crate::e3::PAGE_TOKENS);
-        v.chunk = chunk.unwrap_or(crate::e3::CHUNK_TOKENS);
+        v.page = page.unwrap_or(crate::forecast::PAGE_TOKENS);
+        v.chunk = chunk.unwrap_or(crate::forecast::CHUNK_TOKENS);
         v.max_input = positive_int(policy.and_then(|p| p.get("max_input_tokens")));
         // The engine marks a snapshot stale when its age at the reply is
         // above the engine's own limit (SGLANG_PREFILL_ROUTING_SNAPSHOT_MAX_AGE_S)
         // or unknown. With a known age the router's limit on the view age
-        // decides (--trade-e3-max-view-age-ms; the bound tables
+        // decides (--max-state-age-ms; the bound tables
         // were fitted on every decision, whatever the snapshot age): the flag
         // is only noted.
         let stale = is_true(raw.get("stale"));
         if stale && v.age_s.is_some() {
             v.degraded.insert("engine_stale");
         }
-        // The usability rules of the EFT view, strict on any
-        // omitted record, and the plain FCFS pass formation that E3 models.
+        // The usability rules of the forecast view, strict on any
+        // omitted record, and the plain FCFS pass formation that forecast models.
         v.unusable = if !is_true(raw.get("available")) {
             Some("unavailable")
         } else if stale && v.age_s.is_none() {
@@ -940,7 +959,7 @@ impl E3View {
             Some("policy_unknown")
         } else if v.max_input.is_some_and(|m| m < v.chunk) {
             // The engine stops adding rows to a pass once they reach
-            // max_prefill_tokens, before the chunk budget that E3 simulates.
+            // max_prefill_tokens, before the chunk budget that forecast simulates.
             Some("policy_max_input_below_chunk")
         } else {
             None
@@ -1094,7 +1113,10 @@ impl E3View {
     /// The late-D park cap of the P: `PARK_CAP x token pool`,
     /// with the replay's default pool when the snapshot has none.
     pub fn cap_tokens(&self) -> f64 {
-        crate::e3::PARK_CAP * self.pool_tokens.unwrap_or(crate::e3::DEFAULT_POOL_TOKENS) as f64
+        crate::forecast::PARK_CAP
+            * self
+                .pool_tokens
+                .unwrap_or(crate::forecast::DEFAULT_POOL_TOKENS) as f64
     }
 }
 
@@ -1168,7 +1190,7 @@ pub struct BuildNotes {
     pub pull_tokens: i64,
 }
 
-/// The E3 input of one candidate.
+/// The forecast input of one candidate.
 ///
 /// `t0` = poll receipt - `age_s`; `d` = the decision time (both router clock
 /// seconds). `estimate(rid)` gives the router's (prefix, host) of a RID that
@@ -1177,7 +1199,7 @@ pub struct BuildNotes {
 /// `rq_margin_s` None keeps every router and bootstrap row (`rqall`).
 #[allow(clippy::too_many_arguments)]
 pub fn build_input(
-    view: &E3View,
+    view: &ForecastView,
     t0: f64,
     d: f64,
     target: Target,
@@ -1436,7 +1458,7 @@ fn median_or(xs: &[f64], default: f64) -> f64 {
 /// The router calibration of one (P, step) (the replay's
 /// `router_chain` and `params_for` with gpu = `router`).
 pub fn compute_fit(step: f64, data: &FitData) -> FitBundle {
-    use crate::e3::{GPU_FIT_MIN, GRAPH_TOKENS};
+    use crate::forecast::{GPU_FIT_MIN, GRAPH_TOKENS};
     let fit = |rows: &[GpuSample]| fit_gpu_classes(rows, GRAPH_TOKENS, GPU_FIT_MIN);
     let own_cal_ms: Vec<f64> = data.own_cal.iter().map(|s| s.y_ms).collect();
     let pooled_cal_ms: Vec<f64> = data.pooled_cal.iter().map(|s| s.y_ms).collect();
@@ -1484,7 +1506,7 @@ pub fn compute_fit(step: f64, data: &FitData) -> FitBundle {
     let phi_s = median_or(&data.phis, 0.0);
     // Formula: median(first launch - receipt) - boot.
     let idle_delay_s = if data.idles.is_empty() {
-        crate::e3::DEFAULT_IDLE_DELAY_S
+        crate::forecast::DEFAULT_IDLE_DELAY_S
     } else {
         py_max(0.0, median_or(&data.idles, 0.0) - boot_s)
     };
@@ -1503,8 +1525,8 @@ pub fn compute_fit(step: f64, data: &FitData) -> FitBundle {
         arrivals: arrival_rates(
             &data.dispatch,
             step,
-            crate::e3::WINDOW_S,
-            crate::e3::ARRIVAL_MIN,
+            crate::forecast::WINDOW_S,
+            crate::forecast::ARRIVAL_MIN,
         ),
         counts: FitCounts {
             service_window: data.own_window.len(),
@@ -1642,7 +1664,7 @@ impl WorkerStream {
 
     fn in_cal(&self, t: f64) -> bool {
         self.cal0
-            .is_some_and(|c| t >= c && t < c + crate::e3::CAL_S)
+            .is_some_and(|c| t >= c && t < c + crate::forecast::CAL_S)
     }
 
     /// A gap in the sequence: classifications that need every row are reset.
@@ -1740,7 +1762,7 @@ impl WorkerStream {
         while self
             .dispatch
             .front()
-            .is_some_and(|r| r.t < now - crate::e3::WINDOW_S - crate::e3::STEP_S)
+            .is_some_and(|r| r.t < now - crate::forecast::WINDOW_S - crate::forecast::STEP_S)
         {
             self.dispatch.pop_front();
         }
@@ -1752,7 +1774,7 @@ impl WorkerStream {
         // Service samples leave the window for the per-class history (the
         // own_all / pooled_all steps use every earlier sample).
         for (_, sample) in self.service.drain(..n) {
-            let class = usize::from(sample.f[1] > crate::e3::GRAPH_TOKENS as f64);
+            let class = usize::from(sample.f[1] > crate::forecast::GRAPH_TOKENS as f64);
             let old = &mut self.service_old[class];
             old.push_back(sample);
             if old.len() > SERVICE_HISTORY_PER_CLASS {
@@ -1811,18 +1833,18 @@ struct Online {
     host_table: Option<(f64, HashMap<HostBin, f64>)>,
 }
 
-/// The router's online E3 state (fits, receipt lines, routes, host rule).
+/// The router's online forecast state (fits, receipt lines, routes, host rule).
 #[derive(Debug)]
-pub struct E3Online {
+pub struct ForecastOnline {
     anchor: Instant,
     unix_at_anchor: f64,
     /// The state push is on: labels name their source (`label_source`).
     label_sources: bool,
-    /// Forecast parameters take [`crate::e3::Params::next_pass_lag`].
+    /// Forecast parameters take [`crate::forecast::Params::next_pass_lag`].
     next_pass_lag: bool,
-    /// `--trade-e3-frozen-fit`: replaces the GPU, launch and
+    /// `--forecast-fit`: replaces the GPU, launch and
     /// lag parts of every fit.
-    frozen: Option<Arc<FrozenFit>>,
+    frozen: Option<Arc<ForecastFit>>,
     state: Mutex<OnlineDebug>,
 }
 
@@ -1831,15 +1853,15 @@ struct OnlineDebug(Online);
 
 impl std::fmt::Debug for OnlineDebug {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("E3OnlineState")
+        f.debug_struct("ForecastOnlineState")
             .field("workers", &self.0.workers.len())
             .field("routes", &self.0.routes.len())
             .finish_non_exhaustive()
     }
 }
 
-impl E3Online {
-    /// `anchor` is the zero of the router clock (seconds) of every E3 time.
+impl ForecastOnline {
+    /// `anchor` is the zero of the router clock (seconds) of every forecast time.
     pub fn new(anchor: Instant) -> Self {
         let unix_at_anchor = unix_s(SystemTime::now())
             - Instant::now()
@@ -1855,23 +1877,23 @@ impl E3Online {
         }
     }
 
-    /// `--trade-e3-frozen-fit`: every (P, step) fit takes the
+    /// `--forecast-fit`: every (P, step) fit takes the
     /// GPU model, the launch model and the warmup constants of `frozen`;
     /// the online samples still give its arrival rates.
-    pub fn with_frozen_fit(mut self, frozen: Option<Arc<FrozenFit>>) -> Self {
+    pub fn with_frozen_fit(mut self, frozen: Option<Arc<ForecastFit>>) -> Self {
         self.frozen = frozen;
         self
     }
 
     /// Forecasts price the next pass of the expected arrivals into the
     /// result of a request whose last pass leaves no known work on a busy P
-    /// (`--trade-e3-next-pass-lag`).
+    /// (`--forecast-next-pass-lag`).
     pub fn with_next_pass_lag(mut self, on: bool) -> Self {
         self.next_pass_lag = on;
         self
     }
 
-    /// With the state push: every `e3_label` line names its source (`poll`
+    /// With the state push: every `forecast_label` line names its source (`poll`
     /// or `push`).
     pub fn with_label_sources(mut self) -> Self {
         self.label_sources = true;
@@ -1894,11 +1916,11 @@ impl E3Online {
 
     /// Take the timeline samples and waiting-row receipts of one snapshot
     /// of `worker`, polled at `sent` and received at `received`. Returns the
-    /// `e3_label` events of routed requests whose completion arrived.
+    /// `forecast_label` events of routed requests whose completion arrived.
     pub fn observe(
         &self,
         worker: &str,
-        view: &E3View,
+        view: &ForecastView,
         sent: Instant,
         received: Instant,
     ) -> Vec<Value> {
@@ -1918,16 +1940,16 @@ impl E3Online {
     }
 
     /// Take the timeline samples and waiting-row receipts of one pushed
-    /// state of `worker` ([`crate::trade_e3_push`]): `t0_s` is its state time
+    /// state of `worker` ([`crate::prefill_state_push`]): `t0_s` is its state time
     /// on the router clock (`sampled_monotonic_s` + the offset) and
     /// `received_s` when the router read the message. A label's interval is
     /// the point `t0_s - completed_age_s` (the offset's error, the smallest
-    /// transit time in its window, is left out). Returns the `e3_label`
+    /// transit time in its window, is left out). Returns the `forecast_label`
     /// events.
     pub fn observe_push(
         &self,
         worker: &str,
-        view: &E3View,
+        view: &ForecastView,
         t0_s: f64,
         received_s: f64,
     ) -> Vec<Value> {
@@ -1942,7 +1964,7 @@ impl E3Online {
         self.observe_at(view, &ing)
     }
 
-    fn observe_at(&self, view: &E3View, ing: &Ingest<'_>) -> Vec<Value> {
+    fn observe_at(&self, view: &ForecastView, ing: &Ingest<'_>) -> Vec<Value> {
         let (worker, received_s) = (ing.worker, ing.received_s);
         let mut labels = Vec::new();
         let mut guard = self.state.lock();
@@ -1968,7 +1990,7 @@ impl E3Online {
     /// call of the step from copies of the windows (the fit itself runs
     /// outside this lock). The flag is true when this call computed it.
     pub fn fit_for(&self, worker: &str, now_s: f64) -> (Arc<FitBundle>, bool) {
-        let step = step_of(now_s, crate::e3::STEP_S);
+        let step = step_of(now_s, crate::forecast::STEP_S);
         let data = {
             let guard = self.state.lock();
             let st = &guard.0;
@@ -1994,22 +2016,22 @@ impl E3Online {
         (Arc::clone(slot), Arc::ptr_eq(slot, &fit))
     }
 
-    /// The E3 inputs of one candidate that need no cost-book state: the
+    /// The forecast inputs of one candidate that need no work-book state: the
     /// (P, step) fit, the receipt line, the park cap, the target tokens and
     /// the host rule. `tokens` are the router's: own hit, indexer GPU hit
     /// and expected hit (own hit + the hinted pull). The second value is a
-    /// fit that this call computed (for the `e3_fit` trace event).
+    /// fit that this call computed (for the `forecast_fit` trace event).
     pub fn prepare(
         &self,
         worker: &str,
-        snapshot: Option<Arc<crate::cost_balance::RoutingSnapshot>>,
+        snapshot: Option<Arc<crate::prefill_work::RoutingSnapshot>>,
         rid: &str,
         tokens: CandidateTokens,
         session: Option<&str>,
         now_s: f64,
-    ) -> (E3Prepared, Option<Arc<FitBundle>>) {
-        let view = snapshot.as_ref().and_then(|s| s.e3.as_ref());
-        let page = view.map_or(crate::e3::PAGE_TOKENS, |v| v.page);
+    ) -> (ForecastPrepared, Option<Arc<FitBundle>>) {
+        let view = snapshot.as_ref().and_then(|s| s.forecast.as_ref());
+        let page = view.map_or(crate::forecast::PAGE_TOKENS, |v| v.page);
         let n = tokens.input;
         let q_own = crate::prefill_snapshot::floor_hit(tokens.local_hit, n, page);
         let prefix = crate::prefill_snapshot::floor_hit(tokens.expected_hit, n, page).max(q_own);
@@ -2030,14 +2052,14 @@ impl E3Online {
         let (fit, new) = self.fit_for(worker, now_s);
         let rx = self.rx_params(worker);
         let cap = view.map_or(
-            crate::e3::PARK_CAP * crate::e3::DEFAULT_POOL_TOKENS as f64,
+            crate::forecast::PARK_CAP * crate::forecast::DEFAULT_POOL_TOKENS as f64,
             |v| v.cap_tokens(),
         );
         let params = fit.usable().then(|| Params {
             next_pass_lag: self.next_pass_lag,
             ..fit.params(rx, cap)
         });
-        let prep = E3Prepared {
+        let prep = ForecastPrepared {
             snapshot,
             push: None,
             fit: Some(Arc::clone(&fit)),
@@ -2090,13 +2112,13 @@ impl E3Online {
         }
         let mut guard = self.state.lock();
         let st = &mut guard.0;
-        let step = step_of(now_s, crate::e3::STEP_S);
+        let step = step_of(now_s, crate::forecast::STEP_S);
         if st.host_table.as_ref().is_none_or(|(s, _)| *s != step) {
             let mut sums: HashMap<HostBin, (f64, f64, usize)> = HashMap::new();
             for s in st
                 .host_samples
                 .iter()
-                .filter(|s| s.t >= step - crate::e3::WINDOW_S && s.t < step)
+                .filter(|s| s.t >= step - crate::forecast::WINDOW_S && s.t < step)
             {
                 let acc = sums.entry(s.bin).or_insert((0.0, 0.0, 0));
                 acc.0 += s.host;
@@ -2178,17 +2200,19 @@ pub fn secs_since(anchor: Instant, at: Instant) -> f64 {
 }
 
 fn collect_fit_data(st: &Online, worker: &str, step: f64) -> FitData {
-    let lo = step - crate::e3::WINDOW_S;
+    let lo = step - crate::forecast::WINDOW_S;
     let mut data = FitData::default();
     let own = st.workers.get(worker);
     let window_of = |rows: &[(f64, GpuSample)], lo: f64, hi: f64| -> Vec<GpuSample> {
-        crate::e3::window(rows, lo, hi, |r| r.0)
+        crate::forecast::window(rows, lo, hi, |r| r.0)
             .iter()
             .map(|r| r.1.clone())
             .collect()
     };
     for (url, w) in &st.workers {
-        let cal_hi = w.cal0.map_or(step, |c| (c + crate::e3::CAL_S).min(step));
+        let cal_hi = w
+            .cal0
+            .map_or(step, |c| (c + crate::forecast::CAL_S).min(step));
         let cal_lo = w.cal0.unwrap_or(f64::INFINITY);
         let window = window_of(w.service.as_slice(), lo, step);
         let cal = window_of(w.cal_service.as_slice(), cal_lo, cal_hi);
@@ -2212,17 +2236,19 @@ fn collect_fit_data(st: &Online, worker: &str, step: f64) -> FitData {
         data.pooled_all.extend(all);
     }
     if let Some(w) = own {
-        let cal_hi = w.cal0.map_or(step, |c| (c + crate::e3::CAL_S).min(step));
+        let cal_hi = w
+            .cal0
+            .map_or(step, |c| (c + crate::forecast::CAL_S).min(step));
         let cal_lo = w.cal0.unwrap_or(f64::INFINITY);
-        data.launch_window = crate::e3::window(&w.launch, lo, step, |r| r.t).to_vec();
-        data.launch_cal = crate::e3::window(&w.cal_launch, cal_lo, cal_hi, |r| r.t).to_vec();
+        data.launch_window = crate::forecast::window(&w.launch, lo, step, |r| r.t).to_vec();
+        data.launch_cal = crate::forecast::window(&w.cal_launch, cal_lo, cal_hi, |r| r.t).to_vec();
         data.launch_ys = w
             .launch
             .iter()
             .filter(|r| r.t < step)
             .map(|r| r.y)
             .collect();
-        data.lag_cal = crate::e3::window(&w.cal_lag, cal_lo, cal_hi, |r| r.0)
+        data.lag_cal = crate::forecast::window(&w.cal_lag, cal_lo, cal_hi, |r| r.0)
             .iter()
             .map(|r| r.1.clone())
             .collect();
@@ -2248,7 +2274,7 @@ fn collect_fit_data(st: &Online, worker: &str, step: f64) -> FitData {
 /// Ingest the new timeline rows (sequence above the last one) of one P.
 fn ingest(
     ws: &mut WorkerStream,
-    view: &E3View,
+    view: &ForecastView,
     ing: &Ingest<'_>,
     routes: &mut HashMap<String, RouteRecord>,
     host_samples: &mut VecDeque<HostSample>,
@@ -2327,7 +2353,7 @@ fn ingest(
                 }
                 ws.note_launch_pass(k + 1);
                 ws.busy.push_back((start, end));
-                if (0.0..crate::e3::LAUNCH_Y_MAX_S).contains(&dur) {
+                if (0.0..crate::forecast::LAUNCH_Y_MAX_S).contains(&dur) {
                     if let (Some(f), Some(fin), Some(next_host)) =
                         (row.pass_features(), row.finishing, row.next_host_tokens)
                     {
@@ -2466,8 +2492,8 @@ fn ingest(
                     let hi = ing.base - age - rec.decided_s;
                     let label = (lo + hi) / 2.0;
                     let mut line = json!({
-                        "event": "e3_label",
-                        "e3_schema": SHADOW_SCHEMA,
+                        "event": "forecast_label",
+                        "forecast_schema": SHADOW_SCHEMA,
                         "rid": rec.rid,
                         "worker_url": rec.worker,
                         "decision_mono_s": rec.decided_s,
@@ -2494,7 +2520,7 @@ fn ingest(
 }
 
 // ---------------------------------------------------------------------------
-// Decision context (built before the cost-book lock) and shadow log.
+// Decision context (built before the work-book lock) and shadow log.
 // ---------------------------------------------------------------------------
 
 /// The router's token view of one candidate P for the request.
@@ -2509,14 +2535,14 @@ pub struct CandidateTokens {
     pub expected_hit: i64,
 }
 
-/// The E3 inputs of one candidate that do not need the cost book.
+/// The forecast inputs of one candidate that do not need the work book.
 #[derive(Debug, Clone)]
-pub struct E3Prepared {
-    pub snapshot: Option<Arc<crate::cost_balance::RoutingSnapshot>>,
+pub struct ForecastPrepared {
+    pub snapshot: Option<Arc<crate::prefill_work::RoutingSnapshot>>,
     /// The P's newest pushed state (state push on; None: no push yet or the
     /// push is off). The decision uses it instead of `snapshot` when it is
     /// fresh, verified and usable.
-    pub push: Option<Arc<crate::trade_e3_push::PushState>>,
+    pub push: Option<Arc<crate::prefill_state_push::PushState>>,
     pub fit: Option<Arc<FitBundle>>,
     /// The forecast parameters; None when the fit has no GPU model.
     pub params: Option<Params>,
@@ -2527,16 +2553,16 @@ pub struct E3Prepared {
     pub session_gap_s: Option<f64>,
 }
 
-/// The inputs of one `wait = e3` decision, built before the cost-book lock.
+/// The inputs of one the forecast wait decision, built before the work-book lock.
 #[derive(Debug, Clone)]
-pub struct TradeE3Context {
-    pub cfg: Arc<TradeE3Config>,
-    /// Zero of the router clock (s) of every E3 time.
+pub struct ForecastContext {
+    pub cfg: Arc<ForecastConfig>,
+    /// Zero of the router clock (s) of every forecast time.
     pub anchor: Instant,
     /// Unix seconds at `anchor` (the decision's wall-clock time in the
     /// trace, for the join with engine times).
     pub unix_at_anchor: f64,
-    pub candidates: HashMap<String, E3Prepared>,
+    pub candidates: HashMap<String, ForecastPrepared>,
 }
 
 /// The session key of a request for the host rule: the
@@ -2571,11 +2597,11 @@ pub fn session_key(
         .map(|k| format!("routing-key/{k}"))
 }
 
-/// Where the `e3_shadow` and `e3_label` lines go.
+/// Where the `forecast_shadow` and `forecast_label` lines go.
 pub enum ShadowSink {
-    /// The cost trace (its sequence numbers and timestamps).
-    Trace(Arc<crate::cost_balance::CostBook>),
-    /// `--trade-e3-shadow PATH` (a new file).
+    /// The placement trace (its sequence numbers and timestamps).
+    Trace(Arc<crate::prefill_work::PrefillWorkBook>),
+    /// [`ForecastConfig::shadow_path`] (a new file).
     File(Mutex<Option<BufWriter<File>>>),
 }
 
@@ -2596,12 +2622,12 @@ impl ShadowSink {
     }
 
     /// Write one line. A file error stops the file log (logged once); a
-    /// cost-trace error is the cost book's (it stops admission).
+    /// cost-trace error is the work book's (it stops admission).
     pub fn write(&self, mut event: Value) {
         match self {
             Self::Trace(book) => {
                 if let Err(error) = book.emit_event(event) {
-                    tracing::error!(target: "co_sched", %error, "e3 shadow line not written to the cost trace");
+                    tracing::error!(target: "symmetric_pd", %error, "forecast shadow line not written to the placement trace");
                 }
             }
             Self::File(slot) => {
@@ -2615,7 +2641,7 @@ impl ShadowSink {
                     .and_then(|()| writer.write_all(b"\n"))
                     .and_then(|()| writer.flush());
                 if let Err(error) = result {
-                    tracing::error!(target: "co_sched", %error, "e3 shadow log failed; no further lines");
+                    tracing::error!(target: "symmetric_pd", %error, "forecast shadow log failed; no further lines");
                     *slot = None;
                 }
             }
@@ -2626,11 +2652,11 @@ impl ShadowSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::e3::{forecast, ForecastPath};
+    use crate::forecast::{forecast, ForecastPath};
 
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/e3")
+            .join("tests/fixtures/forecast")
             .join(name)
     }
 
@@ -2668,14 +2694,14 @@ mod tests {
         )
     }
 
-    /// The recorded reply in E3 form: one pending pass, the
+    /// The recorded reply in forecast form: one pending pass, the
     /// chunked request, 33 waiting rows (the last one has no published
     /// prefix: it is past the lookahead plan), U = 0 and the pool.
     #[test]
-    fn the_recorded_snapshot_parses_into_e3_rows() {
+    fn the_recorded_snapshot_parses_into_forecast_rows() {
         let rec = recorded();
         let raw = &rec["candidate"]["snapshot"]["raw_prefill_routing"];
-        let v = E3View::parse(raw);
+        let v = ForecastView::parse(raw);
         assert_eq!(v.unusable, None, "{:?}", v.degraded);
         assert!(v.degraded.is_empty(), "{:?}", v.degraded);
         assert_eq!(v.epoch.as_deref(), Some("8e884f52591543248367e6693fba8b72"));
@@ -2736,9 +2762,9 @@ mod tests {
     fn the_recorded_timeline_feeds_the_fits() {
         let rec = recorded();
         let env = &rec["candidate"]["snapshot"];
-        let v = E3View::parse(&env["raw_prefill_routing"]);
+        let v = ForecastView::parse(&env["raw_prefill_routing"]);
         let t0 = Instant::now();
-        let online = E3Online::new(t0);
+        let online = ForecastOnline::new(t0);
         let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
         let sent = env["poll_sent_mono_s"].as_f64().unwrap();
         let received = env["poll_received_mono_s"].as_f64().unwrap();
@@ -2793,7 +2819,7 @@ mod tests {
         let rec = recorded();
         let env = &rec["candidate"]["snapshot"];
         let raw = &env["raw_prefill_routing"];
-        let v = E3View::parse(raw);
+        let v = ForecastView::parse(raw);
         let received = env["poll_received_mono_s"].as_f64().unwrap();
         let d = rec["decision"]["decision_mono_s"].as_f64().unwrap();
         let t0 = received - v.age_s.unwrap();
@@ -2888,7 +2914,7 @@ mod tests {
                        "share_enabled": false},
             "admission_resources": {"token_pool_capacity": 1000000,
                                     "unbound_prompt_tokens_last_scan": null}});
-        let v = E3View::parse(&raw);
+        let v = ForecastView::parse(&raw);
         assert_eq!(v.unusable, None);
         assert_eq!(v.unbound_tokens, None, "no scan value and no row");
         assert!((v.cap_tokens() - 350_000.0).abs() < 1e-6);
@@ -2924,7 +2950,7 @@ mod tests {
             "waiting": [row("a", 50_000, 42_000, 8_000, 30_000),
                         row("b", 10_000, 9_000, 0, 20_000),
                         row("c", 4_096, 4_096, 0, 0)]});
-        let v = E3View::parse(&raw);
+        let v = ForecastView::parse(&raw);
         assert_eq!(v.unusable, None);
         let pulls: Vec<i64> = v.waiting.iter().map(|r| r.pull).collect();
         assert_eq!(pulls, vec![30_000, 20_000, 0]);
@@ -2953,7 +2979,7 @@ mod tests {
     /// Unusable views name their reason. The engine's stale flag counts only
     /// without a known age (the router's view-age limit decides otherwise);
     /// the engine policy must give the pass budget and page, and a
-    /// max_prefill_tokens below the budget is not E3's pass formation.
+    /// max_prefill_tokens below the budget is not forecast's pass formation.
     #[test]
     fn unusable_snapshots_name_the_reason() {
         let base = json!({"epoch": "e", "available": true, "stale": false, "truncated": false,
@@ -2963,18 +2989,18 @@ mod tests {
         let with = |k: &str, v: Value| {
             let mut raw = base.clone();
             raw[k] = v;
-            E3View::parse(&raw).unusable
+            ForecastView::parse(&raw).unusable
         };
-        assert_eq!(E3View::parse(&base).unusable, None);
-        assert!(E3View::parse(&base).degraded.is_empty());
+        assert_eq!(ForecastView::parse(&base).unusable, None);
+        assert!(ForecastView::parse(&base).degraded.is_empty());
         assert_eq!(with("available", json!(false)), Some("unavailable"));
         let mut stale = base.clone();
         stale["stale"] = json!(true);
-        let v = E3View::parse(&stale);
+        let v = ForecastView::parse(&stale);
         assert_eq!(v.unusable, None, "a known age: the router's limit decides");
         assert!(v.degraded.contains("engine_stale"));
         stale["age_s"] = Value::Null;
-        assert_eq!(E3View::parse(&stale).unusable, Some("stale"));
+        assert_eq!(ForecastView::parse(&stale).unusable, Some("stale"));
         assert_eq!(with("truncated", json!(true)), Some("truncated"));
         assert_eq!(
             with("inflight_batches_known", json!(false)),
@@ -3016,7 +3042,7 @@ mod tests {
         // Without max_input_tokens, or with a larger one, the chunk is the
         // budget; another chunk or page parses (the decision checks it
         // against the bound tables' policy).
-        let v = E3View::parse(&json!({"epoch": "e", "available": true, "stale": false,
+        let v = ForecastView::parse(&json!({"epoch": "e", "available": true, "stale": false,
             "truncated": false, "age_s": 0.0, "inflight_batches_known": true,
             "policy": {"page_size": 32, "chunk_tokens": 16384, "max_input_tokens": 16384,
                        "schedule_policy": "fcfs"}}));
@@ -3039,7 +3065,10 @@ mod tests {
             Some("partial_unknown")
         );
         assert_eq!(with("waiting", json!([{"rid": "w"}])), Some("row_unknown"));
-        assert_eq!(E3View::parse(&json!([])).unusable, Some("not_an_object"));
+        assert_eq!(
+            ForecastView::parse(&json!([])).unusable,
+            Some("not_an_object")
+        );
     }
 
     fn row(seq: u64, kind: &str, k: i64, rid: Option<&str>, dur: f64, age: f64, f: Value) -> Value {
@@ -3059,8 +3088,8 @@ mod tests {
                "cache_breakdown_computed": true})
     }
 
-    fn view_of(rows: Vec<Value>) -> E3View {
-        E3View::parse(&json!({"epoch": "e1", "available": true, "stale": false,
+    fn view_of(rows: Vec<Value>) -> ForecastView {
+        ForecastView::parse(&json!({"epoch": "e1", "available": true, "stale": false,
             "truncated": false, "age_s": 0.0, "inflight_batches_known": true,
             "policy": {"schedule_policy": "fcfs", "share_enabled": false},
             "timeline": {"samples": rows}}))
@@ -3077,7 +3106,7 @@ mod tests {
     #[test]
     fn timeline_rows_give_service_launch_and_lag_samples() {
         let t0 = Instant::now();
-        let online = E3Online::new(t0);
+        let online = ForecastOnline::new(t0);
         let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
         assert!(online
             .observe("http://p", &view_of(Vec::new()), at(50.0), at(50.0))
@@ -3262,7 +3291,7 @@ mod tests {
     #[test]
     fn rows_from_before_the_first_snapshot_do_not_open_the_calibration_window() {
         let t0 = Instant::now();
-        let online = E3Online::new(t0);
+        let online = ForecastOnline::new(t0);
         let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
         let old = vec![
             row(
@@ -3349,7 +3378,7 @@ mod tests {
         let small: Vec<f64> = data
             .own_all
             .iter()
-            .filter(|s| s.f[1] <= crate::e3::GRAPH_TOKENS as f64)
+            .filter(|s| s.f[1] <= crate::forecast::GRAPH_TOKENS as f64)
             .map(|s| s.y_ms)
             .collect();
         assert_eq!(small.len(), SERVICE_HISTORY_PER_CLASS + 1);
@@ -3361,7 +3390,7 @@ mod tests {
     /// a P whose snapshots the router never ingests.
     #[test]
     fn the_dispatch_log_is_pruned_when_routes_are_recorded() {
-        let online = E3Online::new(Instant::now());
+        let online = ForecastOnline::new(Instant::now());
         for i in 0..100 {
             online.record_route(RouteRecord {
                 rid: format!("r{i}"),
@@ -3389,7 +3418,7 @@ mod tests {
     #[test]
     fn sequence_gaps_and_repeats_are_handled() {
         let t0 = Instant::now();
-        let online = E3Online::new(t0);
+        let online = ForecastOnline::new(t0);
         let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
         let first = vec![
             row(
@@ -3452,12 +3481,12 @@ mod tests {
     }
 
     /// Routed requests: an idle forecast's completion trains the receipt
-    /// line (rx2) and every routed completion gives an `e3_label` line whose
+    /// line (rx2) and every routed completion gives an `forecast_label` line whose
     /// interval holds the poll round trip.
     #[test]
     fn completions_of_routed_requests_give_receipt_samples_and_labels() {
         let t0 = Instant::now();
-        let online = E3Online::new(t0);
+        let online = ForecastOnline::new(t0);
         let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
         online.record_route(RouteRecord {
             rid: "r1".into(),
@@ -3488,7 +3517,7 @@ mod tests {
         let labels = online.observe("p", &v, at(99.875), at(100.0));
         assert_eq!(labels.len(), 1);
         let l = &labels[0];
-        assert_eq!(l["event"], "e3_label");
+        assert_eq!(l["event"], "forecast_label");
         assert_eq!(
             (l["label_lo_s"].as_f64(), l["label_hi_s"].as_f64()),
             (Some(0.25), Some(0.375))
@@ -3513,7 +3542,7 @@ mod tests {
     /// tokens that came from host decides between the whole prefix and none.
     #[test]
     fn the_session_host_rule_learns_the_share_per_bin() {
-        let online = E3Online::new(Instant::now());
+        let online = ForecastOnline::new(Instant::now());
         {
             let mut guard = online.state.lock();
             let st = &mut guard.0;
@@ -3592,7 +3621,7 @@ mod tests {
             (small[0] - 5.0).abs() < 1e-2 && (small[1] - 0.02).abs() < 1e-5,
             "{small:?}"
         );
-        assert_eq!(fit.launch.source, crate::e3::LaunchSource::Window);
+        assert_eq!(fit.launch.source, crate::forecast::LaunchSource::Window);
         assert_eq!(fit.constants.boot_s, 0.002);
         assert_eq!(fit.constants.phi_s, 0.25);
         assert!((fit.constants.idle_delay_s - 0.058).abs() < 1e-12);
@@ -3602,11 +3631,11 @@ mod tests {
         let p = fit.params(None, 1e6);
         assert_eq!(p.gpu_idle, p.gpu_busy);
         assert!(!p.next_pass_lag, "the reference result lag");
-        // `--trade-e3-next-pass-lag`: the prepared forecast
+        // `--forecast-next-pass-lag`: the prepared forecast
         // parameters carry the switch (the fit of step 600 s serves 610 s).
         let usable = Arc::new(fit.clone());
         for on in [false, true] {
-            let online = E3Online::new(Instant::now()).with_next_pass_lag(on);
+            let online = ForecastOnline::new(Instant::now()).with_next_pass_lag(on);
             online
                 .state
                 .lock()
@@ -3628,11 +3657,14 @@ mod tests {
         assert!(!empty.usable());
         assert_eq!(
             empty.constants.idle_delay_s,
-            crate::e3::DEFAULT_IDLE_DELAY_S
+            crate::forecast::DEFAULT_IDLE_DELAY_S
         );
-        assert_eq!(empty.launch.coef[0], crate::e3::DEFAULT_LAUNCH_INTERVAL_S);
+        assert_eq!(
+            empty.launch.coef[0],
+            crate::forecast::DEFAULT_LAUNCH_INTERVAL_S
+        );
         // One fit per (P, step): the second call of the step returns it.
-        let online = E3Online::new(Instant::now());
+        let online = ForecastOnline::new(Instant::now());
         let (a, new_a) = online.fit_for("p", 125.0);
         let (b, new_b) = online.fit_for("p", 179.0);
         assert!(Arc::ptr_eq(&a, &b));
@@ -3643,13 +3675,13 @@ mod tests {
         assert!(new_c);
     }
 
-    /// `--trade-e3-frozen-fit`: the recorded Kimi constants load
-    /// from the e3_constants object and from a step model that wraps it;
+    /// `--forecast-fit`: the recorded Kimi constants load
+    /// from the forecast_constants object and from a step model that wraps it;
     /// bad files are refused with the reason.
     #[test]
     fn frozen_fit_loads_the_offline_constants() {
-        let path = fixture("kimi-frozen-fit.json");
-        let frozen = FrozenFit::load(&path).unwrap();
+        let path = fixture("kimi-k26-fit.json");
+        let frozen = ForecastFit::load(&path).unwrap();
         assert_eq!(frozen.sha256.len(), 64);
         assert!(frozen.gpu.small.is_none());
         let large = frozen.gpu.large.clone().unwrap();
@@ -3674,16 +3706,16 @@ mod tests {
             std::fs::write(&p, bytes).unwrap();
             p
         };
-        // The step model that wraps the object (kimi.e3_constants).
-        let model = json!({"kimi": {"e3_constants": body}});
-        let wrapped = FrozenFit::load(&write("model.json", &model)).unwrap();
+        // The step model that wraps the object (kimi.forecast_constants).
+        let model = json!({"kimi": {"forecast_constants": body}});
+        let wrapped = ForecastFit::load(&write("model.json", &model)).unwrap();
         assert_eq!(wrapped.gpu, frozen.gpu);
         assert_eq!(wrapped.launch_coef, frozen.launch_coef);
         assert_eq!(wrapped.constants, frozen.constants);
         let refused = |pointer: &str, value: Value, what: &str| {
             let mut v = body.clone();
             *v.pointer_mut(pointer).unwrap() = value;
-            let err = FrozenFit::load(&write("bad.json", &v)).unwrap_err();
+            let err = ForecastFit::load(&write("bad.json", &v)).unwrap_err();
             assert!(err.contains(what), "{err}");
         };
         refused("/gpu_busy/large", Value::Null, "neither a small");
@@ -3700,16 +3732,16 @@ mod tests {
     /// (sources `frozen`); without it the same P has none (`no_fit`).
     #[test]
     fn frozen_fit_gives_a_forecast_without_service_samples() {
-        let path = fixture("kimi-frozen-fit.json");
-        let frozen = Arc::new(FrozenFit::load(&path).unwrap());
-        let online = E3Online::new(Instant::now());
+        let path = fixture("kimi-k26-fit.json");
+        let frozen = Arc::new(ForecastFit::load(&path).unwrap());
+        let online = ForecastOnline::new(Instant::now());
         let online = online.with_frozen_fit(Some(Arc::clone(&frozen)));
         let (fit, new) = online.fit_for("p", 125.0);
         assert!(new && fit.usable());
         assert_eq!(fit.gpu, frozen.gpu);
         assert_eq!(fit.gpu_sources.small, None);
         assert_eq!(fit.gpu_sources.large.as_deref(), Some(FROZEN_SOURCE));
-        assert_eq!(fit.launch.source, crate::e3::LaunchSource::Frozen);
+        assert_eq!(fit.launch.source, crate::forecast::LaunchSource::Frozen);
         assert_eq!(fit.launch.coef, frozen.launch_coef);
         assert_eq!(fit.constants, frozen.constants);
         let record = fit.record();
@@ -3726,7 +3758,7 @@ mod tests {
             gpu_hit: None,
             expected_hit: 0,
         };
-        let online = E3Online::new(Instant::now())
+        let online = ForecastOnline::new(Instant::now())
             .with_next_pass_lag(true)
             .with_frozen_fit(Some(frozen));
         let (prep, new_fit) = online.prepare("p", None, "r", tokens, None, 610.0);
@@ -3734,9 +3766,29 @@ mod tests {
         let params = prep.params.expect("a forecast without service samples");
         assert!(params.next_pass_lag);
         assert_eq!(params.launch_coef, vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
-        let online = E3Online::new(Instant::now());
+        let online = ForecastOnline::new(Instant::now());
         let (prep, _) = online.prepare("p", None, "r", tokens, None, 610.0);
         assert!(prep.params.is_none(), "no service sample: no_fit");
+    }
+
+    /// The built-in error table is the fixture error table, and the state
+    /// push re-reads it without a file.
+    #[test]
+    fn the_builtin_error_table_is_the_fixture() {
+        let path = Path::new(BUILTIN_ERROR_TABLE_PATH);
+        let cfg = ForecastConfig::load(path, DEFAULT_BOUND_MODE, None, 0.0, None).unwrap();
+        let file = ForecastConfig::load(
+            &fixture("bound-params.json"),
+            DEFAULT_BOUND_MODE,
+            None,
+            0.0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.bound_sha256, file.bound_sha256);
+        assert_eq!(cfg.level, file.level);
+        let pushed = cfg.with_push(5600, None, None).unwrap();
+        assert_eq!(pushed.push.unwrap().level, "0.8");
     }
 
     /// The shipped bound file: snap+prod at its level 0.8; bound-tables.json
@@ -3744,48 +3796,48 @@ mod tests {
     #[test]
     fn bound_files_load_with_their_level() {
         let params = fixture("bound-params.json");
-        let cfg = TradeE3Config::load(&params, DEFAULT_BOUND_MODE, None, 0.0, None).unwrap();
+        let cfg = ForecastConfig::load(&params, DEFAULT_BOUND_MODE, None, 0.0, None).unwrap();
         assert_eq!(cfg.level, "0.8");
         assert_eq!(cfg.file_level.as_deref(), Some("0.8"));
         assert_eq!(cfg.file_g_min_s, Some(0.1));
-        assert_eq!(cfg.bound_schema, crate::e3::BOUND_PARAMS_SCHEMA);
+        assert_eq!(cfg.bound_schema, crate::forecast::ERROR_TABLE_SCHEMA);
         assert_eq!(
             cfg.bound_sha256,
-            "45efd36a2a344d7fc1712be3ec6ae4119147f707d5bb511512c079c491e83e60"
+            "b400d808fec64937d90852063973ba2e07fa4d0bf276f17e0374e9c1c91287d0"
         );
         let cfg9 =
-            TradeE3Config::load(&params, DEFAULT_BOUND_MODE, Some("0.9"), 0.0, None).unwrap();
+            ForecastConfig::load(&params, DEFAULT_BOUND_MODE, Some("0.9"), 0.0, None).unwrap();
         assert_eq!(cfg9.level, "0.9");
         let tables = fixture("bound-tables.json");
         assert!(
-            TradeE3Config::load(&tables, DEFAULT_BOUND_MODE, None, 0.0, None)
+            ForecastConfig::load(&tables, DEFAULT_BOUND_MODE, None, 0.0, None)
                 .unwrap_err()
-                .contains("--trade-e3-bound-level")
+                .contains("has no level")
         );
-        let t = TradeE3Config::load(&tables, DEFAULT_BOUND_MODE, Some("0.8"), 0.0, None).unwrap();
+        let t = ForecastConfig::load(&tables, DEFAULT_BOUND_MODE, Some("0.8"), 0.0, None).unwrap();
         assert_eq!(t.bound_schema, "bound-tables");
         assert_eq!(t.table, cfg.table);
-        assert!(TradeE3Config::load(&params, "rfng", None, 0.0, None)
+        assert!(ForecastConfig::load(&params, "rfng", None, 0.0, None)
             .unwrap_err()
             .contains("no deploy mode rfng"));
         assert!(
-            TradeE3Config::load(&params, DEFAULT_BOUND_MODE, Some("0.7"), 0.0, None)
+            ForecastConfig::load(&params, DEFAULT_BOUND_MODE, Some("0.7"), 0.0, None)
                 .unwrap_err()
                 .contains("no level 0.7")
         );
-        assert!(TradeE3Config::load(&params, DEFAULT_BOUND_MODE, None, -1.0, None).is_err());
+        assert!(ForecastConfig::load(&params, DEFAULT_BOUND_MODE, None, -1.0, None).is_err());
         // Only modes with the router's inputs: snap for the poll table;
         // snap, push, pushL or pushslow with prod or prodL for the push one.
-        let snap_l = TradeE3Config::load(&params, "snap+prodL", None, 0.0, None).unwrap();
+        let snap_l = ForecastConfig::load(&params, "snap+prodL", None, 0.0, None).unwrap();
         assert_eq!(
             (snap_l.mode.as_str(), snap_l.level.as_str()),
             ("snap+prodL", "0.8")
         );
-        assert!(TradeE3Config::load(&params, "push+prodL", None, 0.0, None)
+        assert!(ForecastConfig::load(&params, "push+prodL", None, 0.0, None)
             .unwrap_err()
             .contains("does not match the router's poll forecasts"));
         for mode in ["fresh+prodL", "rfng+rq+rcal", "split", "pushslow+prodL"] {
-            let err = TradeE3Config::load(&tables, mode, Some("0.8"), 0.0, None).unwrap_err();
+            let err = ForecastConfig::load(&tables, mode, Some("0.8"), 0.0, None).unwrap_err();
             assert!(
                 err.contains("does not match the router's poll"),
                 "{mode}: {err}"
@@ -3806,7 +3858,7 @@ mod tests {
         }
         // A bound grows with the forecast and the idle bucket has its curve.
         let out = |pred: f64, idle: bool| Output {
-            schema: crate::e3::SCHEMA.into(),
+            schema: crate::forecast::SCHEMA.into(),
             pred_s: Some(pred),
             idle,
             n_inflight: 0,
@@ -3841,15 +3893,15 @@ mod tests {
         let path = dir.path().join("shadow.jsonl");
         let sink = ShadowSink::file(&path).unwrap();
         assert!(ShadowSink::file(&path).is_err(), "never appended");
-        sink.write(json!({"event": "e3_shadow", "rid": "a"}));
-        sink.write(json!({"event": "e3_label", "rid": "a"}));
+        sink.write(json!({"event": "forecast_shadow", "rid": "a"}));
+        sink.write(json!({"event": "forecast_label", "rid": "a"}));
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<Value> = text
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[1]["event"], "e3_label");
+        assert_eq!(lines[1]["event"], "forecast_label");
         assert!(lines[0]["ts_unix_s"].as_f64().unwrap() > 0.0);
     }
 
@@ -3859,7 +3911,7 @@ mod tests {
     /// pulled tokens. Without a service sample there is no forecast model.
     #[test]
     fn candidates_are_prepared_with_the_split_or_the_session_rule() {
-        let online = E3Online::new(Instant::now());
+        let online = ForecastOnline::new(Instant::now());
         let tokens = CandidateTokens {
             input: 50_000,
             local_hit: 20_000,

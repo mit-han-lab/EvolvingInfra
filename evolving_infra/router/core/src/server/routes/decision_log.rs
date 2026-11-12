@@ -41,15 +41,15 @@ pub(crate) struct RoutingDecision<'a> {
     /// Empty for a plain (single-worker) dispatch; for a symmetric_pd Local
     /// placement it equals `prefill_worker` (the same engine decodes).
     pub decode_worker: &'a str,
-    /// Admission-queue wait (co_schedule / symmetric_pd hold queue); 0 when the
+    /// Admission-queue wait (cost function / symmetric_pd hold queue); 0 when the
     /// request was placed inline. Excludes ingress tokenization and the
     /// indexer lookup, which `ingress_to_dispatch_ms` includes.
     pub queue_wait_ms: u64,
-    /// `policy`, a co_schedule branch, or the symmetric_pd `local` / `split`.
+    /// `policy`, a cost function branch, or the symmetric_pd `local` / `split`.
     pub branch: &'a str,
     pub ingress_to_dispatch_ms: u64,
     pub owner_hint: Option<&'a Value>,
-    pub flex: Option<&'a Decision>,
+    pub spd: Option<&'a Decision>,
     /// Token-charged decode pick (or charged replay pin); `None` otherwise.
     pub decode_tokens: Option<&'a DecodeTokenLog>,
     /// Late D choose dispatch (the decode is chosen at the bind); `None`
@@ -72,7 +72,7 @@ pub(crate) struct LateDispatchLog<'a> {
 pub(crate) fn log_routing_decision(r: &RoutingDecision<'_>) {
     let null = Value::Null;
     let owner_hint = r.owner_hint.unwrap_or(&null);
-    if let (Some(l), Some(d)) = (r.late_d, r.flex) {
+    if let (Some(l), Some(d)) = (r.late_d, r.spd) {
         // Late D choose on symmetric_pd: every symmetric_pd placement field (the
         // placement's D is the arrival pick), no decode worker yet, then the
         // late-D fields; `transfer_id` is the late-D key.
@@ -130,7 +130,7 @@ pub(crate) fn log_routing_decision(r: &RoutingDecision<'_>) {
         );
         return;
     }
-    match (r.flex, r.decode_tokens) {
+    match (r.spd, r.decode_tokens) {
         (None, None) => tracing::info!(
             target: "routing_decision",
             rid = r.rid,
@@ -198,13 +198,13 @@ pub(crate) fn log_routing_decision(r: &RoutingDecision<'_>) {
 /// `retire()` marks the prefill work done (idempotent on both).
 #[derive(Clone)]
 pub(crate) enum AdmissionLedger {
-    Flex(crate::scheduler::LedgerHandle),
+    Symmetric(crate::scheduler::LedgerHandle),
 }
 
 impl AdmissionLedger {
     pub(crate) fn retire(&self) {
         match self {
-            AdmissionLedger::Flex(l) => l.retire(),
+            AdmissionLedger::Symmetric(l) => l.retire(),
         }
     }
 }
@@ -214,7 +214,7 @@ impl AdmissionLedger {
 /// transport error) and releases the admission ledger (a symmetric_pd handle
 /// is marked unknown on a transport error, retired otherwise).
 pub(crate) fn settle_prefill_leg(
-    cost: Option<&mut crate::cost_balance::Reservation>,
+    cost: Option<&mut crate::prefill_work::Reservation>,
     ledger: Option<AdmissionLedger>,
     result: &Result<Response<Body>, ApiError>,
 ) {
@@ -230,12 +230,12 @@ pub(crate) fn settle_prefill_leg(
             Err(error) => cost.mark_unknown(&format!("prefill_transport_error: {error}")),
         };
         if let Err(error) = accounted {
-            tracing::error!(target: "cost_balance", %error, "cost lifecycle observation failed");
+            tracing::error!(target: "prefill_work", %error, "placement lifecycle observation failed");
         }
     }
     if let Some(ledger) = ledger {
         match (result, ledger) {
-            (Err(_), AdmissionLedger::Flex(handle)) => handle.mark_unknown(),
+            (Err(_), AdmissionLedger::Symmetric(handle)) => handle.mark_unknown(),
             (_, ledger) => ledger.retire(),
         }
     }

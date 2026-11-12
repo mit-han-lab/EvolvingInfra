@@ -87,9 +87,10 @@ pub fn build_router(ctx: Arc<AppContext>) -> Router {
     // Only the prepared lifecycle proves that old engine work has terminated
     // before a role change releases its session references. Legacy placements
     // and proxy requests do not participate in that lifecycle.
-    let prepared_only = ctx.symmetric_pd.as_ref().is_some_and(|flex| {
-        flex.config().external_role_control && flex.config().kv_session_retention
-    });
+    let prepared_only = ctx
+        .symmetric_pd
+        .as_ref()
+        .is_some_and(|spd| spd.config().external_role_control && spd.config().kv_session_retention);
     let tracked = |route: MethodRouter<Arc<AppContext>>| {
         if prepared_only {
             route.layer(middleware::from_fn(|_: Request, _: Next| async {

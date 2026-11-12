@@ -1,5 +1,5 @@
 {
- "source": "kimi.e3_constants of kimi26-tp4-gb300-step-model.json (sha256 3ebd1b1b9d1e5c627febb43f6f1012fb26b8a652c9f200cdd06b0a589169d64f): Kimi-K2.6 TP4 GB300 step model fitted on one GB300 run (6P3D c128 CUA static baseline, P workers 0-5, fit window 300-1800 s); offline E3 with next-pass APE mean 13.5 %, p50 6.7 %, p95 36.8 % on its score window",
+ "source": "Forecast constants of a Kimi-K2.6 TP4 step model fitted on one GB300 run (6P3D, concurrency 128, prefill workers 0-5, fit window 300-1800 s); forecast with the next-pass lag: APE mean 13.5 %, p50 6.7 %, p95 36.8 % on its score window",
  "gpu_busy": {
   "small": null,
   "large": [
@@ -47,7 +47,7 @@
  "notes": [
   "'large' only: all busy passes are full ~8k chunks; 'small' (<= 2048 new tokens) is not identified",
   "new_tokens coefficient 0: full chunks make it collinear with the intercept",
-  "LAUNCH_Y_MAX_S = 5 s (E3 constant) drops launch intervals >= 5 s: share 0.102 of the fit-window Kimi intervals; raise it (e.g. 15 s) before any online launch refit on Kimi",
-  "G2 online GPU fit needs idle single-request passes; a saturated Kimi P has few (see idle counts): freeze these warmup constants instead of relying on the online G2 refit"
+  "LAUNCH_Y_MAX_S = 5 s (a forecast constant) drops launch intervals >= 5 s: share 0.102 of the fit-window Kimi intervals; raise it (e.g. 15 s) before any online launch refit on Kimi",
+  "The online GPU fit needs idle single-request passes; a saturated Kimi P has few (see idle counts): freeze these warmup constants instead of relying on the online refit"
  ]
 }

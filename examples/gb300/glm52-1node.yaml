@@ -8,5 +8,6 @@ engine_args:
   - --max-prefill-tokens=4096
   - --cuda-graph-max-bs-prefill=4096
   - --cuda-graph-max-bs-decode=64
+# The router keeps the paper-reproduction pins of glm52.yaml (--prefill-wait=tokens, --global-queue=false).
 # The benchmarks of glm52.yaml need nine nodes; slurm/submit.py refuses this config.
 benchmarks: {}

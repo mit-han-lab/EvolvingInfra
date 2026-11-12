@@ -6,8 +6,8 @@
 //! A P engine lists, in the `prefill_routing` section of `/v1/loads`, the
 //! requests it holds (partial, waiting, bootstrap, in flight), its pulls and
 //! its in-flight pass. [`SnapshotView`] is that section with the checks the
-//! router needs before it uses it (epoch, DP size, readiness). The E3
-//! forecast ([`crate::trade_e3`]) starts from it.
+//! router needs before it uses it (epoch, DP size, readiness). The forecast
+//! forecast ([`crate::prefill_forecast`]) starts from it.
 
 use std::collections::BTreeSet;
 
@@ -147,9 +147,9 @@ pub struct InflightPass {
     pub features: Vec<Value>,
 }
 
-/// The part of the EFT view that does not depend on the decision time:
+/// The part of the forecast view that does not depend on the decision time:
 /// one parsed `loads[0].prefill_routing` snapshot. The router parses
-/// it once per poll, off the cost-book lock; [`View::at`] adds the age.
+/// it once per poll, off the work-book lock; [`View::at`] adds the age.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SnapshotView {
     pub epoch: Value,
@@ -321,7 +321,7 @@ fn policy_value(
     }
 }
 
-/// The usability rules of the EFT view except the age rule (Python
+/// The usability rules of the forecast view except the age rule (Python
 /// `_unusable_reason`, in its order).
 fn static_unusable_reason(
     raw: &Value,

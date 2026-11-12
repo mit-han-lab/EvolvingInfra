@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! E3: router-side forecast of the completion time of a prefill (P) worker.
+//! forecast: router-side forecast of the completion time of a prefill (P) worker.
 //!
-//! This module is a Rust port of the Python reference `router_e3.py` (code
+//! This module is a Rust port of the Python reference `router_forecast.py` (code
 //! version r5). The reference is the source of truth. The port is
 //! self-contained: it reads no router state and changes no router behaviour.
-//! The routing policy calls it from [`crate::trade_e3`].
+//! The routing policy calls it from [`crate::prefill_forecast`].
 //!
 //! What it computes: `pred_s` = seconds from the routing decision `d`
 //! to the selected P worker's `prefill_finished_time` of the routed request.
@@ -28,7 +28,7 @@
 //!
 //! All real values are `f64`, token counts are `i64`, and every float
 //! expression is evaluated in the order of the reference. The golden tests
-//! (`tests/fixtures/e3/`, see `PROVENANCE.md` there) compare the port with
+//! (`tests/fixtures/forecast/`, see `PROVENANCE.md` there) compare the port with
 //! the reference outputs.
 //!
 //! Sums: the reference runs
@@ -50,20 +50,20 @@
 //! are not constants: they come from [`fit`] (GPU model, launch model, receipt
 //! line, arrival rates, warmup constants) and from the bound tables
 //! (`bound-params.json`). The other constants below are fixed design choices of
-//! the E3 reference (`estate_replay_kv.py` / `router_e3.py`). They were not
+//! the forecast reference (`estate_replay_kv.py` / `router_forecast.py`). They were not
 //! tuned on the forecast error in this port; each one says what it controls.
 
-pub mod bound;
+pub mod error_table;
 pub mod fit;
-pub mod forecast;
+pub mod model;
 pub mod numeric;
 
 #[cfg(test)]
 mod golden_tests;
 
-pub use bound::{
-    bound_curve, bucket_of, error_bound, reroute_gain, BoundCurve, BoundModeParams, BoundParams,
-    BoundTable, BucketScheme, BucketView,
+pub use error_table::{
+    bound_curve, bucket_of, error_bound, reroute_gain, BoundCurve, BoundModeParams, BoundTable,
+    BucketScheme, BucketView, ErrorTable,
 };
 pub use fit::{
     arrival_rates, calibrate, fit_gpu_classes, fit_launch_intervals, fit_launch_rows,
@@ -72,18 +72,18 @@ pub use fit::{
     CalReq, Calibration, Constants, DesignRow, GpuChain, GpuClasses, GpuSample, GpuSources,
     LagSample, LaunchFit, LaunchSample, LaunchSource, RxLine,
 };
-pub use forecast::{
+pub use model::{
     features, forecast, gpu_s, receipt_delays, row_ready, simulate, Arrivals, Features,
     ForecastPath, GpuModel, InflightPass, Input, LaunchAnchor, Output, Params, Partial, QueueRow,
     RowSource, RxParams, SimRow, SimState, Target, Trace,
 };
 
-/// Output schema of [`forecast()`] (`router-e3.v2`).
-pub const SCHEMA: &str = "router-e3.v2";
+/// Output schema of [`forecast()`] (`forecast.v2`).
+pub const SCHEMA: &str = "forecast.v2";
 /// Schema of an error bound table (table v2).
-pub const BOUND_TABLE_SCHEMA: &str = "router-e3-bound.v2";
+pub const BOUND_TABLE_SCHEMA: &str = "forecast-error-bound.v2";
 /// Schema of `bound-params.json` (the shipped bound tables and levels).
-pub const BOUND_PARAMS_SCHEMA: &str = "router-e3-bound-params.v2";
+pub const ERROR_TABLE_SCHEMA: &str = "forecast-error-table.v2";
 
 /// Engine policy: tokens per prefill pass (`chunked_prefill_size`); default
 /// of `Params::chunk_tokens`. The router sets the P's own value from its
@@ -94,10 +94,10 @@ pub const CHUNK_TOKENS: i64 = 8192;
 /// P's own value from its snapshot.
 pub const PAGE_TOKENS: i64 = 64;
 /// GPU model size classes: a pass with at most this many new tokens uses the
-/// `small` coefficients, a larger pass the `large` ones (E3 reference).
+/// `small` coefficients, a larger pass the `large` ones (forecast reference).
 pub const GRAPH_TOKENS: i64 = 2048;
 /// Receipt delay (s) of a request while the receipt line has fewer than
-/// [`RX_MIN`] samples (E3 reference value; replaced by the fitted line).
+/// [`RX_MIN`] samples (forecast reference value; replaced by the fitted line).
 pub const DISPATCH_S: f64 = 0.044;
 /// Park-gate choice: the forecast without the held rows is used when its
 /// share `F_after / (F_after + F_full)` is at most this value
@@ -157,13 +157,13 @@ pub const DEFAULT_LAUNCH_LINE: [f64; 2] = [0.06, 0.75];
 /// parameters or inputs). A forecast without a result is not an error: it is
 /// `Output::pred_s == None`.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
-pub enum E3Error {
-    #[error("router_e3: invalid parameters: {0}")]
+pub enum ForecastError {
+    #[error("forecast: invalid parameters: {0}")]
     Params(&'static str),
-    #[error("router_e3: invalid input: {0}")]
+    #[error("forecast: invalid input: {0}")]
     Input(&'static str),
-    #[error("router_e3: singular system in {0}")]
+    #[error("forecast: singular system in {0}")]
     Singular(&'static str),
-    #[error("router_e3: bound table: {0}")]
+    #[error("forecast: bound table: {0}")]
     Bound(String),
 }

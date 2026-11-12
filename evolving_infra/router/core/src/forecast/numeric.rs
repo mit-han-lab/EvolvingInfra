@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Numeric routines of the E3 reference with the semantics of CPython 3.12:
+//! Numeric routines of the forecast reference with the semantics of CPython 3.12:
 //! compensated `sum()`, `max` / `min` ties, linear
 //! quantiles, Gauss-Jordan elimination, ridge least squares, the
 //! non-negative fit and the residual quantiles.
@@ -390,7 +390,7 @@ mod tests {
         let y: Vec<f64> = (1..=10).map(|i| 2.0 + 3.0 * f64::from(i)).collect();
         let c = lstsq(&x, &y, RIDGE).unwrap();
         // The ridge term (1e-6 on unit-norm columns) biases the fit slightly;
-        // the values are the reference's (router_e3.lstsq), bit for bit.
+        // the values are the reference's (router_forecast.lstsq), bit for bit.
         assert!(
             (c[0] - 2.0).abs() < 1e-4 && (c[1] - 3.0).abs() < 1e-4,
             "{c:?}"
@@ -424,7 +424,7 @@ mod tests {
         assert_eq!(c[2], 0.0);
         assert_eq!(c[3], 0.0);
         assert!(c[1] >= 0.0);
-        // Reference values (router_e3.nonneg_fit), bit for bit.
+        // Reference values (router_forecast.nonneg_fit), bit for bit.
         assert_eq!(c, [-4.720615755468356, 1.9028245134205608, 0.0, 0.0]);
         // A clean non-negative model is recovered with every column kept.
         let ys2: Vec<f64> = rows.iter().map(|r| 1.0 + 2.0 * r[1] + 0.5 * r[2]).collect();

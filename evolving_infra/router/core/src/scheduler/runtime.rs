@@ -5,16 +5,16 @@
 //!
 //! Placement belongs to `scheduler::placement`; backend state and SGLang wire
 //! operations live in `backend`. Indexer queries run before the short atomic
-//! snapshot/select/reserve section. CoSchedule uses cached-owner protection
-//! and post-dispatch uncached-work spread, with no router HOLD queue. Existing
-//! CacheFirst/Score modes retain their configured HOLD behavior.
+//! snapshot/select/reserve section. The cost function and the gateway
+//! cache-aware P selection never hold; the CacheFirst and Score modes hold
+//! up to their configured deadline.
 //!
-//! CoSchedule merges per-RID engine progress into the initial request estimates.
-//! Missing RIDs retain their latest estimates; aggregate waiting tokens never
-//! replace running work. Legacy modes retain a labelled aggregate estimate.
-//! Managed reservations live until explicit completion. The legacy `/symmetric_pd/place` API alone uses an expiring
-//! lease because it has no completion callback. New prepared execution owns
-//! its reservation until the execution manager receives a terminal callback.
+//! The load view is an aggregate estimate: engine-reported load plus the
+//! router's reservations that no poll covers yet. Managed reservations live
+//! until explicit completion. The `/symmetric_pd/place` API alone uses an
+//! expiring lease because it has no completion callback. Prepared execution
+//! owns its reservation until the execution manager receives a terminal
+//! callback.
 
 use super::{
     placement,
@@ -61,9 +61,9 @@ use placement::{
 };
 
 const HOLD_TICK: Duration = Duration::from_millis(100);
-/// `--symmetric-pd-gwq-auto`: how often [`SymmetricPdRuntime::admit`] walks a request
+/// `--global-queue`: how often [`SymmetricPdRuntime::admit`] walks a request
 /// again whose released P left the P-role pool before the placement.
-const GWQ_REWALKS: u32 = 3;
+const QUEUE_REWALKS: u32 = 3;
 #[cfg(test)]
 use crate::backend::sglang::progress::parse_loads;
 pub use crate::backend::sglang::{
@@ -98,14 +98,14 @@ pub struct PlaceInput {
     pub ingress_ms: f64,
     /// `--symmetric-pd-p-select cost-function` with the copy price or R `auto`:
     /// the request's session identity
-    /// ([`crate::agent_identity::trade_session_key`]), counted in N_active.
+    /// ([`crate::agent_identity::placement_session_key`]), counted in N_active.
     /// `None` otherwise.
-    pub trade_session: Option<String>,
-    /// `--trade-wait e3` on the cost function: the session key
-    /// of the E3 host rule ([`crate::trade_e3::session_key`]: the
+    pub placement_session: Option<String>,
+    /// `--prefill-wait forecast` on the cost function: the session key
+    /// of the forecast host rule ([`crate::prefill_forecast::session_key`]: the
     /// `x-kv-session-context` agent, else the `x-smg-routing-key` header).
     /// `None` otherwise.
-    pub e3_session: Option<String>,
+    pub forecast_session: Option<String>,
 }
 
 /// Result of [`SymmetricPdRuntime::admit`].
@@ -126,12 +126,12 @@ pub struct Decision {
     pub prompt_len: u64,
     /// Peer-kv pull hint for the P-leg (`SymmetricPdConfig::pull_hint`).
     pub pull_hint: Option<Value>,
-    /// `--symmetric-pd-p-select cost-function`: the request's unique cost-book
+    /// `--symmetric-pd-p-select cost-function`: the request's unique work-book
     /// reservation. The route moves it into the detached P-leg task, which
     /// marks it dispatched before the send, finished on the P answer and
     /// unknown on a transport error; a drop before dispatch rolls it back.
     /// `None` for every other P selection.
-    pub cost_reservation: Option<crate::cost_balance::Reservation>,
+    pub cost_reservation: Option<crate::prefill_work::Reservation>,
 }
 
 impl Decision {
@@ -183,7 +183,7 @@ pub enum SymmetricPdError {
     Placement(#[from] PlacementError),
     #[error("symmetric_pd: cannot resolve KV side-channel endpoints for {worker}: {reason}")]
     Endpoints { worker: String, reason: String },
-    /// `--symmetric-pd-p-select cost-function`: the cost book refused the request
+    /// `--symmetric-pd-p-select cost-function`: the work book refused the request
     /// (no unique rid, a failed trace) or the request cannot use it.
     #[error("symmetric_pd cost_function: {0}")]
     CostFunction(String),
@@ -480,7 +480,7 @@ pub struct SymmetricPdRuntime {
     /// `--symmetric-pd-p-select gateway-cache-aware`: the gateway cache-aware
     /// rule and its tree, which pick the P-leg before placement.
     gateway_ca: Option<crate::policies::gateway_cache_aware::GatewayCacheAwarePolicy>,
-    /// `--symmetric-pd-p-select cost-function`: the TRADE cost function, its cost
+    /// `--symmetric-pd-p-select cost-function`: the placement cost function, its cost
     /// ledger and its P progress poll, which pick and reserve the P-leg
     /// before placement.
     cost_function: Option<Arc<super::cost_function::CostFunction>>,
@@ -592,7 +592,6 @@ impl SymmetricPdRuntime {
                 model.clone(),
                 cfg.import_cache_policy,
                 cfg.load_poll_ms,
-                cfg.placement.p_select == PSelect::CoSchedule,
                 cfg.kv_session_retention,
                 cfg.kv_session_key_file.as_deref(),
                 // Unknown P reservations (a P-leg that ended in a transport
@@ -640,7 +639,7 @@ impl SymmetricPdRuntime {
             // the breaker is on), the same set as the donors of an arrival.
             if cost_function.pull_from_any_holder() {
                 let donors_weak = Arc::downgrade(&this);
-                cost_function.set_gwq_donors(move || {
+                cost_function.set_queue_donors(move || {
                     donors_weak
                         .upgrade()
                         .map(|rt| rt.candidates().1.into_values().collect())
@@ -672,7 +671,7 @@ impl SymmetricPdRuntime {
         self.cost_function.is_some()
     }
 
-    /// The routes pass the session identity ([`PlaceInput::trade_session`]):
+    /// The routes pass the session identity ([`PlaceInput::placement_session`]):
     /// the cost function's copy price or R `auto`, or
     /// `--symmetric-pd-trace-session-moves`.
     pub fn cost_function_wants_session(&self) -> bool {
@@ -698,12 +697,12 @@ impl SymmetricPdRuntime {
             .is_some_and(|cf| cf.traces_session_moves())
     }
 
-    /// The routes pass the E3 session key ([`PlaceInput::e3_session`]):
-    /// the cost function decides with `--trade-wait e3`.
-    pub fn cost_function_wants_e3_session(&self) -> bool {
+    /// The routes pass the forecast session key ([`PlaceInput::forecast_session`]):
+    /// the cost function decides with `--prefill-wait forecast`.
+    pub fn cost_function_wants_forecast_session(&self) -> bool {
         self.cost_function
             .as_ref()
-            .is_some_and(|cf| cf.wants_e3_session())
+            .is_some_and(|cf| cf.wants_forecast_session())
     }
 
     /// The healthy P-role pool of the cost function (the pool of
@@ -716,7 +715,7 @@ impl SymmetricPdRuntime {
     }
 
     /// The client ended `session` (`POST /kv_sessions/end`; the identity of
-    /// [`crate::scheduler::trade::trade_session_key`]): it leaves
+    /// [`crate::scheduler::placement_cost::placement_session_key`]): it leaves
     /// N_active of the cost function's copy price `auto` at once. Returns
     /// whether it was counted.
     pub fn cost_function_session_end(&self, session: &str) -> bool {
@@ -908,18 +907,15 @@ impl SymmetricPdRuntime {
     /// tokens; `hits`: directory hits plus validated peer-pull estimates.
     ///
     /// # Outputs
-    /// Local usable hit, or the larger validated expected pull hit in CoSchedule mode (and with
-    /// the cost function: its TRADE expected hit), bounded by prompt length on normal nonempty
+    /// Local usable hit, or with the cost function the larger validated expected pull hit,
+    /// bounded by prompt length on normal nonempty
     /// requests. Policy score fields are never trusted for accounting.
     fn accounted_hit(&self, worker: &str, prompt_len: u64, hits: &IndexerHits) -> u64 {
         let hit = hits.get(worker);
         let local = (hit.gpu as f64)
             .max(hit.host as f64 * self.cfg.placement.host_hit_factor)
             .min(prompt_len.max(1) as f64) as u64;
-        if matches!(
-            self.cfg.placement.p_select,
-            PSelect::CoSchedule | PSelect::CostFunction
-        ) {
+        if self.cfg.placement.p_select == PSelect::CostFunction {
             hits.expected_after_pull
                 .get(worker)
                 .copied()
@@ -1093,8 +1089,9 @@ impl SymmetricPdRuntime {
     /// # Outputs
     /// `Ok(Decision)` with selected workers, marks, pull hint, timing and an owned ledger
     /// handle; errors for no workers, invalid/impossible placement, or missing KV endpoints.
-    /// The caller must retire/hand off the reservation. CoSchedule bypasses HOLD; legacy modes
-    /// may wait up to the configured deadline before forced placement.
+    /// The caller must retire/hand off the reservation. The cost function and the gateway
+    /// cache-aware selection bypass HOLD; the other modes may wait up to the configured
+    /// deadline before forced placement.
     pub async fn admit(&self, input: PlaceInput) -> Result<Decision, SymmetricPdError> {
         let arrived = Instant::now();
         let (mut hits, indexer_ms, reply) = self.hits_with_reply(&input).await;
@@ -1126,9 +1123,9 @@ impl SymmetricPdRuntime {
                 Some(ca) => gateway_ca_narrow(ca, &self.cfg, &input, weights, &index)?,
                 None => weights,
             };
-            // `--symmetric-pd-p-select cost-function`: one cost-book transaction
+            // `--symmetric-pd-p-select cost-function`: one work-book transaction
             // picks P and its pull among the healthy P-role workers and
-            // reserves the request's work (the cost book has its own lock and
+            // reserves the request's work (the work book has its own lock and
             // no await inside, so concurrent requests see each other's
             // reservations); the placement then sees that P only.
             let (weights, cost, index) = match &self.cost_function {
@@ -1145,7 +1142,7 @@ impl SymmetricPdRuntime {
                             PlacementError::NoPrefillCandidate,
                         ));
                     }
-                    // `--symmetric-pd-gwq-auto`: a free request may wait in the
+                    // `--global-queue`: a free request may wait in the
                     // global waiting queue; after the wait the placement
                     // reads the current workers. A released P that left the
                     // P-role pool in between (a role switch, a drain or a
@@ -1157,17 +1154,17 @@ impl SymmetricPdRuntime {
                     // as candidates (breaker allowing when the breaker is on;
                     // draining ones too); never a holder removed from the
                     // registry but still in the indexer. With
-                    // --disable-circuit-breaker (the CUA deployments) a crashed or hung
+                    // --disable-circuit-breaker a crashed or hung
                     // worker stays a possible source until it is removed. A
                     // re-walk after a queue wait reads them again with the pool.
-                    let (selected, reservation, weights, index) = if cf.gwq_enabled() {
+                    let (selected, reservation, weights, index) = if cf.queue_enabled() {
                         let (mut pool, mut weights, mut index) = (pool, weights, index);
                         let mut attempt = 0u32;
                         loop {
                             let donors =
                                 any_holder_donors(cf.pull_from_any_holder(), index.values());
                             let (selected, reservation, _, queued) = cf
-                                .reserve_gwq(
+                                .reserve_queue(
                                     ix,
                                     &input,
                                     prompt_len,
@@ -1186,14 +1183,18 @@ impl SymmetricPdRuntime {
                                 break (selected, reservation, now_weights, now_index);
                             }
                             attempt += 1;
-                            cf.gwq_note_rewalk(input.rid.as_deref(), &selected.worker_url, attempt);
+                            cf.queue_note_rewalk(
+                                input.rid.as_deref(),
+                                &selected.worker_url,
+                                attempt,
+                            );
                             drop(reservation);
                             if now_pool.is_empty() {
                                 return Err(SymmetricPdError::Placement(
                                     PlacementError::NoPrefillCandidate,
                                 ));
                             }
-                            if attempt > GWQ_REWALKS {
+                            if attempt > QUEUE_REWALKS {
                                 return Err(SymmetricPdError::CostFunction(format!(
                                     "the global waiting queue released the request {attempt} times \
                                      to a P that left the P-role pool"
@@ -1214,7 +1215,7 @@ impl SymmetricPdRuntime {
                         )?;
                         (selected, reservation, weights, index)
                     };
-                    // The Backend ledger charges prompt - TRADE expected hit.
+                    // The Backend ledger charges prompt - cost-function expected hit.
                     hits.expected_after_pull
                         .insert(selected.worker_url.clone(), selected.expected_hit);
                     let weights = narrow_prefill(weights, &selected.worker_url);
@@ -1237,10 +1238,9 @@ impl SymmetricPdRuntime {
                 let mut state = self.backend.state.lock();
                 let loads = state.loads(weights.workers.keys());
                 let now = Instant::now();
-                // CoSchedule, the gateway cache-aware P selection and the
-                // cost function never hold (no hold queue).
-                let has_capacity = self.cfg.placement.p_select == PSelect::CoSchedule
-                    || self.gateway_ca.is_some()
+                // The gateway cache-aware P selection and the cost function
+                // never hold (no hold queue).
+                let has_capacity = self.gateway_ca.is_some()
                     || self.cost_function.is_some()
                     || self.has_prefill_capacity(&weights, &loads);
                 if !has_capacity && now < deadline {
@@ -1612,8 +1612,8 @@ impl SymmetricPdRuntime {
             rid: req.rid,
             routing_key: None,
             ingress_ms: 0.0,
-            trade_session: None,
-            e3_session: None,
+            placement_session: None,
+            forecast_session: None,
         };
         let (mut hits, indexer_ms, reply) = self.hits_with_reply(&input).await;
         let (weights, index) = self.candidates();
@@ -3065,7 +3065,7 @@ mod tests {
     ///
     /// # Outputs
     /// No return value; the test asserts this contract and panics on a mismatch.
-    fn concurrent_co_schedule_arrivals_reserve_before_next_selection() {
+    fn concurrent_arrivals_reserve_before_next_selection() {
         let reg = registry_with(vec![
             (
                 "http://p0",
@@ -3099,10 +3099,10 @@ mod tests {
             ),
         ]);
         let mut cfg = SymmetricPdConfig::default();
-        cfg.placement.p_select = PSelect::CoSchedule;
+        cfg.placement.p_select = PSelect::CacheFirst;
         cfg.placement.d_select = DSelect::RoundRobin;
         cfg.placement.force_split = true;
-        cfg.max_uncached_tokens = 1; // new policy must never use the old HOLD gate
+        cfg.max_uncached_tokens = u64::MAX; // never holds
         let rt = SymmetricPdRuntime::spawn(cfg, None, reg, model());
         let barrier = Arc::new(std::sync::Barrier::new(8));
         let threads: Vec<_> = (0..8)
@@ -3222,18 +3222,19 @@ mod tests {
             ),
         ])
     }
-    /// Configure extension tests for co-schedule P and round-robin D.
+    /// Configure extension tests for round-robin D without the hold queue.
     ///
     /// # Inputs
     /// None.
     ///
     /// # Outputs
-    /// A default-derived force-split `SymmetricPdConfig` with CoSchedule and D RoundRobin selected.
+    /// A default-derived force-split `SymmetricPdConfig` with D RoundRobin selected and no
+    /// hold.
     fn extension_config() -> SymmetricPdConfig {
         let mut cfg = SymmetricPdConfig::default();
-        cfg.placement.p_select = PSelect::CoSchedule;
         cfg.placement.d_select = DSelect::RoundRobin;
         cfg.placement.force_split = true;
+        cfg.max_uncached_tokens = u64::MAX;
         cfg
     }
     #[test]
@@ -3383,90 +3384,6 @@ mod tests {
             rt.loads(["http://p1"]).get("http://p1").active_prefill_reqs,
             0
         );
-    }
-
-    #[derive(Debug)]
-    struct PreferIdleP1Cost;
-    impl super::super::policy::CostModel for PreferIdleP1Cost {
-        /// Add a p0-specific overhead in the runtime cost-extension fixture.
-        ///
-        /// # Inputs
-        /// `i`: candidate URL, outstanding backlog, prompt length and expected hit; `self` is
-        /// stateless.
-        ///
-        /// # Outputs
-        /// Before/after costs with a 1,000-unit overhead on p0; raw Backend reservations must
-        /// still use uncached tokens only.
-        fn prefill_cost(
-            &self,
-            i: super::super::policy::PrefillCostInput<'_>,
-        ) -> super::super::policy::PrefillCost {
-            // Fixed 1000-unit overhead on p0; every request still reserves raw
-            // uncached tokens. A second arrival must see the first reservation.
-            let before = u128::from(i.load.backlog_uncached_tokens)
-                + if i.worker == "http://p0" { 1000 } else { 0 };
-            super::super::policy::PrefillCost {
-                before,
-                after: before + u128::from(i.request.prompt_len.saturating_sub(i.expected_hit)),
-            }
-        }
-        /// Keep the runtime test model's detour margin in token-scale units.
-        ///
-        /// # Inputs
-        /// `tokens`: configured token margin; `self` is stateless.
-        ///
-        /// # Outputs
-        /// The same value widened to `u128`.
-        fn detour_margin(&self, tokens: u64) -> u128 {
-            u128::from(tokens)
-        }
-    }
-    #[test]
-    /// Check custom costs affect P choice while each arrival observes prior reservations and
-    /// reserves only raw tokens.
-    ///
-    /// # Inputs
-    /// No arguments; admits two 1,024-token requests through a runtime using the p0-overhead
-    /// cost model.
-    ///
-    /// # Outputs
-    /// No return value; the test asserts this contract and panics on a mismatch.
-    fn injected_cost_uses_actual_runtime_and_keeps_raw_token_reservations() {
-        let rt = SymmetricPdRuntime::spawn_with_policy(
-            extension_config(),
-            None,
-            extension_registry(),
-            model(),
-            Arc::new(DefaultPlacementPolicy {
-                cost: PreferIdleP1Cost,
-            }),
-        );
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let first = runtime
-            .block_on(rt.admit(PlaceInput {
-                prompt_len: 1024,
-                ..Default::default()
-            }))
-            .unwrap();
-        assert_eq!(first.p_worker.url, "http://p1");
-        let second = runtime
-            .block_on(rt.admit(PlaceInput {
-                prompt_len: 1024,
-                ..Default::default()
-            }))
-            .unwrap();
-        assert_eq!(
-            second.p_worker.url, "http://p0",
-            "second choice sees first reservation through the shared ledger"
-        );
-        for p in ["http://p0", "http://p1"] {
-            assert_eq!(rt.loads([p]).get(p).backlog_uncached_tokens, 1024);
-        }
-        first.ledger.retire();
-        second.ledger.retire();
     }
 
     /// A 3P + 2D symmetric fleet (pinned roles, bootstrap ports set).
@@ -3665,11 +3582,11 @@ mod tests {
 
     /// `--symmetric-pd-p-select cost-function` on the P-role workers P1 and P2
     /// and the D-role worker D. The indexer maps ids 1 and 2 to P1 and P2;
-    /// the cost trace is `dir/cost.jsonl`. `tune` edits the config last.
+    /// the placement trace is `dir/cost.jsonl`. `tune` edits the config last.
     fn cost_function_runtime(
         dir: &Path,
         indexer_url: &str,
-        trade: crate::scheduler::trade::TradeParams,
+        cost_params: crate::scheduler::placement_cost::PlacementCostParams,
         tune: impl FnOnce(&mut SymmetricPdConfig),
     ) -> Arc<SymmetricPdRuntime> {
         let reg = registry_with(vec![
@@ -3698,22 +3615,20 @@ mod tests {
         cfg.placement.p_select = PSelect::CostFunction;
         cfg.pull_hint = true;
         cfg.cost_function = Some(crate::config::SymmetricPdCostFunctionConfig {
-            trade,
-            cost_trace: Some(dir.join("cost.jsonl")),
+            cost_params,
+            placement_trace: Some(dir.join("cost.jsonl")),
             load_poll_ms: 100,
             unknown_expire_secs: 60,
-            loads_host_room: false,
-            gwq_auto: None,
+            global_queue: None,
             trace_session_moves: false,
-            trade_e3: None,
+            forecast: None,
             pull_from_any_holder: false,
-            trace_async: false,
         });
         tune(&mut cfg);
         SymmetricPdRuntime::spawn(cfg, Some(&kv), reg, model())
     }
 
-    /// The rows of the cost trace in `dir` (empty before the first row).
+    /// The rows of the placement trace in `dir` (empty before the first row).
     fn cost_rows(dir: &Path) -> Vec<Value> {
         std::fs::read_to_string(dir.join("cost.jsonl"))
             .unwrap_or_default()
@@ -3757,12 +3672,17 @@ mod tests {
     /// # Outputs
     /// No return value; each admit returns at once, unforced.
     async fn cost_function_never_holds() {
-        use crate::scheduler::trade::TradeParams;
+        use crate::scheduler::placement_cost::PlacementCostParams;
         let dir = tempfile::tempdir().unwrap();
-        let rt = cost_function_runtime(dir.path(), DEAD_INDEXER, TradeParams::default(), |cfg| {
-            cfg.max_uncached_tokens = 1;
-            cfg.max_queue_wait_ms = 10_000;
-        });
+        let rt = cost_function_runtime(
+            dir.path(),
+            DEAD_INDEXER,
+            PlacementCostParams::default(),
+            |cfg| {
+                cfg.max_uncached_tokens = 1;
+                cfg.max_queue_wait_ms = 10_000;
+            },
+        );
         let mut decisions = Vec::new();
         for i in 0..4 {
             let rid = format!("r{i}");
@@ -3780,7 +3700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    /// Check each request makes one cost-book reservation and the Decision
+    /// Check each request makes one work-book reservation and the Decision
     /// carries it; the next request sees the reserved work.
     ///
     /// # Inputs
@@ -3790,9 +3710,14 @@ mod tests {
     /// No return value; `a` takes P1 (idle tie, lowest URL), `b` takes P2,
     /// and the trace has one labelled `reserve` row per request.
     async fn cost_function_reserves_once_per_request() {
-        use crate::scheduler::trade::TradeParams;
+        use crate::scheduler::placement_cost::PlacementCostParams;
         let dir = tempfile::tempdir().unwrap();
-        let rt = cost_function_runtime(dir.path(), DEAD_INDEXER, TradeParams::default(), |_| {});
+        let rt = cost_function_runtime(
+            dir.path(),
+            DEAD_INDEXER,
+            PlacementCostParams::default(),
+            |_| {},
+        );
         let a = admit_tokens(&rt, Some("a"), 4096).await.unwrap();
         let b = admit_tokens(&rt, Some("b"), 4096).await.unwrap();
         assert_eq!(
@@ -3812,7 +3737,7 @@ mod tests {
             .iter()
             .all(|e| e["policy"] == "symmetric_pd_cost_function"));
         let reserve = rows.iter().find(|e| e["event"] == "reserve").unwrap();
-        assert_eq!(reserve["selection_policy"], "trade");
+        assert_eq!(reserve["selection_policy"], "cost_function");
         assert_eq!(reserve["entry"]["worker_url"], CF_P1);
     }
 
@@ -3826,9 +3751,14 @@ mod tests {
     /// # Outputs
     /// No return value; the trace has a `rolled_back` row for the rid.
     async fn cost_function_rolls_back_when_dropped_before_dispatch() {
-        use crate::scheduler::trade::TradeParams;
+        use crate::scheduler::placement_cost::PlacementCostParams;
         let dir = tempfile::tempdir().unwrap();
-        let rt = cost_function_runtime(dir.path(), DEAD_INDEXER, TradeParams::default(), |_| {});
+        let rt = cost_function_runtime(
+            dir.path(),
+            DEAD_INDEXER,
+            PlacementCostParams::default(),
+            |_| {},
+        );
         let d = admit_tokens(&rt, Some("gone"), 4096).await.unwrap();
         assert!(cost_rids(dir.path(), "rolled_back").is_empty());
         drop(d);
@@ -3848,9 +3778,14 @@ mod tests {
     /// # Outputs
     /// No return value; `SymmetricPdError::CostFunction` names the rid rule.
     async fn cost_function_refuses_a_missing_rid() {
-        use crate::scheduler::trade::TradeParams;
+        use crate::scheduler::placement_cost::PlacementCostParams;
         let dir = tempfile::tempdir().unwrap();
-        let rt = cost_function_runtime(dir.path(), DEAD_INDEXER, TradeParams::default(), |_| {});
+        let rt = cost_function_runtime(
+            dir.path(),
+            DEAD_INDEXER,
+            PlacementCostParams::default(),
+            |_| {},
+        );
         match admit_tokens(&rt, None, 4096).await {
             Err(SymmetricPdError::CostFunction(error)) => {
                 assert!(
@@ -3867,7 +3802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    /// Check the Backend ledger charges prompt minus the TRADE expected hit.
+    /// Check the Backend ledger charges prompt minus the cost-function expected hit.
     ///
     /// # Inputs
     /// No arguments; the indexer reports 3,000 cached tokens on P1. `busy`
@@ -3877,8 +3812,8 @@ mod tests {
     ///
     /// # Outputs
     /// No return value; P2 is charged 5,192 tokens, not its local 8,192.
-    async fn cost_function_accounts_the_trade_expected_hit() {
-        use crate::scheduler::trade::TradeParams;
+    async fn cost_function_accounts_the_cost_expected_hit() {
+        use crate::scheduler::placement_cost::PlacementCostParams;
         let reply = json!({"instances": {"1": {"cpu": 3000}}});
         let app = axum::Router::new().route(
             "/query",
@@ -3891,9 +3826,9 @@ mod tests {
         let indexer = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let dir = tempfile::tempdir().unwrap();
-        let lambda0 = TradeParams {
-            copy_lambda: 0.0,
-            ..TradeParams::default()
+        let lambda0 = PlacementCostParams {
+            copy_price: 0.0,
+            ..PlacementCostParams::default()
         };
         let rt = cost_function_runtime(dir.path(), &indexer, lambda0, |_| {});
         let busy = admit_tokens(&rt, Some("busy"), 60_000).await.unwrap();
@@ -3912,15 +3847,15 @@ mod tests {
         server.abort();
     }
 
-    // ---- --symmetric-pd-gwq-auto under external role control ----
+    // ---- --global-queue under external role control ----
 
     const CF_D2: &str = "http://10.0.0.4:30000";
 
-    /// GWQ-AUTO with external role control (5 s drain, ended by hand here):
+    /// global queue with external role control (5 s drain, ended by hand here):
     /// P1 and P2 P-role, D and D2 D-role, every request cold (closed indexer
     /// port), the 300-s guard. The test steps the queue itself
-    /// ([`super::super::cost_function::CostFunction::gwq_pass`]).
-    fn gwq_role_runtime(dir: &Path) -> Arc<SymmetricPdRuntime> {
+    /// ([`super::super::cost_function::CostFunction::queue_pass`]).
+    fn queue_role_runtime(dir: &Path) -> Arc<SymmetricPdRuntime> {
         let reg = registry_with(vec![
             (CF_P1, WorkerMode::Symmetric, Some(9000), sym(1.0, 0.0)),
             (CF_P2, WorkerMode::Symmetric, Some(9000), sym(1.0, 0.0)),
@@ -3950,37 +3885,35 @@ mod tests {
         cfg.external_role_control = true;
         cfg.role_drain_timeout = Some(Duration::from_secs(5));
         cfg.cost_function = Some(crate::config::SymmetricPdCostFunctionConfig {
-            trade: crate::scheduler::trade::TradeParams::default(),
-            cost_trace: Some(dir.join("cost.jsonl")),
+            cost_params: crate::scheduler::placement_cost::PlacementCostParams::default(),
+            placement_trace: Some(dir.join("cost.jsonl")),
             load_poll_ms: 100,
             unknown_expire_secs: 60,
-            loads_host_room: false,
-            gwq_auto: Some(crate::config::SymmetricPdGwqAutoConfig {
+            global_queue: Some(crate::config::GlobalQueueConfig {
                 max_wait_ms: 300_000,
                 ..Default::default()
             }),
             trace_session_moves: false,
-            trade_e3: None,
+            forecast: None,
             pull_from_any_holder: false,
-            trace_async: false,
         });
         SymmetricPdRuntime::spawn(cfg, Some(&kv), reg, model())
     }
 
-    /// The cost function with `--trade-wait e3` (gate m 0, the
-    /// shipped bound table of tests/fixtures/e3) under external role control:
+    /// The cost function with `--prefill-wait forecast` (gate m 0, the
+    /// shipped bound table of tests/fixtures/forecast) under external role control:
     /// P1 and P2 P-role, D and D2 D-role, every request cold (closed indexer
     /// port), no state push and no engine snapshot (each P keeps the ledger
     /// terms, fallback `no_view`).
-    fn e3_role_runtime(dir: &Path) -> Arc<SymmetricPdRuntime> {
-        use crate::scheduler::trade::{TradeParams, TradeWait};
+    fn forecast_role_runtime(dir: &Path) -> Arc<SymmetricPdRuntime> {
+        use crate::scheduler::placement_cost::{PlacementCostParams, PrefillWait};
         let table = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/e3/bound-params.json"
+            "/tests/fixtures/forecast/bound-params.json"
         );
-        let e3 = crate::trade_e3::TradeE3Config::load(
+        let forecast = crate::prefill_forecast::ForecastConfig::load(
             Path::new(table),
-            crate::trade_e3::DEFAULT_BOUND_MODE,
+            crate::prefill_forecast::DEFAULT_BOUND_MODE,
             None,
             0.0,
             None,
@@ -4015,47 +3948,45 @@ mod tests {
         cfg.external_role_control = true;
         cfg.role_drain_timeout = Some(Duration::from_secs(5));
         cfg.cost_function = Some(crate::config::SymmetricPdCostFunctionConfig {
-            trade: TradeParams {
-                wait: TradeWait::E3,
-                gate_m: 0.0,
-                ..TradeParams::default()
+            cost_params: PlacementCostParams {
+                wait: PrefillWait::Forecast,
+                move_margin: 0.0,
+                ..PlacementCostParams::default()
             },
-            cost_trace: Some(dir.join("cost.jsonl")),
+            placement_trace: Some(dir.join("cost.jsonl")),
             load_poll_ms: 100,
             unknown_expire_secs: 60,
-            loads_host_room: false,
-            gwq_auto: None,
+            global_queue: None,
             trace_session_moves: false,
-            trade_e3: Some(crate::config::SymmetricPdTradeE3(Arc::new(e3))),
+            forecast: Some(crate::config::SymmetricPdForecast(Arc::new(forecast))),
             pull_from_any_holder: false,
-            trace_async: false,
         });
         SymmetricPdRuntime::spawn(cfg, Some(&kv), reg, model())
     }
 
-    /// One cold 5,000-token admission with the E3 session key `session`.
-    async fn admit_e3(rt: &Arc<SymmetricPdRuntime>, rid: &str, session: &str) -> Decision {
+    /// One cold 5,000-token admission with the forecast session key `session`.
+    async fn admit_forecast(rt: &Arc<SymmetricPdRuntime>, rid: &str, session: &str) -> Decision {
         let input = PlaceInput {
             tokens: Some(vec![7; 5_000]),
             prompt_len: 5_000,
             rid: Some(rid.into()),
-            e3_session: Some(session.into()),
+            forecast_session: Some(session.into()),
             ..Default::default()
         };
         rt.admit(input).await.unwrap()
     }
 
-    /// The trade decision of the reserve event of `rid`.
-    fn e3_decision(dir: &Path, rid: &str) -> Value {
+    /// The placement decision of the reserve event of `rid`.
+    fn forecast_decision(dir: &Path, rid: &str) -> Value {
         cost_rows(dir)
             .into_iter()
             .find(|e| e["event"] == "reserve" && e["entry"]["rid"] == rid)
-            .map(|e| e["trade_decision"].clone())
+            .map(|e| e["placement"].clone())
             .unwrap_or_else(|| panic!("no reserve event of {rid}"))
     }
 
-    /// The candidate URLs of a trade decision, sorted.
-    fn e3_candidate_urls(decision: &Value) -> Vec<String> {
+    /// The candidate URLs of a placement decision, sorted.
+    fn forecast_candidate_urls(decision: &Value) -> Vec<String> {
         let mut urls: Vec<String> = decision["candidates"]
             .as_array()
             .unwrap()
@@ -4067,37 +3998,37 @@ mod tests {
     }
 
     #[tokio::test]
-    /// `--trade-wait e3` under external role control (the CUA
-    /// dynamic router): every decision carries the e3 terms and one e3 row
-    /// per candidate, the candidates are the current P-role pool, the E3
+    /// `--prefill-wait forecast` under external role control (a dynamic
+    /// role router): every decision carries the forecast terms and one forecast row
+    /// per candidate, the candidates are the current P-role pool, the forecast
     /// session key reaches the host rule (the second request of a session
     /// sees its gap on the P of the first), and each routed request has an
-    /// `e3_shadow` line. After the controller moves P1 to decode and D2 to
+    /// `forecast_shadow` line. After the controller moves P1 to decode and D2 to
     /// prefill (drain ended), the candidates are P2 and D2.
-    async fn e3_prices_the_current_p_role_pool_under_external_roles() {
+    async fn forecast_prices_the_current_p_role_pool_under_external_roles() {
         use crate::backend::registry::RoleAssignment;
         let dir = tempfile::tempdir().unwrap();
-        let rt = e3_role_runtime(dir.path());
-        assert!(rt.cost_function_wants_e3_session());
-        let first = admit_e3(&rt, "e3-1", "agent-a/0").await;
-        let second = admit_e3(&rt, "e3-2", "agent-a/0").await;
-        let d1 = e3_decision(dir.path(), "e3-1");
-        assert_eq!(d1["wait"], "e3", "{d1}");
-        assert_eq!(d1["e3_gate_m"], json!(0.0));
-        assert!(d1["e3_decision_s"].is_number(), "{d1}");
-        assert!(d1["e3_chosen"].is_object(), "{d1}");
-        assert_eq!(e3_candidate_urls(&d1), [CF_P1, CF_P2]);
+        let rt = forecast_role_runtime(dir.path());
+        assert!(rt.cost_function_wants_forecast_session());
+        let first = admit_forecast(&rt, "fc-1", "agent-a/0").await;
+        let second = admit_forecast(&rt, "fc-2", "agent-a/0").await;
+        let d1 = forecast_decision(dir.path(), "fc-1");
+        assert_eq!(d1["wait"], "forecast", "{d1}");
+        assert_eq!(d1["move_margin"], json!(0.0));
+        assert!(d1["forecast_decision_s"].is_number(), "{d1}");
+        assert!(d1["forecast_chosen"].is_object(), "{d1}");
+        assert_eq!(forecast_candidate_urls(&d1), [CF_P1, CF_P2]);
         for c in d1["candidates"].as_array().unwrap() {
-            assert_eq!(c["wait_source"], "ledger_fallback", "{c}");
+            assert_eq!(c["wait_source"], "tokens_fallback", "{c}");
             assert_eq!(c["wait_fallback_reason"], "no_view", "{c}");
-            assert_eq!(c["e3_host_rule"], "cold", "{c}");
+            assert_eq!(c["forecast_host_rule"], "cold", "{c}");
         }
         // The session went to the first P: the second decision sees its gap
         // there (and none on the other P).
         let p1 = first.p_worker.url.clone();
-        let d2 = e3_decision(dir.path(), "e3-2");
+        let d2 = forecast_decision(dir.path(), "fc-2");
         for c in d2["candidates"].as_array().unwrap() {
-            let gap = &c["e3_session_gap_s"];
+            let gap = &c["forecast_session_gap_s"];
             if c["worker_url"] == p1.as_str() {
                 assert!(gap.as_f64().is_some_and(|g| g >= 0.0), "{c}");
             } else {
@@ -4114,10 +4045,10 @@ mod tests {
             .unwrap();
         assert_eq!(started, [CF_D2]);
         assert!(rt.finish_role_drain(CF_D2, after.revision));
-        let third = admit_e3(&rt, "e3-3", "agent-b/0").await;
-        let d3 = e3_decision(dir.path(), "e3-3");
-        assert_eq!(d3["wait"], "e3", "{d3}");
-        assert_eq!(e3_candidate_urls(&d3), [CF_P2, CF_D2]);
+        let third = admit_forecast(&rt, "fc-3", "agent-b/0").await;
+        let d3 = forecast_decision(dir.path(), "fc-3");
+        assert_eq!(d3["wait"], "forecast", "{d3}");
+        assert_eq!(forecast_candidate_urls(&d3), [CF_P2, CF_D2]);
         assert!([CF_P2, CF_D2].contains(&third.p_worker.url.as_str()));
         assert!(
             [CF_P1, CF_D].contains(&third.d_worker.url.as_str()),
@@ -4126,43 +4057,48 @@ mod tests {
         );
         let shadows: Vec<String> = cost_rows(dir.path())
             .iter()
-            .filter(|e| e["event"] == "e3_shadow")
+            .filter(|e| e["event"] == "forecast_shadow")
             .map(|e| e["rid"].as_str().unwrap_or("").to_string())
             .collect();
-        assert_eq!(shadows, ["e3-1", "e3-2", "e3-3"]);
+        assert_eq!(shadows, ["fc-1", "fc-2", "fc-3"]);
         drop((first, second, third));
     }
 
     /// A dispatched 100,000-token reservation `rid` on `url` (listed by
-    /// [`gwq_views`], its queued work 91,808 is above the lead depth 16,293).
-    fn gwq_busy(
-        book: &Arc<crate::cost_balance::CostBook>,
+    /// [`queue_views`], its queued work 91,808 is above the lead depth 16,293).
+    fn queue_busy(
+        book: &Arc<crate::prefill_work::PrefillWorkBook>,
         url: &str,
         rid: &str,
-    ) -> crate::cost_balance::Reservation {
-        let candidate = crate::cost_balance::Candidate {
+    ) -> crate::prefill_work::Reservation {
+        let candidate = crate::prefill_work::Candidate {
             worker_url: url.into(),
             local_hit: 0,
             gpu_hit: None,
             expected_hit: 0,
             hint: None,
         };
-        let (_, mut reservation) = book
-            .reserve_uncached(100_000, Some(rid.into()), vec![candidate], 12288)
+        let (_, mut reservation, _) = book
+            .reserve_cost(
+                100_000,
+                Some(rid.into()),
+                vec![candidate],
+                Default::default(),
+            )
             .unwrap();
         reservation.mark_dispatched().unwrap();
         reservation
     }
 
-    /// The progress views that [`gwq_views`] applies every 100 ms: per URL
+    /// The progress views that [`queue_views`] applies every 100 ms: per URL
     /// the listed (rid, remaining tokens). A P's view is stale (fail-open)
     /// 1 s after its last applied snapshot.
-    type GwqViews = Arc<Mutex<Vec<(&'static str, Vec<(&'static str, u64)>)>>>;
+    type QueueViews = Arc<Mutex<Vec<(&'static str, Vec<(&'static str, u64)>)>>>;
 
     /// Apply `views` every 100 ms until `stop` (the poll of the test).
-    fn gwq_views(
-        book: &Arc<crate::cost_balance::CostBook>,
-        views: &GwqViews,
+    fn queue_views(
+        book: &Arc<crate::prefill_work::PrefillWorkBook>,
+        views: &QueueViews,
         stop: &Arc<std::sync::atomic::AtomicBool>,
     ) -> tokio::task::JoinHandle<()> {
         let (book, views, stop) = (Arc::clone(book), Arc::clone(views), Arc::clone(stop));
@@ -4172,7 +4108,7 @@ mod tests {
                 sequence += 1;
                 let snapshot = views.lock().clone();
                 for (url, rids) in snapshot {
-                    let progress = crate::cost_balance::PrefillProgress {
+                    let progress = crate::prefill_work::PrefillProgress {
                         epoch: format!("e-{url}"),
                         sequence,
                         remaining: rids.iter().map(|(r, n)| (r.to_string(), *n)).collect(),
@@ -4187,7 +4123,7 @@ mod tests {
     }
 
     /// Wait up to 3 s for `pred`.
-    async fn gwq_wait(pred: impl Fn() -> bool) -> bool {
+    async fn queue_wait(pred: impl Fn() -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(3);
         while !pred() && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -4196,33 +4132,33 @@ mod tests {
     }
 
     #[tokio::test]
-    /// GWQ-AUTO steps over the current P-role pool only. A cold request is
+    /// global queue steps over the current P-role pool only. A cold request is
     /// held while P1 and P2 are busy. The controller moves P1 to decode (its
     /// queue then empties) and D2 to prefill (a drain starts): no release
     /// goes to P1 (a D-role worker with room) or to the draining D2. When the
     /// drain ends, D2 is a P without a progress view yet (fail-open) and the
     /// request is released and placed there; its D-leg is a D-role worker.
-    async fn gwq_auto_releases_only_to_the_current_p_role_pool() {
+    async fn queue_auto_releases_only_to_the_current_p_role_pool() {
         use crate::backend::registry::RoleAssignment;
         let dir = tempfile::tempdir().unwrap();
-        let rt = gwq_role_runtime(dir.path());
+        let rt = queue_role_runtime(dir.path());
         let cf = Arc::clone(rt.cost_function_for_test());
         let book = Arc::clone(cf.book_for_test());
-        let mut b1 = gwq_busy(&book, CF_P1, "busy-1");
-        let b2 = gwq_busy(&book, CF_P2, "busy-2");
-        let views: GwqViews = Arc::new(Mutex::new(vec![
+        let mut b1 = queue_busy(&book, CF_P1, "busy-1");
+        let b2 = queue_busy(&book, CF_P2, "busy-2");
+        let views: QueueViews = Arc::new(Mutex::new(vec![
             (CF_P1, vec![("busy-1", 100_000)]),
             (CF_P2, vec![("busy-2", 100_000)]),
         ]));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let poller = gwq_views(&book, &views, &stop);
+        let poller = queue_views(&book, &views, &stop);
         tokio::time::sleep(Duration::from_millis(150)).await;
         let task = {
             let rt = Arc::clone(&rt);
             tokio::spawn(async move { admit_tokens(&rt, Some("held-1"), 5_000).await })
         };
         assert!(
-            gwq_wait(|| cf.gwq_len() == 1).await,
+            queue_wait(|| cf.queue_len() == 1).await,
             "held: P1 and P2 are busy"
         );
         let now = rt.role_assignments().unwrap();
@@ -4236,10 +4172,10 @@ mod tests {
         // P1 (now decode) finished its work; D2 drains; P2 stays busy.
         b1.finish("prefill_response_success").unwrap();
         views.lock()[0].1.clear();
-        cf.gwq_pass(0, 1_000_000);
+        cf.queue_pass(0, 1_000_000);
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert_eq!(
-            cf.gwq_len(),
+            cf.queue_len(),
             1,
             "no release to the D-role P1 or the draining D2"
         );
@@ -4248,7 +4184,7 @@ mod tests {
             .iter()
             .all(|rid| rid != "held-1"));
         assert!(rt.finish_role_drain(CF_D2, after.revision));
-        cf.gwq_pass(0, 1_000_001);
+        cf.queue_pass(0, 1_000_001);
         let d = tokio::time::timeout(Duration::from_secs(3), task)
             .await
             .expect("released once D2 is a P")
@@ -4264,9 +4200,9 @@ mod tests {
             .into_iter()
             .find(|e| e["event"] == "reserve" && e["entry"]["rid"] == "held-1")
             .unwrap();
-        assert_eq!(row["gwq"]["p_release"], CF_D2, "{row}");
-        assert_eq!(row["gwq"]["release"], "stale_view", "{row}");
-        assert!(row["gwq"].get("walk_mismatch").is_none(), "{row}");
+        assert_eq!(row["global_queue"]["p_release"], CF_D2, "{row}");
+        assert_eq!(row["global_queue"]["release"], "stale_view", "{row}");
+        assert!(row["global_queue"].get("walk_mismatch").is_none(), "{row}");
         stop.store(true, Ordering::Relaxed);
         poller.await.unwrap();
         drop((d, b1, b2));
@@ -4276,29 +4212,29 @@ mod tests {
     /// The released P left the P-role pool between the release step and the
     /// placement (the step read the pool just before the controller moved P1
     /// to decode): the reservation rolls back (its rid is free again), the
-    /// request is walked again over the current pool (gwq_rewalk, counter
+    /// request is walked again over the current pool (queue_rewalk, counter
     /// rewalks) and placed on P2 once P2 has room.
-    async fn gwq_auto_walks_again_when_the_released_p_left_the_pool() {
+    async fn global_queue_walks_again_when_the_released_p_left_the_pool() {
         use crate::backend::registry::RoleAssignment;
         let dir = tempfile::tempdir().unwrap();
-        let rt = gwq_role_runtime(dir.path());
+        let rt = queue_role_runtime(dir.path());
         let cf = Arc::clone(rt.cost_function_for_test());
         let book = Arc::clone(cf.book_for_test());
-        let mut b1 = gwq_busy(&book, CF_P1, "busy-1");
-        let b2 = gwq_busy(&book, CF_P2, "busy-2");
-        let views: GwqViews = Arc::new(Mutex::new(vec![
+        let mut b1 = queue_busy(&book, CF_P1, "busy-1");
+        let b2 = queue_busy(&book, CF_P2, "busy-2");
+        let views: QueueViews = Arc::new(Mutex::new(vec![
             (CF_P1, vec![("busy-1", 100_000)]),
             (CF_P2, vec![("busy-2", 100_000)]),
         ]));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let poller = gwq_views(&book, &views, &stop);
+        let poller = queue_views(&book, &views, &stop);
         tokio::time::sleep(Duration::from_millis(150)).await;
         let task = {
             let rt = Arc::clone(&rt);
             tokio::spawn(async move { admit_tokens(&rt, Some("held-2"), 5_000).await })
         };
         assert!(
-            gwq_wait(|| cf.gwq_len() == 1).await,
+            queue_wait(|| cf.queue_len() == 1).await,
             "held: P1 and P2 are busy"
         );
         let now = rt.role_assignments().unwrap();
@@ -4315,17 +4251,17 @@ mod tests {
             .into_iter()
             .find(|w| w.url == CF_P1)
             .unwrap();
-        cf.gwq_set_next_pool(vec![p1]);
-        cf.gwq_pass(0, 2_000_000);
+        cf.queue_set_next_pool(vec![p1]);
+        cf.queue_pass(0, 2_000_000);
         assert!(
-            gwq_wait(|| cf.gwq_counters()["rewalks"] == 1 && cf.gwq_len() == 1).await,
+            queue_wait(|| cf.queue_counters()["rewalks"] == 1 && cf.queue_len() == 1).await,
             "walked again and held: {}",
-            cf.gwq_counters()
+            cf.queue_counters()
         );
         assert_eq!(cost_rids(dir.path(), "rolled_back"), ["held-2"]);
         let rewalk = cost_rows(dir.path())
             .into_iter()
-            .find(|e| e["event"] == "gwq_rewalk")
+            .find(|e| e["event"] == "queue_rewalk")
             .unwrap();
         assert_eq!(
             (
@@ -4338,7 +4274,7 @@ mod tests {
         // P2 gets room (10,000 left: queued 1,808).
         views.lock()[1].1 = vec![("busy-2", 10_000)];
         tokio::time::sleep(Duration::from_millis(150)).await;
-        cf.gwq_pass(0, 2_000_001);
+        cf.queue_pass(0, 2_000_001);
         let d = tokio::time::timeout(Duration::from_secs(3), task)
             .await
             .expect("released to P2")

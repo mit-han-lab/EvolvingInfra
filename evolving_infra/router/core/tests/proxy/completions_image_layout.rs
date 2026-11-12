@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! `/v1/completions` with uploaded screenshots (Kimi CUA replay):
+//! `/v1/completions` with uploaded screenshots (Kimi K2.6 image requests):
 //! `--max-completions-body-mib` lifts the 5 MiB cap, and
 //! `--image-layout-config` forwards `prepared_image_layout` (the engine then
 //! keys its cache with the router's pad values) while the token-id prompt

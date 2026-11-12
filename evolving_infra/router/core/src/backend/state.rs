@@ -1,11 +1,12 @@
 //! Authoritative router reservations plus engine observations.
 //!
 //! An observation is optional: a missing/stale engine is never reported as an
-//! idle engine. CoSchedule tracks each managed P request until an explicit
-//! terminal event; observed per-RID remaining work replaces its initial estimate.
-//! Missing/truncated snapshots preserve estimates. Legacy modes retain their
-//! separately labelled aggregate baseline + post-query reservation estimate.
-pub use crate::cost_balance::PrefillProgress;
+//! idle engine. The runtime uses the aggregate estimate: engine-reported load
+//! plus the reservations that no poll covers yet. The per-RID mode
+//! ([`BackendState::with_progress`]) replaces each request's initial estimate
+//! with its observed remaining work; missing/truncated snapshots preserve
+//! estimates.
+pub use crate::prefill_work::PrefillProgress;
 use crate::scheduler::placement::{WorkerLoad, WorkerLoads};
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -151,7 +152,7 @@ impl LedgerHandle {
 /// non-truncated replies, for `empty_queue` while the worker also reported an
 /// empty waiting queue the whole time (a queued request is not listed until
 /// its first chunk launches), or for `quiet` whatever the queue (`None` =
-/// never; the bound of the cost book's `--symmetric-pd-unknown-expire-secs`). A
+/// never; the bound of the work book's `--symmetric-pd-unknown-expire-secs`). A
 /// listed RID is never retired; a worker without applied replies keeps its
 /// entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

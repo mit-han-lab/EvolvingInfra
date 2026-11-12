@@ -52,8 +52,8 @@ pub struct ProxyConfig {
     pub late_decode: LateDecodeConfig,
     /// `--max-completions-body-mib`: the `/v1/completions` request-body cap
     /// in bytes (axum `DefaultBodyLimit`; larger bodies get HTTP 413).
-    /// Default 5 MiB (= the chat route's cap). Token-id replay with uploaded
-    /// screenshots (Kimi CUA) needs ~100 MiB.
+    /// Default 5 MiB (= the chat route's cap). Token-id requests with
+    /// uploaded images can need ~100 MiB.
     pub max_completions_body_bytes: usize,
     /// `--image-layout-config`: screenshot-aware token ids for token-id
     /// `/v1/completions` requests with `image_data` (Kimi), see
@@ -387,8 +387,7 @@ pub struct GatewayCacheAwareConfig {
     /// 67108864): tree characters per worker kept by each eviction. A token
     /// is 8 characters, so the default is 8388608 tokens per worker.
     pub max_tree_size: usize,
-    /// `--kv-session-retention` with this policy (see
-    /// [`CoScheduleConfig::kv_session_retention`]).
+    /// `--kv-session-retention` with this policy.
     pub kv_session_retention: bool,
     /// `--kv-session-key-file` with this policy.
     pub kv_session_key_file: Option<std::path::PathBuf>,
@@ -653,16 +652,13 @@ pub enum SymmetricPdPSelect {
     /// least-loaded (default).
     #[value(name = "cache-first")]
     CacheFirst,
-    /// Co-schedule prefill placement and optional KV movement; D is configured separately.
-    #[value(name = "co-schedule")]
-    CoSchedule,
     /// sgl-model-gateway `--prefill-policy cache_aware` (the
     /// `--policy gateway_cache_aware` rule, its tree and its `--gateway-ca-*`
     /// flags and defaults) picks the P-leg among the prefill-capable
     /// workers; the D-leg follows `--symmetric-pd-d-select`. No hold queue.
     #[value(name = "gateway-cache-aware")]
     GatewayCacheAware,
-    /// The TRADE cost model (`--co-schedule-trade*`, lambda fixed or auto)
+    /// The placement cost function (`--copy-price` and the other cost-function flags, lambda fixed or auto)
     /// picks the P-leg among the P-role workers and decides the pull. The
     /// D-leg follows `--symmetric-pd-d-select`. No hold queue.
     #[value(name = "cost-function")]
@@ -674,7 +670,6 @@ impl From<SymmetricPdPSelect> for crate::scheduler::placement::PSelect {
         match v {
             SymmetricPdPSelect::Score => Self::Score,
             SymmetricPdPSelect::CacheFirst => Self::CacheFirst,
-            SymmetricPdPSelect::CoSchedule => Self::CoSchedule,
             // The runtime narrows the prefill pool to the gateway's pick
             // (`SymmetricPdConfig::gateway_cache_aware`); the placement then
             // takes that single P.
@@ -686,46 +681,41 @@ impl From<SymmetricPdPSelect> for crate::scheduler::placement::PSelect {
     }
 }
 
-/// `--symmetric-pd-p-select cost-function`: the TRADE cost model on the P-role
-/// workers of `--policy symmetric_pd`. The runtime keeps its own cost ledger
-/// ([`crate::cost_balance::CostBook`]) and its own per-RID progress poll of
-/// the P-role workers; the price (lambda, R, the TRADE cost) comes from the
-/// cost book only.
+/// `--symmetric-pd-p-select cost-function`: the placement cost function on the P-role
+/// workers of `--policy symmetric_pd`. The runtime keeps its own work book
+/// ([`crate::prefill_work::PrefillWorkBook`]) and its own per-RID progress poll of
+/// the P-role workers; the price (copy price, R, the placement cost) comes from the
+/// work book only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymmetricPdCostFunctionConfig {
-    /// The `--co-schedule-trade*` parameters (lambda fixed or auto).
-    pub trade: crate::scheduler::trade::TradeParams,
-    /// `--trade-cost-trace`: a new JSONL file (an existing file stops
+    /// The cost-function parameters (`--copy-price`, `--prefill-wait`, ...).
+    pub cost_params: crate::scheduler::placement_cost::PlacementCostParams,
+    /// `--placement-trace`: a new JSONL file (an existing file stops
     /// the start). Every row has `"policy": "symmetric_pd_cost_function"`.
     /// None: no trace.
-    pub cost_trace: Option<std::path::PathBuf>,
-    /// `--trade-load-poll-ms` (default 100): the period of the
+    pub placement_trace: Option<std::path::PathBuf>,
+    /// `--prefill-poll-ms` (default 100): the period of the
     /// per-RID progress poll of each P-role worker.
     pub load_poll_ms: u64,
     /// `--symmetric-pd-unknown-expire-secs` (default 60): an unknown reservation
-    /// (a P-leg transport error or a drop after dispatch) leaves the ledger
+    /// (a P-leg transport error or a drop after dispatch) leaves the work book
     /// when a progress reply of its P, sent at least this many seconds after
     /// the later of the moment it became unknown and the last listing of its
     /// RID, omits the RID. A P without replies keeps it. 0 = never: it is
     /// held until a terminal result.
     pub unknown_expire_secs: u64,
-    /// `--symmetric-pd-loads-host-room` (default off): the progress poll also asks
-    /// each P for its `host_room` section (host pool by retention class), and
-    /// the cost trace records the latest one per P (`host_room_by_p` in the
-    /// snapshot and in every decision). Observation only.
-    pub loads_host_room: bool,
-    /// `--symmetric-pd-gwq-auto` (default off = None): the global waiting queue
-    /// of the TRADE P choice with the measured lead.
-    pub gwq_auto: Option<SymmetricPdGwqAutoConfig>,
-    /// `--symmetric-pd-trace-session-moves` (default off): each TRADE reserve
+    /// `--global-queue` (None = off): the global queue of the
+    /// cost-function P choice with the measured lead.
+    pub global_queue: Option<GlobalQueueConfig>,
+    /// `--symmetric-pd-trace-session-moves` (default off): each cost-function reserve
     /// event with a session identity gets a `session_move` record (the P of
     /// the session's last decision, the hits, the pull). Trace only.
     pub trace_session_moves: bool,
-    /// The E3 forecast state (`--trade-e3-*`): `Some` with
-    /// `--trade-wait e3` (the step-time-model predictor in the P
-    /// selection, with the prediction gate) or `--symmetric-pd-gwq-room
-    /// predicted` (the drain of the global waiting queue). None otherwise.
-    pub trade_e3: Option<SymmetricPdTradeE3>,
+    /// The forecast state (the `--forecast-*` flags): `Some` with
+    /// `--prefill-wait forecast` (the step-time-model predictor in the P
+    /// selection, with the move rule) or `--global-queue-room forecast`
+    /// (the drain of the global queue). None otherwise.
+    pub forecast: Option<SymmetricPdForecast>,
     /// `--symmetric-pd-pull-from-any-holder` (default off): the pull source of the
     /// P-leg (`kv_pull_hint`) may be any holder of the indexer answer that is
     /// a healthy registered worker of any role (breaker allowing) with a
@@ -733,24 +723,19 @@ pub struct SymmetricPdCostFunctionConfig {
     /// role switch). The targets stay the healthy P-role workers. Off: every
     /// hit and every pull source is a P-role worker.
     pub pull_from_any_holder: bool,
-    /// `--trade-cost-trace-async`: the cost trace is written by a
-    /// background thread ([`crate::cost_balance::CostBook::enable_async_trace`]).
-    /// Off (default): each row is written and flushed under the cost-book
-    /// lock.
-    pub trace_async: bool,
 }
 
-/// The E3 forecast settings of the symmetric_pd cost function, shared with the
-/// co_schedule path ([`crate::trade_e3::TradeE3Config`]). Two values are
-/// equal when they hold the same bound file (sha256) with the same mode,
+/// The forecast settings of the symmetric_pd cost function, shared with the
+/// cost function path ([`crate::prefill_forecast::ForecastConfig`]). Two values are
+/// equal when they hold the same error table (sha256) with the same mode,
 /// level, rq margin, shadow path and push settings.
 #[derive(Debug, Clone)]
-pub struct SymmetricPdTradeE3(pub std::sync::Arc<crate::trade_e3::TradeE3Config>);
+pub struct SymmetricPdForecast(pub std::sync::Arc<crate::prefill_forecast::ForecastConfig>);
 
-impl PartialEq for SymmetricPdTradeE3 {
+impl PartialEq for SymmetricPdForecast {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&*self.0, &*other.0);
-        let push = |c: &crate::trade_e3::TradeE3Config| {
+        let push = |c: &crate::prefill_forecast::ForecastConfig| {
             c.push
                 .as_ref()
                 .map(|p| (p.port, p.mode.clone(), p.level.clone()))
@@ -767,20 +752,20 @@ impl PartialEq for SymmetricPdTradeE3 {
     }
 }
 
-/// `--symmetric-pd-gwq-auto`: the settings of the symmetric_pd global waiting queue.
+/// `--global-queue`: the settings of the symmetric_pd global waiting queue.
 /// The CLI sets only the default; tests build shorter guards in code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SymmetricPdGwqAutoConfig {
-    /// A request held this long (ms) goes to its TRADE argmin P, also
+pub struct GlobalQueueConfig {
+    /// A request held this long (ms) goes to its cost argmin P, also
     /// without room: a safety bound (300000), not a tuned value.
     pub max_wait_ms: u64,
-    /// `--symmetric-pd-gwq-room` (default `tokens`): `predicted` also gives a P
-    /// room while its E3 drain is at most its lead C / R + T_react (needs
-    /// [`SymmetricPdCostFunctionConfig::trade_e3`]).
+    /// `--global-queue-room` (default `tokens`): `forecast` also gives a P
+    /// room while its forecast drain is at most its lead C / R + T_react (needs
+    /// [`SymmetricPdCostFunctionConfig::forecast`]).
     pub room: crate::global_queue::GlobalQueueRoom,
 }
 
-impl Default for SymmetricPdGwqAutoConfig {
+impl Default for GlobalQueueConfig {
     fn default() -> Self {
         Self {
             max_wait_ms: crate::global_queue::DEFAULT_HRRN_MAX_WAIT_MS,
@@ -884,7 +869,7 @@ pub struct SymmetricPdConfig {
     /// rule (`--gateway-ca-*` flags) picks the P-leg before placement.
     /// `None` for every other P selection.
     pub gateway_cache_aware: Option<GatewayCacheAwareConfig>,
-    /// `--symmetric-pd-p-select cost-function`: the TRADE cost function picks the
+    /// `--symmetric-pd-p-select cost-function`: the placement cost function picks the
     /// P-leg (and the pull) before placement. `None` for every other P
     /// selection.
     pub cost_function: Option<SymmetricPdCostFunctionConfig>,
