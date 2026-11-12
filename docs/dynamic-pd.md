@@ -65,9 +65,13 @@ A rejected or failed update is logged and not retried.
    the frontend's reports, and for `/v1/chat/completions` and `/v1/completions` requests it
    proxies itself from the engines' replies (prompt and cached tokens from the prefill leg,
    output tokens and verify steps from the decode leg). For that it asks the engines for usage
-   on every such request and removes from the client's stream the usage chunks the client did
-   not ask for. A native `/generate` request is not counted. With KV session retention on, the
-   plain routes are refused under role control, so only the prepared path is counted there.
+   on every such request and removes from the client's reply what the client did not ask for
+   (the usage chunks and the `sglext` field). A native `/generate` request is not counted.
+
+   A role change from decode to prefill waits for the worker's decode legs: prepared ones are
+   moved to another worker at the drain deadline, and the ones the router proxies itself run to
+   their end, so with KV session retention the worker takes prefill work only after its last
+   proxied decode has finished.
 
 4. Start the planner with its [arguments](#configuration):
 
