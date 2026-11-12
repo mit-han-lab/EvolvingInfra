@@ -21,6 +21,7 @@ pub mod discovery;
 pub mod dynamo_prefix;
 pub mod e3;
 pub mod eft_cheap;
+pub mod engine_tokenize;
 pub mod global_queue;
 pub mod health;
 pub mod image_layout;

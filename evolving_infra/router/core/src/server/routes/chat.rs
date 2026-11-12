@@ -188,6 +188,28 @@ pub async fn chat_completions(
     let request_tokens = request_value
         .as_ref()
         .and_then(|v| request_tokens_for(&ctx.tokenizers, &model_id, v));
+    // `--chat-tools-tokenize`: the ids above render the messages alone. For a
+    // request with tools, an engine's ids replace them for placement only.
+    let request_tokens = match request_value.as_ref() {
+        Some(v)
+            if ctx.config.proxy.chat_tools_tokenize
+                && request_has_tools(v)
+                && !request_is_multimodal(v) =>
+        {
+            let engines = match ctx.symmetric_pd.as_ref() {
+                Some(flex) => flex.role_members_all(),
+                None => workers.clone(),
+            };
+            match crate::engine_tokenize::chat_ids(&engines, v).await {
+                Some(ids) => Some(RequestTokens {
+                    ids,
+                    engine_equivalent: false,
+                }),
+                None => request_tokens,
+            }
+        }
+        _ => request_tokens,
+    };
     let external_prefix = if let Some(index) = &ctx.dynamo_prefix {
         Some(
             crate::dynamo_prefix::query(

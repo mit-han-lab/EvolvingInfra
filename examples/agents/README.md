@@ -56,7 +56,9 @@ writes its launch script.
 - The configs here turn late decode choice off on engines and router: it serves `/v1/completions`
   only, and harnesses send chat completions (a stack with the `paper` preset answers them with
   HTTP 501 `late_d_route_unsupported`).
-- Requests with tools are placed without the router's prefix lookup (the router does not render
-  tool schemas), so placement does not follow cached prefixes for them.
+- The router's chat encoder renders messages only. The configs here pass `--chat-tools-tokenize`,
+  so for a request with tools the router asks an engine's `/v1/tokenize` for the token ids and
+  places the request on them; this adds one tokenization per request. Without the flag such a
+  request matches no cached prefix.
 - Claude Code and Codex do not know the served model: Claude Code assumes a 200K-token context
   window and Codex uses fallback model metadata.
