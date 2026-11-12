@@ -1,7 +1,6 @@
 # SGL KV Indexer (in-memory build)
 
-`sgl-kv-indexer` is an experimental metadata service for SGLang KV-cache
-blocks. It records which worker and storage tier currently holds each
+`sgl-kv-indexer` is a metadata service for SGLang KV-cache blocks. It records which worker and storage tier currently holds each
 content-addressed block, allowing a router to query likely cache hits without
 moving KV data itself.
 
@@ -44,9 +43,7 @@ liveness TTL, or restart recovery:
 - A publisher sequence gap is logged and otherwise ignored.
 - Redelivered or reordered batches are applied again in arrival order.
 
-Individual report, revoke, and clear mutations are idempotent. A future
-Snapshot plus event-replay mechanism is required before production high
-availability can rebuild state safely after restart or event loss.
+Individual report, revoke, and clear mutations are idempotent.
 
 ## In-memory data model
 
@@ -75,8 +72,9 @@ This produces:
 
 ## End-to-end quickstart
 
-Component-aware routing requires an SGLang engine build that supports
-`component_types`. Start each command in its own terminal.
+Start each command in its own terminal. `decoupled_engine` publishes
+whole-block `BlockStored` events (no `component_types` slot); the bridge
+records them with component mask `0`.
 
 1. Start the single Indexer server:
 
@@ -91,8 +89,8 @@ queries executing concurrently and defaults to `32`. Requests above the limit
 are rejected immediately with gRPC `RESOURCE_EXHAUSTED`.
 There is no backend or storage configuration.
 
-2. Start one bridge per worker event stream. This FULL+SWA example uses the
-worker URL registered with the Router:
+2. Start one bridge per worker event stream, with the worker URL registered
+with the Router:
 
 ```bash
 KV_INDEXER_WORKER_ID=worker-0 \
@@ -100,14 +98,21 @@ KV_INDEXER_WORKER_ADDRESS=http://127.0.0.1:30000 \
 KV_INDEXER_ENDPOINT=http://127.0.0.1:50051 \
 SGLANG_KV_EVENT_ENDPOINT=tcp://127.0.0.1:5567 \
 SGLANG_KV_EVENT_TOPIC=kv-events \
-KV_INDEXER_CACHE_COMPONENTS=full,swa \
-KV_INDEXER_SWA_WINDOW_TOKENS=<model-window-tokens> \
-KV_INDEXER_FULL_TIERS=HBM \
-KV_INDEXER_SWA_TIERS=HBM \
   cargo run --release --bin kv-indexer-bridge
 ```
 
-For FULL+MAMBA, use:
+A producer that appends a `component_types` slot to `BlockStored` gets
+component-aware matching. Describe the worker's components to the bridge; for
+FULL+SWA:
+
+```bash
+KV_INDEXER_CACHE_COMPONENTS=full,swa
+KV_INDEXER_SWA_WINDOW_TOKENS=<model-window-tokens>
+KV_INDEXER_FULL_TIERS=HBM
+KV_INDEXER_SWA_TIERS=HBM
+```
+
+For FULL+MAMBA:
 
 ```bash
 KV_INDEXER_CACHE_COMPONENTS=full,mamba
@@ -115,15 +120,14 @@ KV_INDEXER_FULL_TIERS=HBM
 KV_INDEXER_MAMBA_TIERS=HBM
 ```
 
-3. Start the matching SGLang worker:
+3. Start the matching engine worker:
 
 ```bash
-python -m sglang.launch_server \
+python -m decoupled_engine.launch_server \
   --model-path <model> \
   --port 30000 \
   --kv-events-config \
-    '{"publisher":"zmq","endpoint":"tcp://*:5567","topic":"kv-events"}' \
-  --enable-kv-events-component-types
+    '{"publisher":"zmq","endpoint":"tcp://*:5567","topic":"kv-events"}'
 ```
 
 4. Start the Router with the Indexer as the authoritative cache signal:

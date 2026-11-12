@@ -578,9 +578,8 @@ fn decode_event(event: &Value, actions: &mut EventActions) -> Result<(), BridgeE
 
     match event_type {
         "BlockStored" => {
-            // At least 7 fields (the legacy schema); an 8th `component_types`
-            // slot appears with `--enable-kv-events-component-types`. Both
-            // shapes are accepted.
+            // At least 7 fields (the legacy schema); a producer may append an
+            // 8th `component_types` slot. Both shapes are accepted.
             if event.len() < 7 {
                 return Err(BridgeError::Decode(
                     "BlockStored must have at least 7 array fields".to_string(),
