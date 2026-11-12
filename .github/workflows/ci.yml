@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python tests and agent files
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Agent files
+        run: python tools/check_agent_files.py
+      - name: Lock file is current
+        run: uv lock --check
+      - name: CPU tests
+        run: uv run --locked --extra client --extra frontend --extra indexer --extra planner --extra test pytest -q tests
+
+  trie:
+    name: Trie tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Trie
+        run: |
+          python -m venv .venv-trie
+          .venv-trie/bin/pip install -e 'benchmarks/trie[test]'
+      - name: Tests
+        run: .venv-trie/bin/python -m pytest -q benchmarks/trie/tests
+
+  router:
+    name: Router (fmt, clippy, tests)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: evolving_infra/router/core
+    steps:
+      - uses: actions/checkout@v4
+      - name: Protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain && rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: evolving_infra/router/core
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked
