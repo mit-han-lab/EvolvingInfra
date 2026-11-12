@@ -49,6 +49,13 @@ pub struct PreparedConfig {
     /// D-leg. 0 = never (the earlier behaviour). Default 300.
     #[serde(default = "default_decode_unresolved_expire_secs")]
     pub decode_unresolved_expire_secs: u64,
+    /// A claimed execution that received no callback for this many seconds
+    /// is treated as abandoned by its tokenizer (see
+    /// [`Executions::with_silent_expiry`]). It must exceed the tokenizer's
+    /// `request_timeout_seconds` (default 7200): a running request sends no
+    /// callback between its upload and its end. 0 = never. Default 7500.
+    #[serde(default = "default_silent_expire_secs")]
+    pub silent_expire_secs: u64,
 }
 /// Default of [`PreparedConfig::decode_unresolved_expire_secs`]: ten times the
 /// tokenizer's 30 s cancellation grace, so a slow but live cleanup always wins.
@@ -56,11 +63,20 @@ pub const DEFAULT_DECODE_UNRESOLVED_EXPIRE_SECS: u64 = 300;
 fn default_decode_unresolved_expire_secs() -> u64 {
     DEFAULT_DECODE_UNRESOLVED_EXPIRE_SECS
 }
+/// Default of [`PreparedConfig::silent_expire_secs`].
+pub const DEFAULT_SILENT_EXPIRE_SECS: u64 = 7500;
+fn default_silent_expire_secs() -> u64 {
+    DEFAULT_SILENT_EXPIRE_SECS
+}
 impl PreparedConfig {
     /// The D-leg expiry of [`Self::decode_unresolved_expire_secs`]; `None` = never.
     pub fn decode_unresolved_expiry(&self) -> Option<Duration> {
         (self.decode_unresolved_expire_secs > 0)
             .then(|| Duration::from_secs(self.decode_unresolved_expire_secs))
+    }
+    /// The silent-execution expiry of [`Self::silent_expire_secs`]; `None` = never.
+    pub fn silent_expiry(&self) -> Option<Duration> {
+        (self.silent_expire_secs > 0).then(|| Duration::from_secs(self.silent_expire_secs))
     }
     /// Load and validate the deployment contract for prepared-input forwarding.
     ///
@@ -568,6 +584,10 @@ struct Records {
     /// then ended), since start.
     decode_unresolved_expired: u64,
     executions_expired: u64,
+    /// See [`Executions::with_silent_expiry`]; `None` = never.
+    silent_expire: Option<Duration>,
+    /// Executions abandoned by their tokenizer, since start.
+    silent_expired: u64,
 }
 impl Records {
     /// Keep bounded identity evidence for a retired execution.
@@ -616,8 +636,58 @@ impl Records {
                 self.remember(id, x);
             }
         }
+        self.expire_silent();
         self.sweep_reconciled();
         self.expire_unresolved_decode();
+    }
+    /// A claimed execution whose tokenizer stopped reporting (the process
+    /// died, or its callbacks are lost): nothing else would end its legs, so
+    /// it would hold its execution slot, its P reservation, its D in-flight
+    /// count and a leg owed by each worker for ever, and a role drain of
+    /// either worker would never end. After `silent_expire` without a
+    /// callback, its D-leg ends by time, as an unresolved D-leg does. Its
+    /// P-leg is not ended by time: the reservation becomes unknown, and the
+    /// unknown reconciliation retires it once its worker has stopped listing
+    /// the RID ([`Self::sweep_reconciled`] then ends the leg).
+    fn expire_silent(&mut self) {
+        let Some(after) = self.silent_expire else {
+            return;
+        };
+        let mut expired = 0;
+        let done: Vec<String> = self
+            .active
+            .iter_mut()
+            .filter(|(_, x)| {
+                x.claimed
+                    && x.last_event.elapsed() >= after
+                    && (!x.terminal[0] && !x.ledger.is_unknown()
+                        || !x.terminal[1] && !x.not_submitted[1])
+            })
+            .filter_map(|(id, x)| {
+                expired += 1;
+                tracing::warn!(target: "symmetric_pd", rid = %x.rid, reservation = %id,
+                    p_worker = %x.workers[0],
+                    d_worker = %x.decode_owner().unwrap_or(x.workers[1].as_str()),
+                    p_state = x.states[0].name(), d_state = x.states[1].name(),
+                    quiet_s = x.last_event.elapsed().as_secs_f64(),
+                    reason = "silent_execution_expired",
+                    "prepared execution abandoned by its tokenizer: no callback; its D-leg ends                      and its P reservation waits for engine evidence");
+                if !x.terminal[0] {
+                    x.ledger.mark_unknown();
+                }
+                if !x.terminal[1] && !x.not_submitted[1] {
+                    x.terminal[1] = true;
+                    x.end_decode();
+                }
+                x.terminal[0].then(|| id.clone())
+            })
+            .collect();
+        self.silent_expired += expired;
+        for id in done {
+            let x = self.active.remove(&id).unwrap();
+            self.executions_expired += 1;
+            self.remember(id, x);
+        }
     }
     /// Safety net for a lost D-leg confirmation. The tokenizer reports a
     /// client-cancelled or failed D-leg first as `cancelled`/`failed` without
@@ -716,6 +786,13 @@ impl Executions {
     /// never, the default). See [`PreparedConfig::decode_unresolved_expire_secs`].
     pub fn with_decode_unresolved_expiry(self, after: Option<Duration>) -> Self {
         self.records.lock().decode_unresolved_expire = after;
+        self
+    }
+    /// Treat a claimed execution without a callback for `after` as abandoned
+    /// by its tokenizer (`None` = never, the default). See
+    /// [`PreparedConfig::silent_expire_secs`].
+    pub fn with_silent_expiry(self, after: Option<Duration>) -> Self {
+        self.records.lock().silent_expire = after;
         self
     }
     /// Reserve request identity BEFORE awaiting placement, preventing two plans
@@ -1249,6 +1326,7 @@ impl Executions {
     /// Unknown requests are reported separately and must not be assumed runnable.
     pub fn decode_population(&self) -> Value {
         let mut records = self.records.lock();
+        records.expire_silent();
         records.sweep_reconciled();
         records.expire_unresolved_decode();
         let mut workers = std::collections::BTreeMap::<String, [u64; 3]>::new();
@@ -1295,6 +1373,7 @@ impl Executions {
             "unresolved":r.active.values().filter(|e|e.states.iter().any(|s|matches!(s,LegState::Failed|LegState::Cancelled))).count(),
             "older_than_300s":r.active.values().filter(|e|e.created.elapsed()>Duration::from_secs(300)).count(),
             "decode_unresolved_expired":r.decode_unresolved_expired,
+            "silent_expired":r.silent_expired,
             "executions_expired":r.executions_expired,
             "decode_unresolved_expire_s":r.decode_unresolved_expire.map(|d| d.as_secs_f64())})
     }
@@ -1893,6 +1972,7 @@ mod tests {
                 },
             )]),
             decode_unresolved_expire_secs: DEFAULT_DECODE_UNRESOLVED_EXPIRE_SECS,
+            silent_expire_secs: DEFAULT_SILENT_EXPIRE_SECS,
         };
         let mut p = json!({"protocol_version":1,"config_id":"glm-eagle","request_id":"req","ref":"input-ref","prompt_tokens":65,
             "content":{"hash_spec":{"mode":"dynamo","encoding":"signed_i64","implementation":"dynamo.llm.compute_block_hash_for_seq","page_size":64,"is_eagle":true,"model":"/glm","cache_namespace":null,"partial_blocks":false,"window_tokens":65},"blocks":[{"hash":-1,"valid_tokens":64}]}});
@@ -2675,5 +2755,95 @@ mod tests {
         late.terminal_response = true;
         assert_eq!(e.event(&late, "secret").unwrap(), vec![]);
         assert_eq!(e.summary()["decode_unresolved_expired"], 1);
+    }
+
+    /// The tokenizer stops reporting (process died, callbacks lost) right
+    /// after it claimed the plan and uploaded both legs. Both engines drop
+    /// the request; the P worker answers every progress poll and never lists
+    /// the RID. Once the execution has been silent for the expiry, its D-leg
+    /// ends, its P reservation becomes unknown and is retired on the engine's
+    /// evidence, and the execution leaves the registry. Before the expiry
+    /// nothing changes.
+    #[test]
+    fn silent_claimed_execution_is_reclaimed_after_the_expiry() {
+        let mut state = BackendState::new(Arc::new(tokio::sync::Notify::new()));
+        let e = Executions::default().with_silent_expiry(Some(Duration::from_secs(1800)));
+        let ledger = state.reserve_request("http://p", 4096, Some("rid-r"), 8192);
+        e.install_claimed_for_test("r", "secret", ["http://p", "http://d"], ledger);
+        e.records.lock().active.get_mut("r").unwrap().d_reservation =
+            Some(state.reserve_decode("http://d"));
+        e.event(&rid_ev(Leg::Prefill, LegState::Uploaded), "secret")
+            .unwrap();
+        e.event(&rid_ev(Leg::Decode, LegState::Uploaded), "secret")
+            .unwrap();
+        let held = |e: &Executions, state: &mut BackendState| {
+            let (p, d) = (state.view("http://p"), state.view("http://d"));
+            (
+                e.summary()["active"].as_u64().unwrap(),
+                e.legs_owed("http://p"),
+                e.legs_owed("http://d"),
+                p.active_prefill_reqs,
+                d.active_decode_reqs,
+            )
+        };
+        // Quiet for less than the expiry: a long request looks the same.
+        e.age_for_test("r", 1700);
+        e.decode_population();
+        let base = Instant::now();
+        for at in (0..=600).step_by(10) {
+            p_reply(&mut state, base, at, &[]);
+        }
+        assert_eq!(held(&e, &mut state), (1, 1, 1, 1, 1));
+        // Past it: the D-leg ends at once, the P-leg on engine evidence.
+        e.age_for_test("r", 1900);
+        e.decode_population();
+        assert_eq!(held(&e, &mut state), (1, 1, 0, 1, 0));
+        for at in (610..=1200).step_by(10) {
+            p_reply(&mut state, base, at, &[]);
+        }
+        assert_eq!(
+            held(&e, &mut state),
+            (0, 0, 0, 0, 0),
+            "(active executions, legs owed by P, legs owed by D, P reservations, D in-flight)"
+        );
+        assert_eq!(e.summary()["silent_expired"], 1);
+    }
+
+    /// A client cancel before the prefill answered, on a router without
+    /// external role control. The tokenizer reports both legs `cancelled`
+    /// and its cleanup grace ends without terminal P evidence. The D-leg
+    /// expires after 300 s; the P-leg ends once its worker has stopped
+    /// listing the RID, and the execution leaves the registry.
+    #[test]
+    fn cancelled_p_leg_without_terminal_evidence_is_reclaimed_without_role_control() {
+        let mut s = BackendState::new(Arc::new(tokio::sync::Notify::new()));
+        let e = Executions::default().with_decode_unresolved_expiry(EXPIRY);
+        let ledger = s.reserve_request("http://p", 4096, Some("rid-r"), 8192);
+        e.install_claimed_for_test("r", "secret", ["http://p", "http://d"], ledger);
+        for (leg, state) in [
+            (Leg::Prefill, LegState::Uploaded),
+            (Leg::Decode, LegState::Uploaded),
+            (Leg::Prefill, LegState::Cancelled),
+            (Leg::Decode, LegState::Cancelled),
+        ] {
+            e.event(&rid_ev(leg, state), "secret").unwrap();
+        }
+        e.age_for_test("r", 3600);
+        let base = Instant::now();
+        for at in (0..=3600).step_by(10) {
+            p_reply(&mut s, base, at, &[]);
+        }
+        let p = s.view("http://p");
+        let leaked = (
+            e.summary()["active"].as_u64().unwrap(),
+            e.legs_owed("http://p"),
+            p.active_prefill_reqs,
+            p.unknown_prefill_reqs,
+        );
+        assert_eq!(
+            leaked,
+            (0, 0, 0, 0),
+            "(active executions, legs owed by P, P reservations, unknown P reservations) one hour after the cancel"
+        );
     }
 }

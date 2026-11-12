@@ -595,19 +595,19 @@ impl SymmetricPdRuntime {
                 cfg.placement.p_select == PSelect::CoSchedule,
                 cfg.kv_session_retention,
                 cfg.kv_session_key_file.as_deref(),
-                // External role control: unknown P reservations (an aborted
-                // P-leg after a drain migrated its D-leg) leave the ledger on
-                // engine evidence, so the controller's transition guard and
-                // the loads do not count them for ever.
-                cfg.external_role_control
-                    .then(|| crate::backend::state::UnknownReconcile {
-                        empty_queue: crate::backend::state::UNKNOWN_RECONCILE_EMPTY_QUEUE,
-                        quiet: Some(Duration::from_secs(cfg.cost_function.as_ref().map_or(
-                            crate::config::types::default_symmetric_pd_unknown_expire_secs(),
-                            |c| c.unknown_expire_secs,
-                        )))
-                        .filter(|d| !d.is_zero()),
-                    }),
+                // Unknown P reservations (a P-leg that ended in a transport
+                // error, a cancel without terminal evidence, an aborted P-leg
+                // after a drain migrated its D-leg) leave the ledger on engine
+                // evidence, so the loads, the hold queue and the controller's
+                // transition guard do not count them for ever.
+                Some(crate::backend::state::UnknownReconcile {
+                    empty_queue: crate::backend::state::UNKNOWN_RECONCILE_EMPTY_QUEUE,
+                    quiet: Some(Duration::from_secs(cfg.cost_function.as_ref().map_or(
+                        crate::config::types::default_symmetric_pd_unknown_expire_secs(),
+                        |c| c.unknown_expire_secs,
+                    )))
+                    .filter(|d| !d.is_zero()),
+                }),
             ),
             cfg,
             model,

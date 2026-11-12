@@ -116,6 +116,10 @@ impl LedgerHandle {
     pub fn mark_unknown(&self) {
         self.entry.unknown.store(true, Ordering::Relaxed);
     }
+    /// Whether the reservation is unknown (see [`Self::mark_unknown`]).
+    pub fn is_unknown(&self) -> bool {
+        self.entry.unknown.load(Ordering::Relaxed)
+    }
     /// Remove a reservation from future load views after terminal evidence.
     ///
     /// # Inputs
@@ -137,8 +141,7 @@ impl LedgerHandle {
     }
 }
 
-/// Retirement of unknown P reservations from engine evidence (external role
-/// control). An unknown entry (transport error, a cancel or an abort without
+/// Retirement of unknown P reservations from engine evidence. An unknown entry (transport error, a cancel or an abort without
 /// terminal evidence) is retired when the progress replies of its worker have
 /// not listed its RID, in an unbroken run of applied, advancing,
 /// non-truncated replies, for `empty_queue` while the worker also reported an
@@ -155,6 +158,17 @@ pub struct UnknownReconcile {
 
 /// Default empty-queue absence before an unknown P reservation is retired.
 pub const UNKNOWN_RECONCILE_EMPTY_QUEUE: Duration = Duration::from_secs(10);
+
+impl Default for UnknownReconcile {
+    fn default() -> Self {
+        Self {
+            empty_queue: UNKNOWN_RECONCILE_EMPTY_QUEUE,
+            quiet: Some(Duration::from_secs(
+                crate::config::types::default_symmetric_pd_unknown_expire_secs(),
+            )),
+        }
+    }
+}
 
 /// One D-leg this router dispatched to a worker and that has not finished: the
 /// decode counterpart of the SGLang Model Gateway's per-worker load (incremented
@@ -379,8 +393,8 @@ pub struct BackendState {
     workers: HashMap<String, WorkerLoadState>,
     changed: Arc<Notify>,
     per_request: bool,
-    /// Retire unknown P reservations from engine progress (external role
-    /// control); `None` keeps every unknown entry until terminal evidence.
+    /// Retire unknown P reservations from engine progress; `None` keeps
+    /// every unknown entry until terminal evidence.
     unknown_reconcile: Option<UnknownReconcile>,
 }
 impl BackendState {
@@ -397,11 +411,12 @@ impl BackendState {
             workers: HashMap::new(),
             changed,
             per_request: false,
-            unknown_reconcile: None,
+            unknown_reconcile: Some(UnknownReconcile::default()),
         }
     }
 
-    /// Turn on the unknown reconciliation (see [`UnknownReconcile`]). Its
+    /// Set the unknown reconciliation (see [`UnknownReconcile`]; on by
+    /// default). Its
     /// evidence is the `prefill_work` section of the load polls, which the
     /// refresh task then requests (backend `new`).
     pub fn set_unknown_reconcile(&mut self, rc: Option<UnknownReconcile>) {
@@ -1138,6 +1153,7 @@ mod tests {
         assert_eq!(s.view("p").active_prefill_reqs, 2);
 
         let mut off = BackendState::new(Arc::new(Notify::new()));
+        off.set_unknown_reconcile(None);
         let base = Instant::now();
         let h = unknown_on_p(&mut off, "aborted");
         for at in (0..=300).step_by(10) {
@@ -1172,5 +1188,50 @@ mod tests {
             );
         }
         assert!(!h.is_retired());
+    }
+
+    /// An unknown reservation whose handle is gone (a P-leg task that ended
+    /// in a transport error) leaves the ledger once an idle engine has kept
+    /// reporting without listing it; no setting is needed.
+    #[test]
+    fn ownerless_unknown_reservation_is_retired_by_default() {
+        let mut s = state();
+        {
+            let handle = s.reserve_request("p", 5000, Some("rid"), 8000);
+            handle.mark_dispatched();
+            handle.mark_unknown();
+        } // the P-leg task ended: no handle is left
+        let base = Instant::now();
+        for (i, at) in (0..=3600u64).step_by(10).enumerate() {
+            // An idle engine: fresh snapshots, empty queue, no work listed.
+            s.apply_sample(
+                "p",
+                EngineLoadSample {
+                    observation: LoadObservation {
+                        uncached_tokens: Some(0),
+                        running: Some(0),
+                        waiting: Some(0),
+                    },
+                    timestamp: Some(100.0 + at as f64),
+                    prefill_work: Some(PrefillProgress {
+                        epoch: "e".into(),
+                        sequence: i as u64 + 1,
+                        remaining: Default::default(),
+                        truncated: false,
+                    }),
+                },
+                base + Duration::from_secs(at),
+            );
+        }
+        let view = s.view("p");
+        assert_eq!(
+            (
+                view.active_prefill_reqs,
+                view.unknown_prefill_reqs,
+                s.loads(["p"]).get("p").backlog_uncached_tokens
+            ),
+            (0, 0, 0),
+            "(P reservations, unknown P reservations, backlog tokens) after one hour of idle engine reports"
+        );
     }
 }

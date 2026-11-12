@@ -18,7 +18,12 @@ use std::{
 };
 use tokio::sync::Notify;
 
+/// Sessions the registry holds at once: live branches, and ended ones kept
+/// so that a late request of an ended branch is refused. At this size the
+/// ended branches every engine has acknowledged leave, oldest scan first.
 const MAX_SESSIONS: usize = 100_000;
+/// At capacity, the registry is scanned for finished sessions at most this often.
+const FINISHED_SCAN_PERIOD: Duration = Duration::from_secs(1);
 const MAX_WORKERS_PER_SESSION: usize = 128;
 const BATCH: usize = 128;
 
@@ -66,8 +71,28 @@ struct State {
     /// stays closed until the role registry finishes the corresponding drain.
     clearing: HashMap<String, HashMap<String, u64>>,
     clear_turn: bool,
+    /// The last scan for finished sessions at capacity.
+    finished_scan: Option<Instant>,
 }
 impl State {
+    /// At capacity: drop the ended sessions that no engine references any
+    /// more (every END acknowledged, nothing queued). Their identities were
+    /// refused as ended; after this a request with one of them would start a
+    /// new session, which the protocol forbids the client to send.
+    fn drop_finished(&mut self) {
+        if self
+            .finished_scan
+            .is_some_and(|at| at.elapsed() < FINISHED_SCAN_PERIOD)
+        {
+            return;
+        }
+        self.finished_scan = Some(Instant::now());
+        let queued = &self.queued;
+        self.sessions.retain(|sid, s| {
+            !(s.ended && s.workers.is_empty() && s.maybe.is_empty() && !queued.contains(sid))
+        });
+    }
+
     /// Input: owned session key. Output: at most one queued reconciliation entry.
     fn enqueue(&mut self, sid: &str) {
         if self.queued.insert(sid.to_owned()) {
@@ -337,8 +362,11 @@ impl KvSessions {
             );
         }
         if !state.sessions.contains_key(&sid) && state.sessions.len() >= MAX_SESSIONS {
+            state.drop_finished();
+        }
+        if !state.sessions.contains_key(&sid) && state.sessions.len() >= MAX_SESSIONS {
             return Err(
-                "KV session registry at lifetime capacity; drain and coordinate engine restart with a fresh controller namespace".into(),
+                "KV session registry at capacity: 100,000 branches are live or have an END no engine has acknowledged".into(),
             );
         }
         let s = state
@@ -1977,5 +2005,140 @@ mod tests {
         owner.apply("p", &sent, clear_reply(&sent, "pboot", "stale"));
         owner.requeue(&sent);
         assert!(protects(&owner.batches(), "p").is_empty());
+    }
+
+    // ---------------------------------------------------------------- REPRO
+    fn agent(i: usize) -> RequestIdentity {
+        RequestIdentity {
+            agent_id: format!("agent-{i}"),
+            subagent_id: 0,
+            request_id: 0,
+        }
+    }
+    /// Answer every pending control as a healthy engine does (`status` of an
+    /// unknown boot first, then `end` -> `ended`, `release` -> `released`,
+    /// `status` -> `ready`), except for `dead`, which never answers.
+    fn run_engines(owner: &KvSessions, dead: Option<&str>) -> usize {
+        let mut cycles = 0;
+        loop {
+            if owner.state.lock().queue.is_empty() {
+                return cycles;
+            }
+            let batches = owner.batches();
+            cycles += 1;
+            let mut progressed = batches.is_empty();
+            for (worker, controls) in batches {
+                if dead != Some(worker.as_str()) {
+                    let reply = Reply {
+                        boot_id: format!("boot-{worker}"),
+                        results: controls
+                            .iter()
+                            .map(|c| Outcome {
+                                session_id: c.session_id.clone(),
+                                version: c.version,
+                                status: match c.op {
+                                    "end" => "ended",
+                                    "release" => "released",
+                                    "protect" => "protected",
+                                    _ => "ready",
+                                }
+                                .into(),
+                                ready_tokens: 32,
+                                required_tokens: 32,
+                            })
+                            .collect(),
+                    };
+                    owner.apply(&worker, &controls, reply);
+                    progressed = true;
+                }
+                owner.requeue(&controls);
+            }
+            if !progressed || cycles > 100_000 {
+                return cycles;
+            }
+        }
+    }
+
+    /// Every agent branch is ended with `POST /kv_sessions/end` and both
+    /// engines acknowledge every END: the 100,001st branch is admitted, and a
+    /// registry full of live branches still refuses a new one.
+    #[test]
+    fn ended_and_acknowledged_sessions_leave_a_full_registry() {
+        let owner = KvSessions::new("controller".into());
+        for i in 0..MAX_SESSIONS {
+            owner.register(&agent(i), "p", "d").unwrap();
+            owner.end(&agent(i)).unwrap();
+        }
+        run_engines(&owner, None);
+        {
+            let state = owner.state.lock();
+            assert!(state.queue.is_empty());
+            assert!(
+                state
+                    .sessions
+                    .values()
+                    .all(|s| s.ended && s.workers.is_empty()),
+                "every END was acknowledged by every engine"
+            );
+        }
+        assert_eq!(
+            owner
+                .register(&agent(MAX_SESSIONS), "p", "d")
+                .map(|t| t.version),
+            Ok(1),
+            "a new agent branch after 100,000 ended ones"
+        );
+        assert_eq!(owner.state.lock().sessions.len(), 1);
+
+        let live = KvSessions::new("controller".into());
+        for i in 0..MAX_SESSIONS {
+            live.register(&agent(i), "p", "d").unwrap();
+        }
+        assert!(live
+            .register(&agent(MAX_SESSIONS), "p", "d")
+            .unwrap_err()
+            .contains("at capacity"));
+        assert_eq!(live.state.lock().sessions.len(), MAX_SESSIONS);
+    }
+
+    /// MEASURE. Control cycles a decode->prefill clear needs when N live
+    /// sessions recorded the worker and every engine answers at once.
+    #[test]
+    fn measure_worker_clear_cycles() {
+        for n in [1_000usize, 10_000] {
+            let owner = KvSessions::new("controller".into());
+            for i in 0..n {
+                owner.register(&agent(i), "p", "d").unwrap();
+            }
+            owner.begin_worker_clear("d");
+            let mut cycles = 0;
+            while !owner.finish_worker_clear("d") {
+                cycles += 1;
+                for (worker, controls) in owner.batches() {
+                    let reply = Reply {
+                        boot_id: format!("boot-{worker}"),
+                        results: controls
+                            .iter()
+                            .map(|c| Outcome {
+                                session_id: c.session_id.clone(),
+                                version: c.version,
+                                status: if c.op == "release" {
+                                    "released"
+                                } else {
+                                    "ready"
+                                }
+                                .into(),
+                                ready_tokens: 32,
+                                required_tokens: 32,
+                            })
+                            .collect(),
+                    };
+                    owner.apply(&worker, &controls, reply);
+                    owner.requeue(&controls);
+                }
+                assert!(cycles < 1_000_000);
+            }
+            println!("MEASURE sessions={n} clear_cycles={cycles}");
+        }
     }
 }

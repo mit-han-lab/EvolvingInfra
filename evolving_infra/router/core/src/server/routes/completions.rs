@@ -1060,15 +1060,14 @@ pub(crate) fn extract_session(v: Option<&serde_json::Value>) -> (Option<String>,
 /// PD forwarding preserves this RID on both sides. Ordinary clients need not
 /// supply an engine RID; strict replay keeps its original correlation ID.
 /// The uncached cost ledger (`--symmetric-pd-p-select cost-function`) keys
-/// engine progress by it.
+/// engine progress by it, and under `--policy symmetric_pd` the Backend ledger
+/// needs it to retire the reservation of a P-leg that ended without terminal
+/// evidence.
 pub(crate) fn ensure_progress_rid(
     ctx: &AppContext,
     value: Option<&mut serde_json::Value>,
 ) -> Result<(), ApiError> {
-    let uncached_ledger = ctx
-        .symmetric_pd
-        .as_ref()
-        .is_some_and(|f| f.cost_function_enabled());
+    let uncached_ledger = ctx.symmetric_pd.is_some();
     if !uncached_ledger {
         return Ok(());
     }
