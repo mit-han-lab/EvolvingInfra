@@ -258,7 +258,12 @@ impl AppContext {
                 }
                 None => crate::backend::execution::Executions::default(),
             }
-            .with_decode_unresolved_expiry(decode_unresolved_expiry),
+            .with_decode_unresolved_expiry(decode_unresolved_expiry)
+            .with_silent_expiry(
+                prepared_config
+                    .as_ref()
+                    .and_then(crate::backend::execution::PreparedConfig::silent_expiry),
+            ),
         );
         let decode_tokens = DecodeTokenBalancer::for_policy(
             config.model.pd_decode_policy,

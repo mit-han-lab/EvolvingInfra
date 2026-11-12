@@ -129,6 +129,12 @@ Router (`EVOLVING_INFRA_PREPARED_CONFIG`):
  "contracts": {"dsv4": {"page_size": 256, "is_eagle": false, "model_path": "/models/dsv4", "cache_namespace": null}}}
 ```
 
+| Key | Description |
+|---|---|
+| `max_inflight` | Prepared executions the router holds at once; a plan beyond it is refused. |
+| `decode_unresolved_expire_secs` | A decode leg reported failed or cancelled without the engine's confirmation ends after this long without a callback (default 300; 0 = never). |
+| `silent_expire_secs` | A claimed execution without any callback for this long is treated as abandoned by its frontend: its decode leg ends, and its prefill reservation leaves once the prefill worker no longer lists the request (default 7500; 0 = never). Keep it above the frontend's `request_timeout_seconds`. |
+
 Frontend (`python -m evolving_infra.router.frontend --config FILE`):
 
 | Key | Description |
