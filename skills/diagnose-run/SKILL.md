@@ -54,7 +54,6 @@ print `ready`.
 
 | Message | Cause | Fix |
 |---|---|---|
-| `dynamic role switching with KV session retention requires /symmetric_pd/prepared lifecycle callbacks` | a plain OpenAI request while the planner is on | send through the prepared path (the replay does), or serve without `--planner` |
 | replay: `The api_key client option must be set` | the client needs any key | `api_key=EMPTY` |
 | `score.py`: `no lifecycle events` | the replay never ran | read `bench.log` |
 

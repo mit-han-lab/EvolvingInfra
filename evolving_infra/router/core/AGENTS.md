@@ -19,9 +19,12 @@ The Rust router (`sgl-router`). [`README.md`](README.md) has the build;
   over when late decode choice is on (`Ingress::Chat`). A native `/generate` request gets its D
   at arrival (`Ingress::late_d_choose`). The engines answer a released candidate with HTTP 409
   on both routes (`late_d_error_response` in the engine's `serving_base.py`).
-- **Role control with KV session retention needs the prepared path.** With
-  `--symmetric-pd-external-role-control` and retention on, a plain `/v1/completions` request is
-  refused: the router needs the frontend's lifecycle callbacks to count work per session.
+- **Role control waits for the legs the router can see end.** With
+  `--symmetric-pd-external-role-control`, a decode->prefill drain waits for prepared legs
+  (lifecycle callbacks) and for the D-legs of requests the router proxies itself
+  (`scheduler/role_drain.rs`); the plain routes are served and counted in the controller's
+  workload (`backend/plain_usage.rs`). With retention on, `/symmetric_pd/place` is refused: the
+  router does not see the end of a request an external ingress runs.
 - **Placement constants** are named in `src/scheduler/co_schedule.rs`
   (`DEFAULT_TRADE_COPY_LAMBDA`); [`docs/paper.md`](../../../docs/paper.md) points at them. Change
   the doc with the constant.

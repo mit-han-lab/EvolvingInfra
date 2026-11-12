@@ -37,6 +37,16 @@ pub fn spawn(
     }
 }
 
+/// Legs `worker` still owes: those of prepared plans, and the D-legs of
+/// requests the router proxies itself (the plain routes), which it counts in
+/// the backend ledger from the placement until the leg's reply ends. A plain
+/// D-leg cannot be migrated, so with retention the drain waits for it to end.
+fn legs_owed(flex: &SymmetricPdRuntime, executions: &Executions, worker: &str) -> usize {
+    executions
+        .legs_owed(worker)
+        .max(flex.decode_legs_in_flight(worker))
+}
+
 /// Drain `worker` toward prefill for the assignment `revision`.
 ///
 /// # Inputs
@@ -56,13 +66,13 @@ pub async fn drain_to_prefill(
     timeout: Duration,
 ) {
     let started = Instant::now();
-    let mut owed = executions.legs_owed(&worker);
+    let mut owed = legs_owed(&flex, &executions, &worker);
     while owed > 0 && started.elapsed() < timeout {
         if !flex.is_role_draining(&worker, revision) {
             return;
         }
         tokio::time::sleep(POLL).await;
-        owed = executions.legs_owed(&worker);
+        owed = legs_owed(&flex, &executions, &worker);
     }
     if !flex.is_role_draining(&worker, revision) {
         return;
@@ -79,7 +89,7 @@ pub async fn drain_to_prefill(
         if !flex.is_role_draining(&worker, revision) {
             return;
         }
-        owed = executions.legs_owed(&worker);
+        owed = legs_owed(&flex, &executions, &worker);
         if (flex.kv_sessions().is_none() || owed == 0) && flex.finish_role_drain(&worker, revision)
         {
             break true;
@@ -249,6 +259,28 @@ mod tests {
             Ok(false),
             "nothing migrated"
         );
+    }
+
+    /// A D-leg the router proxies itself (a plain request) is owed like a
+    /// planned one. It cannot be migrated: without retention the drain ends
+    /// at its deadline as before; with retention it waits for the leg to end.
+    #[tokio::test(start_paused = true)]
+    async fn a_proxied_decode_leg_holds_the_drain_with_retention() {
+        for retention in [false, true] {
+            let flex = runtime_with_retention(retention);
+            let executions = Arc::new(Executions::default());
+            let leg = flex.reserve_decode("http://d");
+            let revision = assign_d(&flex, RoleAssignment::Prefill);
+            let task = drain(&flex, &executions, revision);
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            assert_eq!(weight(&flex, "http://d"), RoleWeight::DRAINING);
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            assert_eq!(task.is_finished(), !retention, "retention={retention}");
+            drop(leg);
+            task.await.unwrap();
+            assert_eq!(weight(&flex, "http://d"), RoleWeight::PREFILL_LEANING);
+            assert!(flex.role_drains().is_empty());
+        }
     }
 
     #[tokio::test(start_paused = true)]
