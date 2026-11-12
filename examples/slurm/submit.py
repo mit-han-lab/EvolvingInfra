@@ -4,8 +4,9 @@
     python examples/slurm/submit.py --config examples/gb300/glm52.yaml --benchmark claude-code \\
         --account A --partition P --image IMG
 
-The config is any `evolving-infra serve` config with a `benchmarks` section; `slurm` holds site
-settings. A benchmark's `router_args`, `engine_args` and `planner` are added to the served config.
+The config is any `evolving-infra serve` config with a `benchmarks` section, after resolving
+`base:`; `slurm` holds site settings. A benchmark's `router_args`, `engine_args` and `planner` are
+added to the served config.
 
 Results go to <output-dir>/<job id>/: score.json, the replay's results and every service's logs.
 The job script runs `evolving-infra serve` on every node, so the cluster only needs Slurm with Pyxis.
@@ -17,6 +18,9 @@ import subprocess
 import sys
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from evolving_infra.launch.__main__ import load  # noqa: E402  (resolves `base:`)
 
 SCRIPT = """#!/bin/bash
 #SBATCH -N {nodes} --ntasks-per-node=1 --exclusive -t {time} -J evolving-infra {account}{partition}{extra}
@@ -68,16 +72,25 @@ status=0; for job in $(jobs -p); do wait $job || status=1; done; [ $status = 0 ]
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", default=str(Path(__file__).resolve().parents[1] / "gb300/glm52.yaml"))
-    for key in ("account", "partition", "image", "mounts", "time", "extra-args"):
+    for key in ("account", "partition", "image", "mounts", "time"):
         parser.add_argument(f"--{key}")
+    parser.add_argument("--extra-args", help='more sbatch options, e.g. --extra-args "--gpus-per-node=4"')
     parser.add_argument("--nodes", type=int)
     parser.add_argument("--benchmark", help="a name under `benchmarks` in the config (default: the first)")
     parser.add_argument("--output-dir", default="runs")
     parser.add_argument("--dry-run", action="store_true", help="print the job script instead of submitting it")
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv[:-1]):  # sbatch options start with "-": "--extra-args --gpus-per-node=4"
+        if arg == "--extra-args":
+            argv[i:i + 2] = [f"--extra-args={argv[i + 1]}"]
+            break
+    args = parser.parse_args(argv)
 
-    cfg = yaml.safe_load(Path(args.config).read_text())
-    benchmarks = cfg.pop("benchmarks")
+    cfg = load(Path(args.config))
+    benchmarks = cfg.pop("benchmarks", None)
+    if not benchmarks:
+        sys.exit(f"{args.config} defines no benchmark under `benchmarks`; "
+                 "use a config that does, such as examples/gb300/glm52.yaml")
     name = args.benchmark or next(iter(benchmarks))
     if name not in benchmarks:
         sys.exit(f"benchmark {name!r} is not in the config; it has {', '.join(benchmarks)}")
