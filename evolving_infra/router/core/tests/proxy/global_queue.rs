@@ -317,6 +317,10 @@ async fn trade_gwq_holds_the_p_leg_and_releases_it_when_the_p_launches_its_work(
     assert_ne!(decode_rid, Some(json!("small")), "no D leg while held");
 
     // 3. `busy` launches: the next poll releases `small`.
+    let launched_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as f64;
     p.launched.store(true, Ordering::SeqCst);
     tokio::time::timeout(Duration::from_secs(5), small)
         .await
@@ -345,7 +349,11 @@ async fn trade_gwq_holds_the_p_leg_and_releases_it_when_the_p_launches_its_work(
     assert_eq!(g["depth_tokens"], 1000);
     assert_eq!(g["queued_tokens"], "0");
     assert_eq!(g["launched_tokens"], "6000");
-    assert!(g["hold_s"].as_f64().unwrap() >= 0.2, "{g}");
+    // Held from its arrival in the router until at least the launch (1 ms
+    // for the millisecond truncation of both clocks).
+    let held_until_launch_s =
+        (launched_unix_ms - g["arrived_unix_ms"].as_f64().unwrap() - 1.0) / 1000.0;
+    assert!(g["hold_s"].as_f64().unwrap() >= held_until_launch_s, "{g}");
     assert_eq!(r["trade_decision"]["chosen"], p.url.as_str());
     wait_until("a gwq_stats event", || {
         read_events().iter().any(|e| e["event"] == "gwq_stats")
