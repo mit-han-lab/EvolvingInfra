@@ -90,6 +90,9 @@ def _same(a: str, b: str) -> bool:
 
 def resolve(argv: list, environ: dict) -> tuple:
     """(trie arguments, EVOLVING_INFRA_REPLAY settings, record of what was resolved)."""
+    bare = [a for a in argv if "=" not in a]
+    if bare:
+        raise SystemExit(f"arguments are key=value, got {' '.join(bare)}; --help prints the usage")
     given = dict(a.split("=", 1) for a in argv)
     preset = given.get("preset", "paper")
     if preset not in ("paper", "none"):
@@ -158,6 +161,9 @@ def install_routing_key(client_type) -> None:
 
 
 def main() -> int:
+    if {"-h", "--help"} & set(sys.argv[1:]):
+        print(__doc__)
+        return 0
     arguments, settings, record = resolve(sys.argv[1:], os.environ)
     if record["preset"] == "paper":
         for key, value in PAPER_ENV.items():
