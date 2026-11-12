@@ -118,9 +118,16 @@ def test_kimi_config_passes_its_tokenizer_environment_and_image_layout(stack, tm
     assert s.cfg["engine_env"]["SGLANG_PREFILL_STATE_PUSH_PORT"] == 26648
     assert s.cfg["frontend"]["image_config"]["layout_type"] == "kimi_k25"
     args = s.cfg["router_args"]
-    assert "--trade-wait=e3" in args
-    files = [a.split("=", 1)[1] for a in args if "e3/" in a]
-    assert len(files) == 2 and all(f.startswith("/") and Path(f).is_file() for f in files), "full paths"
+    assert "--forecast-push-port=26648" in args
+    assert not any(a.startswith("--prefill-wait") for a in args), "the forecast wait is the default"
+    files = [a.split("=", 1)[1] for a in args if "forecast/" in a]
+    assert len(files) == 1 and all(f.startswith("/") and Path(f).is_file() for f in files), "full paths"
+
+
+def test_paper_configs_pin_the_token_wait_without_the_global_queue():
+    for path in ("examples/gb300/glm52.yaml", "examples/gb300/glm52-1node.yaml", "examples/h200/dsv4-flash.yaml"):
+        args = config(parse(["serve", "--config", path]))["router_args"]
+        assert "--prefill-wait=tokens" in args and "--global-queue=false" in args, path
 
 
 def test_a_config_keeps_the_router_flags_and_env_of_its_base(tmp_path):

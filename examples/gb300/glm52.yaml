@@ -33,6 +33,9 @@ engine_args:
   - --watchdog-timeout=3600
   - '--model-loader-extra-config={"enable_multithread_load": true, "num_threads": 16}'
   - --weight-loader-drop-cache-after-load
+router_args:                   # paper reproduction: the paper's runs used the token-count wait and no global queue
+  - --prefill-wait=tokens
+  - --global-queue=false
 planner:
   prefill_shape_prior: glm52-gb300-tp4
   cold_start_max_wait_secs: 1    # learn from the start of the replay, as the paper's runs did

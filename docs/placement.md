@@ -25,29 +25,64 @@ them.
 
 Only workers with a prefill weight above 0 are candidates.
 
-**`cache-first`** (default). Take the worker with the longest cached prefix, unless the
-workers' active prefill counts are badly imbalanced, in which case take the least-loaded one.
-Below a hit ratio of `--symmetric-pd-cache-threshold` (0.5), take the least-loaded worker.
+**`cache-first`** (the default without a KV directory). Take the worker with the longest
+cached prefix, unless the workers' active prefill counts are badly imbalanced, in which case take
+the least-loaded one. Below a hit ratio of `--symmetric-pd-cache-threshold` (0.5), take the
+least-loaded worker.
 
-**`cost-function`** (benchmarks). Estimate, in tokens of prefill work, when the request would
-finish on each candidate and take the lowest:
+**`cost-function`** (the default with a KV directory and servicers). The placement cost
+function estimates, in tokens of prefill work, when the request would finish on each candidate
+and takes the lowest:
 
 ```text
-cost(P) = backlog(P) + uncached(P) + R · max(0, pull_time − backlog(P) / R) + λ · pulled(P)
+cost(P) = backlog(P) + uncached(P) + R · max(0, fetch_time − backlog(P) / R) + λ · fetched(P)
 ```
 
-- `backlog(P)`: prefill work already routed to P and not finished, tracked by the router from
-  its own reservations and each P's progress reports (`--enable-prefill-work-snapshot`).
-- `uncached(P)`: what P still has to compute for this request after any pull.
-- `pulled(P)`: tokens P would pull from a peer, the best holder's prefix minus P's own. Below
-  `--kv-pull-hint-min-incremental-tokens` there is no pull.
-- The pull time is charged only where P's queue does not hide it. `R` converts seconds to tokens
+- `backlog(P)`: prefill work already routed to P and not finished. With `--prefill-wait tokens`
+  the router counts it from its own reservations and each P's progress reports
+  (`--enable-prefill-work-snapshot`). With `--prefill-wait forecast` (the default) it is `R`
+  times the P's forecast wait (below).
+- `uncached(P)`: what P still has to compute for this request after any fetch.
+- `fetched(P)`: tokens P would fetch from a peer, the best holder's prefix minus P's own. Below
+  `--kv-pull-hint-min-incremental-tokens` there is no fetch.
+- The fetch time (`--fetch-fixed-ms`, `--fetch-ms-per-100k-tokens`) is charged only where P's
+  queue does not hide it. `R` (`--prefill-rate-tokens-per-s`) converts seconds to tokens
   (default 13,500 tokens/s).
-- `λ` (`--trade-copy-lambda`) prices the second copy the pull leaves in P's host
-  memory, which takes space other prefixes could use.
+- `λ` (`--copy-price`) prices the second copy the fetch leaves in P's host memory, which takes
+  space other prefixes could use.
 
-Ties go to the worker with the longest own prefix. The router writes every decision, with each
-candidate's terms, to the `--trade-cost-trace` file.
+Ties go to the worker with the longest own prefix. With `--placement-trace FILE` the router writes
+every decision, with each candidate's terms, to a JSONL file (schema `placement-trace.v1`).
+
+**Prefill completion forecast** (`--prefill-wait forecast`). The router runs a step-time model
+of each P's scheduler on the state the engine reports (its waiting queue, the running pass and
+recent pass timings) and predicts when the request would start and finish there. Prefill time
+is then not assumed proportional to tokens, which matters for image inputs. A request leaves the
+worker that holds its cache only when the predicted gain exceeds `--move-margin` times the
+forecast's error bound, taken from an error table (built in; `--forecast-error-table` replaces
+it). A P without a usable forecast (no report yet, a report older than `--max-state-age-ms`, an
+engine chunk or page size the table was not fitted for) keeps the token count and never takes a
+request away from the worker that holds its cache.
+
+**Global queue** (`--global-queue`). A request whose cache hit binds it to one P (its best hit
+exceeds the second best by at least one engine chunk) is placed at arrival. Other requests wait
+in one router queue, in HRRN order, until their cheapest P is about to have room: its queued
+work divided by `R` is within one chunk plus the measured time from a release to the engine's
+first report of the request. With `--global-queue-room forecast` a P also has room while its
+forecast drain time is within that lead. A request is held at most 300 s.
+
+The `--symmetric-pd-preset paper` default turns on the forecast and the global queue with the
+cost function. The paper's runs used `--prefill-wait tokens --global-queue=false`; the GLM-5.2 and
+DeepSeek-V4-Flash example configs pin these settings.
+
+### Names in the code
+
+| Term here | Code | Earlier name |
+|---|---|---|
+| Placement cost function | `scheduler/placement_cost.rs`, `PlacementCostParams` | trade |
+| Prefill completion forecast | `forecast/`, `prefill_forecast.rs` | e3 |
+| Global queue | `global_queue.rs`, `scheduler/cost_function/queue.rs` | gwq |
+| Token-count wait (`--prefill-wait tokens`) | `PrefillWait::Tokens`, `prefill_work.rs` (`PrefillWorkBook`) | ledger |
 
 ## Peer pulls
 

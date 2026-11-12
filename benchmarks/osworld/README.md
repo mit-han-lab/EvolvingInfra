@@ -16,10 +16,11 @@ Events carry the prompt token ids of Kimi-K2.6 and the screenshots of the step
 ## Reproduce the paper
 
 Nine GB300 nodes, Kimi-K2.6 (NVFP4, EAGLE3 with a draft model), starting as 6P3D, planning
-window 300 s, router wait model `e3` with the copy price and the prefill rate measured while
-serving. [`examples/gb300/kimi-k26.yaml`](../../examples/gb300/kimi-k26.yaml) holds all of
-it: the engine flags, the image layout for the frontend, and the router's `e3` flags with
-their two parameter files in [`examples/gb300/e3/`](../../examples/gb300/e3). The replay uses
+window 300 s, the router's prefill completion forecast and global queue (the router defaults)
+with the copy price and the prefill rate measured while serving.
+[`examples/gb300/kimi-k26.yaml`](../../examples/gb300/kimi-k26.yaml) holds all of it: the engine
+flags, the image layout for the frontend, and the router's flags with the forecast fit in
+[`examples/gb300/forecast/`](../../examples/gb300/forecast). The replay uses
 16 client processes, each on one shard at 1/16 of the concurrency (128, 144 or 160 agents in
 total). As one Slurm job, at 128 agents:
 
