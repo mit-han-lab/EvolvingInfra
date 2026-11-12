@@ -60,9 +60,12 @@ recent pass timings) and predicts when the request would start and finish there.
 is then not assumed proportional to tokens, which matters for image inputs. A request leaves the
 worker that holds its cache only when the predicted gain exceeds `--move-margin` times the
 forecast's error bound, taken from an error table (built in; `--forecast-error-table` replaces
-it). A P without a usable forecast (no report yet, a report older than `--max-state-age-ms`, an
-engine chunk or page size the table was not fitted for) keeps the token count and never takes a
-request away from the worker that holds its cache.
+it). The built-in table covers engines with 8192-token chunks and 64-token pages. A P that cannot
+have a forecast (another chunk or page size, no routing snapshot) is placed exactly as under
+`--prefill-wait tokens`, and the router logs a warning naming the reason; with no forecast on
+any P the decision is the token-count decision. A P with a transient gap (a report older than
+`--max-state-age-ms`, no fit yet) keeps the token count and does not take a request away from
+the worker that holds its cache while other P have forecasts.
 
 **Global queue** (`--global-queue`). A request whose cache hit binds it to one P (its best hit
 exceeds the second best by at least one engine chunk) is placed at arrival. Other requests wait

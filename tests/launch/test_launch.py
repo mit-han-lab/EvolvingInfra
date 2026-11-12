@@ -125,7 +125,8 @@ def test_kimi_config_passes_its_tokenizer_environment_and_image_layout(stack, tm
 
 
 def test_paper_configs_pin_the_token_wait_without_the_global_queue():
-    for path in ("examples/gb300/glm52.yaml", "examples/gb300/glm52-1node.yaml", "examples/h200/dsv4-flash.yaml"):
+    for path in ("examples/gb300/glm52.yaml", "examples/gb300/glm52-1node.yaml", "examples/h200/dsv4-flash.yaml",
+                 "examples/agents/dsv4-flash.yaml", "examples/agents/glm52-1node.yaml"):
         args = config(parse(["serve", "--config", path]))["router_args"]
         assert "--prefill-wait=tokens" in args and "--global-queue=false" in args, path
 

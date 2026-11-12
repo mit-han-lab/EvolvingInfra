@@ -10,10 +10,12 @@ Read [`README.md`](README.md) first. Rules for running and changing this workloa
   `examples/gb300/kimi-k26.yaml` runs them.
 - **The router needs `tokenizer.json`**, which the model does not ship: export it with
   `scripts/export_tokenizer.py` before the first start. Without it the router does not start.
-- **The `e3` wait model needs its engine side**: `engine_env` in the config makes every
-  prefill worker push its state to the router's port. Change the port in both places.
+- **The forecast state push needs its engine side**: `engine_env` in the config makes every
+  prefill worker push its state to the router's `--forecast-push-port`. Change the port in both
+  places.
 - **Its settings differ from the other two workloads**: planning window 300 s, router wait
-  model `e3`. With the Claude Code settings the planner decides half as often.
+  `--prefill-wait forecast` with the global queue. With the Claude Code settings the planner
+  decides half as often.
 - **Throughput is flat across concurrency** (4.25 to 4.35 requests/s from 128 to 160 agents):
   the system is saturated on prefill and the planner goes to 8P1D. Read a change in time to
   first token, not only in requests/s.

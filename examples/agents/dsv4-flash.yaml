@@ -27,3 +27,6 @@ engine_env:
   SGLANG_HICACHE_HOST_REGISTER_CHUNK_GB: 16
 router_args:
   - --chat-tools-tokenize        # place requests with tools on the engine's token ids
+  # paper reproduction, as h200/dsv4-flash.yaml: the token-count wait and no global queue (page 256 is outside the forecast error table)
+  - --prefill-wait=tokens
+  - --global-queue=false

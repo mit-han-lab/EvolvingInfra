@@ -1,4 +1,4 @@
-"""Retokenize the exact Kimi CUA trace for DeepSeek-V4 Vision replay.
+"""Retokenize the exact Kimi-K2.6 OSWorld trace for DeepSeek-V4 Vision replay.
 
 Keep every request, wait and context replacement. Prompts carry one image
 placeholder per screenshot; the replay client loads the referenced PNG files

@@ -12,9 +12,9 @@ Every run uses nine GB300 nodes with four GPUs each, on one RDMA network:
   preset ([Configuration](../../docs/configuration.md)): host KV tier 4.445× the GPU cache with
   host dedup, peer KV pulls, late decode choice and KV session retention. Models are quantized
   to NVFP4 with an FP8 KV cache and decode speculatively (EAGLE).
-- **Router.** `--policy symmetric_pd` with the `paper` preset: prefill placement by the TRADE
+- **Router.** `--policy symmetric_pd` with the `paper` preset: prefill placement by the placement
   cost function with peer pulls, round-robin decode, late decode choice (`fit_req`), and role
-  changes from the planner.
+  changes from the planner. The wait and the global queue per workload are in the table below.
 - **Planner.** The nine workers start as 6P3D. The planner learns its iteration-time models
   during the first 1800 s, cold start included (`cold_start_max_wait_secs: 1` in the planner
   arguments; by default it first waits for the cache to warm up), then decides at the end of
