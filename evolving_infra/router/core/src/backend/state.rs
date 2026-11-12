@@ -76,6 +76,10 @@ pub struct LedgerHandle {
     changed: Arc<Notify>,
 }
 impl LedgerHandle {
+    /// The uncached tokens this reservation counted at placement.
+    pub fn tokens(&self) -> u64 {
+        self.entry.tokens
+    }
     /// Record the first time this reservation was submitted to an engine.
     ///
     /// # Inputs

@@ -61,8 +61,13 @@ A rejected or failed update is logged and not retried.
      sgl-router ... --symmetric-pd-external-role-control --symmetric-pd-role-drain-timeout-secs 30
    ```
 
-   Role control needs the prepared path: the router counts completed work from the frontend's
-   reports.
+   The router counts completed work for the planner on both paths: on the prepared path from
+   the frontend's reports, and for `/v1/chat/completions` and `/v1/completions` requests it
+   proxies itself from the engines' replies (prompt and cached tokens from the prefill leg,
+   output tokens and verify steps from the decode leg). For that it asks the engines for usage
+   on every such request and removes from the client's stream the usage chunks the client did
+   not ask for. A native `/generate` request is not counted. With KV session retention on, the
+   plain routes are refused under role control, so only the prepared path is counted there.
 
 4. Start the planner with its [arguments](#configuration):
 
