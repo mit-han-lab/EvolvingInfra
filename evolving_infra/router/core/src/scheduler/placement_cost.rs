@@ -510,6 +510,12 @@ pub struct CostInput<'a> {
     /// level. None: no usable forecast (the P then has the token-count terms in
     /// `wait = None`) or another wait source.
     pub bound_s: Option<f64>,
+    /// The forecast wait: this P cannot have a forecast at all (no
+    /// snapshot, or an engine policy that the error table does not cover),
+    /// as opposed to a transient gap such as one stale view. Such a P is
+    /// placed as under `--prefill-wait tokens`: token-count cost, it may
+    /// win a fetch, and as the owner it does not pin the request.
+    pub forecast_off: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -561,6 +567,11 @@ pub fn select_min_cost(params: &PlacementCostParams, inputs: &[CostInput<'_>]) -
     if params.wait == PrefillWait::Forecast {
         return select_with_forecast(params, inputs);
     }
+    select_tokens(params, inputs)
+}
+
+/// The token-count decision: argmin cost, no owner pin.
+fn select_tokens(params: &PlacementCostParams, inputs: &[CostInput<'_>]) -> CostSelection {
     assert!(!inputs.is_empty());
     let costs = placement_costs(params, inputs);
     let owner = inputs
@@ -699,20 +710,23 @@ pub fn break_cost_tie(
 /// `C_w = R x (pred_s + max(0, pull_s - wait_s)) + copy`. A
 /// candidate without a forecast has the token-count cost.
 ///
+/// - No P is usable: the decision of `--prefill-wait tokens`.
 /// - Owner o: the maximum own hit; ties go to a usable P, then to the lower
 ///   cost, the lower backlog and the smaller URL.
-/// - Best w*: argmin cost over the usable P (over all P when none is
-///   usable); ties go to the owner, the higher own hit, the shorter wait,
-///   the lower backlog and the smaller URL.
+/// - Best w*: argmin cost over the usable P and the P whose forecast is off
+///   ([`CostInput::forecast_off`]); ties go to the owner, the higher own
+///   hit, the shorter wait, the lower backlog and the smaller URL.
 /// - No cached owner (own hit 0 on every P): w*.
-/// - Otherwise the request leaves o for w* only when both are usable and
+/// - o or w* has its forecast off: w*, as under the token-count wait.
+/// - o has a transient gap (not usable, forecast not off): o
+///   (`owner_no_forecast`).
+/// - Otherwise the request leaves o for w* only when
 ///   `gain - margin > 0`, with `gain = (C_o - C_w*) / R` and
-///   `margin = m x sqrt(b_o^2 + b_w*^2)` (s; m = `move_margin`). Else it stays
-///   on o: `protect_reason` is
-///   `owner_no_forecast` (o is not usable) or `gate`. A NaN gain keeps o.
+///   `margin = m x sqrt(b_o^2 + b_w*^2)` (s; m = `move_margin`); else o
+///   (`gate`). A NaN gain keeps o.
 ///
-/// So a P without a usable forecast never wins a move: it can be chosen
-/// only as the owner, or when no P is usable and no P caches the request.
+/// So a P with a transient gap never wins a move, and a P whose forecast
+/// is off is never worse placed than under the token-count wait.
 /// `margin_s`, `owner_gain_s` and `margin_protected` hold the gate numbers
 /// when the gate was evaluated. Pure; panics if `inputs` is empty.
 pub fn select_with_forecast(
@@ -720,8 +734,16 @@ pub fn select_with_forecast(
     inputs: &[CostInput<'_>],
 ) -> CostSelection {
     assert!(!inputs.is_empty());
-    let costs = placement_costs(params, inputs);
     let usable = |i: usize| inputs[i].wait.is_some() && inputs[i].bound_s.is_some();
+    if !(0..inputs.len()).any(usable) {
+        let tokens: Vec<CostInput<'_>> = inputs
+            .iter()
+            .map(|i| CostInput { wait: None, ..*i })
+            .collect();
+        return select_tokens(params, &tokens);
+    }
+    let costs = placement_costs(params, inputs);
+    let eligible = |i: usize| usable(i) || inputs[i].forecast_off;
     let owner = (0..inputs.len())
         .min_by(|&a, &b| {
             inputs[b]
@@ -733,9 +755,8 @@ pub fn select_with_forecast(
                 .then_with(|| inputs[a].worker.cmp(inputs[b].worker))
         })
         .expect("nonempty inputs");
-    let any_usable = (0..inputs.len()).any(usable);
     let best = (0..inputs.len())
-        .filter(|&i| !any_usable || usable(i))
+        .filter(|&i| eligible(i))
         .min_by(|&a, &b| {
             costs[a]
                 .total
@@ -746,7 +767,7 @@ pub fn select_with_forecast(
                 .then_with(|| inputs[a].backlog.cmp(&inputs[b].backlog))
                 .then_with(|| inputs[a].worker.cmp(inputs[b].worker))
         })
-        .expect("nonempty inputs");
+        .expect("a usable input");
     let has_owner = inputs[owner].local_hit > 0;
     let mut selection = CostSelection {
         chosen: best,
@@ -759,22 +780,16 @@ pub fn select_with_forecast(
         margin_protected: false,
         protect_reason: None,
     };
-    if !has_owner || best == owner {
+    if !has_owner || best == owner || inputs[owner].forecast_off || inputs[best].forecast_off {
         return selection;
     }
-    let (Some(b_o), Some(b_w)) = (inputs[owner].bound_s, inputs[best].bound_s) else {
-        // The best P is usable whenever any P is, so this is the owner.
+    let (true, Some(b_o), Some(b_w)) = (usable(owner), inputs[owner].bound_s, inputs[best].bound_s)
+    else {
         selection.chosen = owner;
         selection.margin_protected = true;
         selection.protect_reason = Some("owner_no_forecast");
         return selection;
     };
-    if !usable(owner) {
-        selection.chosen = owner;
-        selection.margin_protected = true;
-        selection.protect_reason = Some("owner_no_forecast");
-        return selection;
-    }
     let gain = (selection.costs[owner].total - selection.costs[best].total)
         / params.prefill_rate_tokens_per_s;
     let margin = params.move_margin * (b_o * b_o + b_w * b_w).sqrt();
@@ -1167,6 +1182,7 @@ mod placement_cost_tests {
             pulled,
             wait: None,
             bound_s: None,
+            forecast_off: false,
         }
     }
 
@@ -1263,6 +1279,7 @@ mod placement_cost_tests {
         // A forecast without a bound is not usable either.
         let no_bound = CostInput {
             bound_s: None,
+            forecast_off: false,
             ..forecast(input("http://c", 0, 0, 2_000, 0), 0.0, 0.2, 0.1)
         };
         let inputs = [
@@ -1271,14 +1288,85 @@ mod placement_cost_tests {
         ];
         let s = select_min_cost(&p, &inputs);
         assert_eq!((s.best, s.chosen), (0, 0));
-        // No P is usable: the token-count argmin among all, owner kept.
+        // No P is usable: the token-count decision (no owner pin).
         let inputs = [
             input("http://a", 90_000, 40_000, 2_000, 0),
             input("http://b", 0, 0, 2_000, 0),
         ];
         let s = select_min_cost(&p, &inputs);
-        assert_eq!((s.owner, s.best, s.chosen), (0, 1, 0));
-        assert_eq!(s.protect_reason, Some("owner_no_forecast"));
+        assert_eq!((s.owner, s.best, s.chosen), (0, 1, 1));
+        assert_eq!(s.protect_reason, None);
+    }
+
+    fn off(input: CostInput<'_>) -> CostInput<'_> {
+        CostInput {
+            forecast_off: true,
+            ..input
+        }
+    }
+
+    /// Every P has its forecast off (the error table does not cover the
+    /// engines' chunk or page, or no snapshot): the decision is the one of
+    /// `--prefill-wait tokens`, so a busy owner sheds to a cheap fetch.
+    #[test]
+    fn forecast_off_everywhere_is_the_token_count_decision() {
+        assert!(crate::prefill_work::forecast_off_reason(
+            "policy_not_bound_fit"
+        ));
+        assert!(crate::prefill_work::forecast_off_reason("no_view"));
+        assert!(!crate::prefill_work::forecast_off_reason("view_too_old"));
+        let p = forecast_params(4.6, 1.0);
+        let tokens = PlacementCostParams {
+            wait: PrefillWait::Tokens,
+            ..p
+        };
+        let inputs = [
+            off(input("http://a", 400_000, 40_000, 2_000, 0)),
+            off(input("http://b", 0, 0, 2_000, 40_000)),
+        ];
+        let want = select_min_cost(&tokens, &inputs);
+        assert_eq!(
+            want.chosen, 1,
+            "the fetch costs less than the owner's backlog"
+        );
+        let s = select_min_cost(&p, &inputs);
+        assert_eq!(
+            (s.owner, s.chosen, s.protect_reason),
+            (0, want.chosen, None)
+        );
+        for (x, y) in s.costs.iter().zip(&want.costs) {
+            assert_eq!(x.total.to_bits(), y.total.to_bits());
+        }
+    }
+
+    /// Mixed: a P whose forecast is off competes with its token-count cost
+    /// and is never pinned by the gate, as owner or as best; a transient gap
+    /// on the owner still keeps it while another P has a forecast.
+    #[test]
+    fn forecast_off_and_usable_workers_mix_without_a_pin() {
+        let p = forecast_params(0.0, 3.0);
+        // Owner a is off and busy; b has a forecast and is cheaper.
+        let inputs = [
+            off(input("http://a", 400_000, 40_000, 2_000, 0)),
+            forecast(input("http://b", 0, 0, 2_000, 40_000), 0.1, 0.6, 0.5),
+        ];
+        let s = select_min_cost(&p, &inputs);
+        assert_eq!((s.owner, s.chosen, s.protect_reason), (0, 1, None));
+        assert_eq!(s.margin_s, None, "no gate");
+        // Owner a has a forecast; b is off and cheaper on its token count.
+        let inputs = [
+            forecast(input("http://a", 0, 40_000, 2_000, 0), 1.5, 30.0, 0.3),
+            off(input("http://b", 0, 0, 2_000, 40_000)),
+        ];
+        let s = select_min_cost(&p, &inputs);
+        assert_eq!((s.best, s.chosen, s.protect_reason), (1, 1, None));
+        // The owner has a transient gap (not off): kept.
+        let inputs = [
+            input("http://a", 400_000, 40_000, 2_000, 0),
+            forecast(input("http://b", 0, 0, 2_000, 40_000), 0.1, 0.6, 0.5),
+        ];
+        let s = select_min_cost(&p, &inputs);
+        assert_eq!((s.chosen, s.protect_reason), (0, Some("owner_no_forecast")));
     }
 
     /// Without a cached owner the request goes to the best forecast; ties of
@@ -2162,6 +2250,7 @@ mod placement_cost_tests {
                         service_s: 0.05 + next(4) as f64 * 0.25,
                     }),
                     bound_s: None,
+                    forecast_off: false,
                 })
                 .collect();
             let (a, b) = (select_min_cost(&r, &inputs), select_min_cost(&p, &inputs));

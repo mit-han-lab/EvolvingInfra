@@ -870,6 +870,16 @@ fn log_forecast(cfg: &SymmetricPdCostFunctionConfig) {
          worker needs SGLANG_SYMMETRIC_ROUTING_SNAPSHOT=1); forecast_shadow / forecast_label lines go to the \
          {shadow}",
     );
+    let (chunk, page) = crate::prefill_forecast::BOUND_FIT_POLICY;
+    tracing::info!(
+        target: "symmetric_pd",
+        covered_chunk_tokens = chunk,
+        covered_page_tokens = page,
+        "symmetric_pd cost_function: the forecast error table covers engines with chunk {chunk} / \
+         page {page} tokens; a worker with other sizes, or without a routing snapshot, has no \
+         forecast and placement uses the token count for it (one warning per worker); if no \
+         worker has a forecast the decision is the token-count decision",
+    );
     if let Some(frozen) = forecast.frozen_fit.as_ref() {
         tracing::info!(
             target: "symmetric_pd",

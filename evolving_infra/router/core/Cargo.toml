@@ -80,7 +80,7 @@ zeromq = { version = "0.6", default-features = false, features = ["tokio-runtime
 dirs = "5"
 http-body-util = "0.1"
 serde = { version = "1", features = ["derive"] }
-# float_roundtrip: exact JSON float parsing for the e3 golden tests (the
+# float_roundtrip: exact JSON float parsing for the forecast golden tests (the
 # reference writes shortest round-trip floats). Test builds only; the
 # router binary keeps the default parser.
 serde_json = { version = "1", features = ["float_roundtrip"] }

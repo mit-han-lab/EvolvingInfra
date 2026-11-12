@@ -268,6 +268,7 @@ fn cost_inputs<'a>(
             pulled: t.pulled,
             wait: None,
             bound_s: None,
+            forecast_off: false,
         })
         .collect()
 }

@@ -859,11 +859,11 @@ async fn dispatch(
             };
             if let Some(cost) = prefill_cost.as_mut() {
                 if let Err(error) = cost.mark_dispatched() {
-                    tracing::error!(target: "cost_balance", %error, "cost trace failed before P dispatch");
+                    tracing::error!(target: "prefill_work", %error, "placement trace failed before P dispatch");
                     if let Some(failure) = &prefill_failure_p {
                         failure.fail_and_log(
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            "prefill leg not dispatched: cost trace failed".to_string(),
+                            "prefill leg not dispatched: placement trace failed".to_string(),
                             &legs,
                         );
                     }

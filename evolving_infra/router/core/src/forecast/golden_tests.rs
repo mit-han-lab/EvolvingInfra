@@ -12,10 +12,10 @@
 //! - `bound-tables.json`, `bound-params.json`: the r5 bound tables.
 //!
 //! Every float must be within 1e-9 of the reference (the port is expected to
-//! be exact; set `E3_GOLDENS_EXACT=1` to require exact equality). Integers,
+//! be exact; set `FORECAST_GOLDENS_EXACT=1` to require exact equality). Integers,
 //! booleans, strings, nulls and key sets must be equal. The ignored test
 //! `full_goldens_match_the_reference` runs all 8,880 forecast and 445
-//! fit goldens from `E3_GOLDENS_DIR` (the r5 bounds directory; not committed).
+//! fit goldens from `FORECAST_GOLDENS_DIR` (the r5 bounds directory; not committed).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -443,10 +443,10 @@ fn bound_params_match_the_bound_tables() {
 }
 
 #[test]
-#[ignore = "needs the full r5 goldens: E3_GOLDENS_DIR=<dir with goldens.jsonl, fit-goldens.jsonl, bound-tables.json>"]
+#[ignore = "needs the full r5 goldens: FORECAST_GOLDENS_DIR=<dir with goldens.jsonl, fit-goldens.jsonl, bound-tables.json>"]
 fn full_goldens_match_the_reference() {
     let dir = PathBuf::from(std::env::var_os("FORECAST_GOLDENS_DIR").expect(
-        "set E3_GOLDENS_DIR to the r5 bounds dir (goldens.jsonl, fit-goldens.jsonl, bound-tables.json)",
+        "set FORECAST_GOLDENS_DIR to the r5 bounds dir (goldens.jsonl, fit-goldens.jsonl, bound-tables.json)",
     ));
     let (tables, sha) = load_tables(&dir.join("bound-tables.json"));
     let rows = jsonl(&dir.join("goldens.jsonl"));
@@ -458,7 +458,7 @@ fn full_goldens_match_the_reference() {
     check_cases(&fits, &mut fit_check);
     // r5: 8,880 forecast goldens and 445 fit goldens.
     eprintln!(
-        "E3_GOLDENS_DIR {}: {} forecast rows, {} fit rows",
+        "FORECAST_GOLDENS_DIR {}: {} forecast rows, {} fit rows",
         dir.display(),
         rows.len(),
         fits.len()

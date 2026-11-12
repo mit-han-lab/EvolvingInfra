@@ -158,12 +158,12 @@ pub const DEFAULT_LAUNCH_LINE: [f64; 2] = [0.06, 0.75];
 /// `Output::pred_s == None`.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ForecastError {
-    #[error("router_e3: invalid parameters: {0}")]
+    #[error("forecast: invalid parameters: {0}")]
     Params(&'static str),
-    #[error("router_e3: invalid input: {0}")]
+    #[error("forecast: invalid input: {0}")]
     Input(&'static str),
-    #[error("router_e3: singular system in {0}")]
+    #[error("forecast: singular system in {0}")]
     Singular(&'static str),
-    #[error("router_e3: bound table: {0}")]
+    #[error("forecast: bound table: {0}")]
     Bound(String),
 }

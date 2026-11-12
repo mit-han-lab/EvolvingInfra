@@ -580,11 +580,13 @@ pub(crate) async fn dispatch(
             let _hold = prefill_holds;
             let outcome = match cost.as_mut().map(|c| c.mark_dispatched()) {
                 Some(Err(error)) => {
-                    tracing::error!(target: "cost_balance", %error, "cost trace failed before P dispatch");
+                    tracing::error!(target: "prefill_work", %error, "placement trace failed before P dispatch");
                     PrefillOutcome {
                         status: Some(StatusCode::INTERNAL_SERVER_ERROR),
                         reason: None,
-                        error: Some("prefill leg not dispatched: cost trace failed".to_string()),
+                        error: Some(
+                            "prefill leg not dispatched: placement trace failed".to_string(),
+                        ),
                         reader_gone: false,
                     }
                 }
@@ -641,7 +643,7 @@ pub(crate) async fn dispatch(
                             )),
                         };
                         if let Err(error) = accounted {
-                            tracing::error!(target: "cost_balance", %error, "cost lifecycle observation failed");
+                            tracing::error!(target: "prefill_work", %error, "placement lifecycle observation failed");
                         }
                     }
                     outcome

@@ -143,6 +143,8 @@ struct ForecastProbe {
     push_fallback: Option<&'static str>,
     /// Decision time minus the state time of the P's newest pushed state.
     push_age_s: Option<f64>,
+    /// The engine (chunk, page) of the view the forecast started from.
+    policy: Option<(i64, i64)>,
 }
 
 /// The pushed state a decision at `d` uses, or why not: none yet
@@ -204,6 +206,33 @@ impl ForecastProbe {
     }
 }
 
+/// True when the fallback `reason` means the P cannot have a forecast at all
+/// (no snapshot from its engine, or an engine policy that the forecast or
+/// its error table does not model), not a transient gap such as one stale
+/// view. The selection then places that P as under `--prefill-wait tokens`
+/// ([`crate::scheduler::placement_cost::CostInput::forecast_off`]).
+pub fn forecast_off_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "no_context"
+            | "no_view"
+            | "unavailable"
+            | "not_an_object"
+            | "policy_not_fcfs"
+            | "policy_share_enabled"
+            | "policy_unknown"
+            | "policy_max_input_below_chunk"
+            | "policy_not_bound_fit"
+    )
+}
+
+impl ForecastProbe {
+    /// The P cannot have a forecast at all ([`forecast_off_reason`]).
+    fn forecast_off(&self) -> bool {
+        self.fallback.is_some_and(forecast_off_reason)
+    }
+}
+
 /// The forecast wait keys of one candidate row of the placement decision: the
 /// forecast and its bound, the input summary, the target tokens and host
 /// rule, and the fit sources of the (P, step).
@@ -219,6 +248,7 @@ fn forecast_row_value(
     let forecast = json!({
         "wait_source": if q.fallback.is_none() { "forecast" } else { "tokens_fallback" },
         "wait_fallback_reason": q.fallback,
+        "forecast_off": q.forecast_off(),
         "wait_s": cost.wait_s,
         "service_s": cost.service_s,
         "view_age_s": q.view_age_s,
@@ -539,6 +569,9 @@ struct State {
     retired_counts: BTreeMap<String, BTreeMap<&'static str, u64>>,
     /// Entries that left `entries`.
     retired_entries: u64,
+    /// The forecast wait: the reason each P's forecast is off, as last
+    /// logged (a warning when it first appears or changes).
+    forecast_off_logged: HashMap<String, &'static str>,
 }
 
 /// `--global-queue`: T_react of each P, the time from a release of the
@@ -1039,6 +1072,7 @@ impl PrefillWorkBook {
                 ended: VecDeque::new(),
                 retired_counts: BTreeMap::new(),
                 retired_entries: 0,
+                forecast_off_logged: HashMap::new(),
             }),
         }))
     }
@@ -1271,6 +1305,51 @@ impl PrefillWorkBook {
     /// t0. An entry that a progress poll received before t0 listed is left
     /// out: it launched before t0, so a snapshot without it means it is
     /// done. The null-prefix rule takes an entry's own estimate.
+    /// Log once per worker and reason that the forecast of `url` is off
+    /// ([`forecast_off_reason`]) and that its placement uses the token count;
+    /// log again when the forecast is back.
+    fn note_forecast_off(state: &mut State, url: &str, probe: &ForecastProbe) {
+        let off = probe.fallback.filter(|r| forecast_off_reason(r));
+        let logged = state.forecast_off_logged.get(url).copied();
+        match (off, logged) {
+            (Some(reason), last) if last != Some(reason) => {
+                state.forecast_off_logged.insert(url.to_string(), reason);
+                let why = match reason {
+                    "policy_not_bound_fit" => {
+                        let (chunk, page) = crate::prefill_forecast::BOUND_FIT_POLICY;
+                        let engine = probe
+                            .policy
+                            .map_or("unknown".to_string(), |(c, p)| format!("{c} / {p}"));
+                        format!(
+                            "its engine chunk / page size ({engine} tokens) is not in the \
+                             forecast error table, which covers chunk {chunk} / page {page}"
+                        )
+                    }
+                    "no_view" => "its engine reports no prefill routing snapshot (needs \
+                                  SGLANG_PREFILL_ROUTING_SNAPSHOT=1, and \
+                                  SGLANG_SYMMETRIC_ROUTING_SNAPSHOT=1 on a symmetric worker)"
+                        .to_string(),
+                    "no_context" => "the router has no forecast state".to_string(),
+                    "unavailable" => {
+                        "its engine marks the routing snapshot unavailable".to_string()
+                    }
+                    other => {
+                        format!("its engine scheduler is not modelled by the forecast ({other})")
+                    }
+                };
+                tracing::warn!(target: "symmetric_pd", worker = url, reason,
+                    "symmetric_pd cost_function: the forecast is off for this worker: {why}; \
+                     placement uses the token count for this worker");
+            }
+            (None, Some(_)) if probe.fallback.is_none() => {
+                state.forecast_off_logged.remove(url);
+                tracing::info!(target: "symmetric_pd", worker = url,
+                    "symmetric_pd cost_function: the forecast is back for this worker");
+            }
+            _ => {}
+        }
+    }
+
     fn probe_forecast(
         state: &State,
         forecast: Option<&crate::prefill_forecast::ForecastContext>,
@@ -1332,6 +1411,7 @@ impl PrefillWorkBook {
         };
         probe.t0_age_s = Some(d - t0);
         probe.view_age_s = Some(view_age);
+        probe.policy = Some((view.chunk, view.page));
         probe.degraded = view.degraded.iter().copied().collect();
         if let Some(reason) = view.unusable {
             probe.fallback = Some(reason);
@@ -1459,21 +1539,21 @@ impl PrefillWorkBook {
         candidates: &[Candidate],
     ) -> Result<BTreeSet<String>, String> {
         if candidates.is_empty() {
-            return Err("cost_balance: no healthy candidates".into());
+            return Err("prefill_work: no healthy candidates".into());
         }
         let mut urls = BTreeSet::new();
         for candidate in candidates {
             if candidate.worker_url.is_empty() || !urls.insert(candidate.worker_url.clone()) {
-                return Err("cost_balance: empty or duplicate candidate URL".into());
+                return Err("prefill_work: empty or duplicate candidate URL".into());
             }
             if candidate.expected_hit.min(input_tokens) < candidate.local_hit.min(input_tokens) {
-                return Err("cost_balance: expected hit is below the candidate's local hit".into());
+                return Err("prefill_work: expected hit is below the candidate's local hit".into());
             }
             if candidate.hint.is_none()
                 && candidate.expected_hit.min(input_tokens) > candidate.local_hit.min(input_tokens)
             {
                 return Err(
-                    "cost_balance: remote expected hit requires an actual pull hint".into(),
+                    "prefill_work: remote expected hit requires an actual pull hint".into(),
                 );
             }
         }
@@ -1528,15 +1608,15 @@ impl PrefillWorkBook {
             let cost = u128::from(uncached);
             let worker = &state.workers[&candidate.worker_url];
             let after = worker.cost.checked_add(cost).ok_or_else(|| {
-                format!("cost_balance: cost overflow on {}", candidate.worker_url)
+                format!("prefill_work: cost overflow on {}", candidate.worker_url)
             })?;
             let pending_uncached_after = worker
                 .pending_uncached_tokens
                 .checked_add(u128::from(input_tokens - candidate.expected_hit))
-                .ok_or("cost_balance: pending token overflow")?;
+                .ok_or("prefill_work: pending token overflow")?;
             worker.active_requests.checked_add(1).ok_or_else(|| {
                 format!(
-                    "cost_balance: request count overflow on {}",
+                    "prefill_work: request count overflow on {}",
                     candidate.worker_url
                 )
             })?;
@@ -1645,6 +1725,11 @@ impl PrefillWorkBook {
                     })
                 })
                 .collect();
+            for (e, probe) in evaluations.iter().zip(&forecast_probes) {
+                if let Some(probe) = probe {
+                    Self::note_forecast_off(state, &e.candidate.worker_url, probe);
+                }
+            }
             let inputs: Vec<_> = evaluations
                 .iter()
                 .zip(&forecast_probes)
@@ -1670,6 +1755,9 @@ impl PrefillWorkBook {
                         bound_s: forecast_probe
                             .as_ref()
                             .and_then(ForecastProbe::usable_bound),
+                        forecast_off: forecast_probe
+                            .as_ref()
+                            .is_some_and(ForecastProbe::forecast_off),
                     }
                 })
                 .collect();
@@ -1709,7 +1797,7 @@ impl PrefillWorkBook {
                 // same lock; a difference is a bug, recorded and logged.
                 let chosen = evaluations[selected.chosen].candidate.worker_url.as_str();
                 if record["p_release"].as_str() != Some(chosen) {
-                    tracing::error!(target: "cost_balance", chosen,
+                    tracing::error!(target: "prefill_work", chosen,
                         expected = %record["p_release"],
                         "global waiting queue: the reservation chose another P than its walk");
                     record["walk_mismatch"] = json!(true);
@@ -1959,7 +2047,7 @@ impl PrefillWorkBook {
         let id = state.next_id;
         let next_id = id
             .checked_add(1)
-            .ok_or("cost_balance: reservation ID overflow")?;
+            .ok_or("prefill_work: reservation ID overflow")?;
         let entry = Entry {
             id,
             rid,
@@ -2066,7 +2154,7 @@ impl PrefillWorkBook {
     fn check_admission(&self, state: &State) -> Result<(), String> {
         if let Some(reason) = &state.io_failure {
             return Err(format!(
-                "cost_balance: trace failed; admission stopped: {reason}"
+                "prefill_work: trace failed; admission stopped: {reason}"
             ));
         }
         Ok(())
@@ -2079,7 +2167,7 @@ impl PrefillWorkBook {
         let sequence = state
             .event_sequence
             .checked_add(1)
-            .ok_or_else(|| "cost_balance: event sequence overflow".to_string())?;
+            .ok_or_else(|| "prefill_work: event sequence overflow".to_string())?;
         event["sequence"] = json!(sequence);
         let timestamp = unix_ms();
         event["schema"] = json!("placement-trace.v1");
@@ -2098,7 +2186,7 @@ impl PrefillWorkBook {
         if let Err(error) = result {
             let reason = error.to_string();
             state.io_failure = Some(reason.clone());
-            tracing::error!(target: "cost_balance", error = %reason,
+            tracing::error!(target: "prefill_work", error = %reason,
                 "placement trace failed; further admission is disabled");
             return Err(reason);
         }
@@ -2136,13 +2224,13 @@ impl PrefillWorkBook {
             return if id < state.next_id && target != Status::Dispatched {
                 Ok(())
             } else if id < state.next_id {
-                Err("cost_balance: only a reserved request can be dispatched".into())
+                Err("prefill_work: only a reserved request can be dispatched".into())
             } else {
-                Err("cost_balance: unknown reservation ID".into())
+                Err("prefill_work: unknown reservation ID".into())
             };
         };
         if target == Status::Dispatched && !matches!(old, Status::Reserved | Status::Dispatched) {
-            return Err("cost_balance: only a reserved request can be dispatched".into());
+            return Err("prefill_work: only a reserved request can be dispatched".into());
         }
         if !old.active() || old == target {
             return Ok(());
@@ -2290,7 +2378,7 @@ impl PrefillWorkBook {
         for (id, detail) in due {
             let entry = &state.entries[&id];
             let rid = entry.rid.clone();
-            tracing::warn!(target: "cost_balance", reservation_id = id,
+            tracing::warn!(target: "prefill_work", reservation_id = id,
                 rid = entry.rid.as_deref().unwrap_or("-"), worker = %entry.worker_url,
                 uncached_tokens = entry.uncached_tokens, acknowledged = entry.acknowledged,
                 quiet_s = detail["quiet_s"].as_f64().unwrap_or(0.0),
@@ -2303,7 +2391,7 @@ impl PrefillWorkBook {
                 Some(detail),
             );
             if let Err(error) = result {
-                tracing::error!(target: "cost_balance", reservation_id = id, %error,
+                tracing::error!(target: "prefill_work", reservation_id = id, %error,
                     "unknown reservation expired and its work released; the trace write failed");
             }
             if let Some(rid) = rid {
@@ -2429,7 +2517,7 @@ impl PrefillWorkBook {
                 continue;
             }
             state.expired_listed_again += 1;
-            tracing::warn!(target: "cost_balance", reservation_id = id, rid = %rid,
+            tracing::warn!(target: "prefill_work", reservation_id = id, rid = %rid,
                 worker = %worker_url, remaining_tokens = remaining,
                 "an expired reservation is listed again by its P; the expiry released live work");
             let event = json!({
@@ -3253,7 +3341,7 @@ impl Drop for Reservation {
             _ => Ok(()),
         };
         if let Err(error) = result {
-            tracing::error!(target: "cost_balance", reservation_id = self.id, %error,
+            tracing::error!(target: "prefill_work", reservation_id = self.id, %error,
                 "failed to record reservation owner teardown");
         }
     }
@@ -4062,13 +4150,15 @@ mod tests {
         drop((r1, r3));
     }
 
-    /// Fallbacks: a P without a snapshot (no_view), with an old view
-    /// (view_too_old) or without a GPU model (no_fit) keeps the token-count terms
-    /// and never wins a move; the trace counts them by reason. An owner
-    /// without a forecast is kept (owner_no_forecast); without a context
-    /// every P falls back (no_context).
+    /// Fallbacks: a P without a snapshot (no_view) has its forecast off and
+    /// competes with its token-count cost, so the idle b takes the request
+    /// from the busy owner a; a P with an old view (view_too_old) or without
+    /// a GPU model (no_fit) has a transient gap and never wins a move; the
+    /// trace counts them by reason. An owner with a transient gap is kept
+    /// (owner_no_forecast); without a context every P falls back
+    /// (no_context) and the decision is the token-count one.
     #[test]
-    fn cost_forecast_fallbacks_never_win_a_move_and_are_counted() {
+    fn cost_forecast_fallbacks_are_counted_and_off_workers_use_the_token_count() {
         let book = PrefillWorkBook::new(None, "test", None).unwrap();
         let zero = std::time::Duration::ZERO;
         let ctx = forecast_context(
@@ -4107,9 +4197,11 @@ mod tests {
                 Some(&ctx),
             )
             .unwrap();
-        assert_eq!(selected.worker_url, "a", "{decision}");
+        assert_eq!(selected.worker_url, "b", "{decision}");
         let rows = &decision["candidates"];
         assert_eq!(rows[1]["wait_fallback_reason"], "no_view");
+        assert_eq!(rows[1]["forecast_off"], true);
+        assert_eq!(rows[2]["forecast_off"], false);
         assert_eq!(rows[1]["wait_source"], "tokens_fallback");
         assert_eq!(rows[1]["forecast_pred_s"], Value::Null);
         assert_eq!(rows[2]["wait_fallback_reason"], "view_too_old");
@@ -4120,7 +4212,7 @@ mod tests {
         assert_eq!(
             decision["forecast_protect_reason"],
             Value::Null,
-            "only a has a forecast"
+            "b is off: no gate"
         );
         drop(r1);
 
@@ -4232,6 +4324,54 @@ mod tests {
         assert_eq!(rows[2]["forecast_degraded"], json!(["engine_stale"]));
         assert_eq!(decision["wait_fallback_counts"]["policy_not_bound_fit"], 1);
         drop(r);
+    }
+
+    /// The error table does not cover the engines' chunk (16,384): every P
+    /// has its forecast off, and the decision is the one of
+    /// `--prefill-wait tokens` on the same book: the busy owner sheds to a
+    /// cheap fetch.
+    #[test]
+    fn cost_forecast_off_everywhere_matches_the_token_count_wait() {
+        let tokens = crate::scheduler::placement_cost::PlacementCostParams {
+            wait: crate::scheduler::placement_cost::PrefillWait::Tokens,
+            ..forecast_params(0.0)
+        };
+        let zero = std::time::Duration::ZERO;
+        let mut choices = Vec::new();
+        for params in [tokens, forecast_params(0.0)] {
+            let book = PrefillWorkBook::new(None, "test", None).unwrap();
+            let (_, busy) = res(&book, "busy", 300_000, vec![candidate("a", 0)]).unwrap();
+            let mut queued = routing_snapshot(5, 65_536);
+            queued["policy"]["chunk_tokens"] = json!(16_384);
+            let mut idle = routing_snapshot(0, 0);
+            idle["policy"]["chunk_tokens"] = json!(16_384);
+            let ctx = forecast_context(
+                &[
+                    ("a", Some(queued), zero, true, 40_000, 0),
+                    ("b", Some(idle), zero, true, 40_000, 40_000),
+                ],
+                44_000,
+            );
+            let (selected, r, decision) = book
+                .reserve_cost_forecast(
+                    44_000,
+                    Some("q".into()),
+                    vec![candidate("a", 40_000), pulling("b", 0, 40_000)],
+                    params,
+                    Some(&ctx),
+                )
+                .unwrap();
+            choices.push((
+                selected.worker_url.clone(),
+                decision["forecast_protect_reason"].clone(),
+            ));
+            drop((r, busy));
+        }
+        assert_eq!(
+            choices[0].0, "b",
+            "the token-count wait sheds the busy owner"
+        );
+        assert_eq!(choices[1], (choices[0].0.clone(), Value::Null));
     }
 
     /// A the forecast wait context with the state push on (push table

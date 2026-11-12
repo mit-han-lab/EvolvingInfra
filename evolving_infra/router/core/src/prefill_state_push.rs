@@ -765,7 +765,7 @@ impl PushHub {
             });
             if let Err(error) = book.emit_event(event) {
                 tracing::warn!(target: "symmetric_pd", %error,
-                    "e3_push_stats not written to the placement trace");
+                    "state push stats not written to the placement trace");
             }
         }
     }

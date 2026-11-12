@@ -230,7 +230,7 @@ pub(crate) fn settle_prefill_leg(
             Err(error) => cost.mark_unknown(&format!("prefill_transport_error: {error}")),
         };
         if let Err(error) = accounted {
-            tracing::error!(target: "cost_balance", %error, "cost lifecycle observation failed");
+            tracing::error!(target: "prefill_work", %error, "placement lifecycle observation failed");
         }
     }
     if let Some(ledger) = ledger {

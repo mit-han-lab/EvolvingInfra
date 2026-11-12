@@ -421,7 +421,7 @@ struct Fixture {
     /// The `/v1/loads` capacity each decode reports, by URL.
     d_capacity: HashMap<String, Option<(u64, u64)>>,
     /// `Opts::cost_function`: the indexer reply (ids 1, 2, ... are the
-    /// prefill-role workers in URL order), the cost trace and each
+    /// prefill-role workers in URL order), the placement trace and each
     /// prefill-role engine's hold state, by URL.
     indexer: Option<Arc<Mutex<Value>>>,
     trace: Option<std::path::PathBuf>,
@@ -1074,7 +1074,7 @@ async fn spd_gateway_cache_aware_p_select_follows_its_tree() {
 /// `pull` (20,000 tokens) moves to P2 and pulls 18,000 tokens from P1
 /// (8,318 < P1's 22,000; P2 and P3 tie, the lower URL wins). The P-leg
 /// alone carries the pull hint and the session tag, the late-D winner
-/// answers, and the cost trace has the reservation, the dispatch and the
+/// answers, and the placement trace has the reservation, the dispatch and the
 /// P answer of `pull`, each with the policy label.
 #[tokio::test]
 async fn late_d_choose_with_cost_function_and_session_retention() {
@@ -1164,7 +1164,7 @@ async fn late_d_choose_with_cost_function_and_session_retention() {
     let sessions = f.ctx.symmetric_pd.as_ref().unwrap().kv_sessions().unwrap();
     assert_eq!(sessions.stats().tagged.load(Ordering::Relaxed), 1);
 
-    // 3. The cost trace of `pull`: reserve, dispatch, P answer.
+    // 3. The placement trace of `pull`: reserve, dispatch, P answer.
     assert!(
         wait_until(Duration::from_secs(5), || {
             events()
@@ -1172,7 +1172,7 @@ async fn late_d_choose_with_cost_function_and_session_retention() {
                 .any(|e| e["event"] == "finished" && e["entry"]["rid"] == "pull")
         })
         .await,
-        "the P answer of pull is not in the cost trace"
+        "the P answer of pull is not in the placement trace"
     );
     let rows = events();
     let pull: Vec<&str> = rows

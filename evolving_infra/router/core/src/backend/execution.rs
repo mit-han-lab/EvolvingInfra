@@ -448,7 +448,7 @@ fn observe_cost(
 ) {
     if let Some(entry) = cost.as_mut() {
         if let Err(error) = f(entry) {
-            tracing::error!(target: "cost_balance", rid, %error,
+            tracing::error!(target: "prefill_work", rid, %error,
                 "prepared cost lifecycle observation failed");
         }
     }

@@ -150,7 +150,7 @@ pub(super) struct GlobalQueue {
 
 impl std::fmt::Debug for GlobalQueue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GwqAuto")
+        f.debug_struct("GlobalQueue")
             .field("cfg", &self.cfg)
             .field("held", &self.state.lock().entries.len())
             .finish_non_exhaustive()
@@ -657,6 +657,8 @@ impl CostFunction {
                         depth: &depth,
                         stale_after: queue.stale_after,
                         max_wait: queue.max_wait,
+                        // Unused with `auto`: the running pass of each P is
+                        // its own chunk (`chunks`, from /server_info).
                         pass_tokens: CHUNK_TOKENS,
                         auto: Some(QueueAutoStep { chunks: &chunks }),
                         now,
