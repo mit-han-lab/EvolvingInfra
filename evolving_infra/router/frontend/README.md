@@ -128,7 +128,7 @@ For split execution the Backend sends an already selected plan to
     "target": {"transport": "sglang_generate", "endpoint": "http://d/generate", "config_id": "glm-config"},
     "kv_import": {"transfer_id": 123, "owner_addr": "tcp://p:port"}
   },
-  "callback": {"endpoint": "http://router/internal/tokenizer-events", "token": "per-plan-secret"}
+  "callback": {"endpoint": "http://router/symmetric_pd/events", "token": "per-plan-secret"}
 }
 ```
 
@@ -235,12 +235,14 @@ No full input or load-accounting ledger is kept in this outbox.
 
 `/health.callback_outbox` reports reserved/active/pending plan and event counts.
 Failed attempts increment `callback_failures`; shutdown logs any unresolved
-counts without exposing input or callback credentials. This outbox is **not
-crash-durable**. A distributed-tokenizer process crash or an unreachable callback
-endpoint can still leave claimed Backend reservations unresolved. Restarting the
-distributed-tokenizer does not establish engine termination. The current Rust
-Backend deliberately retains that unknown
-state and does not yet implement a general engine reconciliation service.
+counts without exposing input or callback credentials. The outbox lives in
+process memory. A distributed-tokenizer crash or an unreachable callback endpoint
+leaves claimed Backend reservations unknown, and restarting the
+distributed-tokenizer does not establish engine termination. With
+`--symmetric-pd-external-role-control`, the router retires an unknown P
+reservation once the worker's progress replies stop listing its RID
+(`UnknownReconcile` in `evolving_infra/router/core/src/backend/state.rs`);
+without it the reservation stays unknown.
 
 ## Resuming a migrated D-leg
 
@@ -266,11 +268,9 @@ counts and the engine ID stay the original's, and prompt token IDs are not
 repeated once the original sent them. The tokens of the abort event itself were
 never sent, so the client sees each output token once.
 
-## Validation boundary
+## Tests
 
-CPU tests use real local HTTP sockets to check simultaneous uploads, shared input
-lifetime, cancellation/partial failure, callback retry, streaming and 64 concurrent
-P/D plans. They also check Dynamo API argument/encoding adaptation using a stub;
-that test does not certify a specific installed Dynamo build. Native engine hash
-comparison remains opt-in via `TOKENIZER_TEST_NATIVE=1`. These tests do not claim
-GPU correctness or performance equivalence to native PD.
+`tests/frontend/` runs on CPU over real local HTTP sockets: simultaneous uploads,
+shared input lifetime, cancellation and partial failure, callback retry, streaming
+and 64 concurrent P/D plans. The Dynamo API adaptation is tested against a stub.
+`TOKENIZER_TEST_NATIVE=1` adds the comparison with the engine's native hashes.
