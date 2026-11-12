@@ -12,8 +12,14 @@ def gpu_count() -> int:
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible:
         return len([g for g in visible.split(",") if g.strip()])
-    out = subprocess.run(["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
-                         capture_output=True, text=True, check=True).stdout
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+                             capture_output=True, text=True, check=True).stdout
+    except FileNotFoundError:
+        raise SystemExit("nvidia-smi is not on PATH: evolving-infra serve runs on a GPU host, "
+                         "inside the image when one is used") from None
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(f"nvidia-smi failed: {(e.stderr or e.stdout).strip()}") from None
     return len(out.split())
 
 

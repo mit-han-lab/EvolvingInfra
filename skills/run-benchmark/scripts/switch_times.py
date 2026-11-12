@@ -43,6 +43,9 @@ def main(planner, bench=None):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] in (["-h"], ["--help"]):
+        print(__doc__)
+        sys.exit(0)
     if len(sys.argv) not in (2, 3) or sys.argv[1].startswith("-"):
         sys.exit(__doc__)
     raise SystemExit(main(*sys.argv[1:]))

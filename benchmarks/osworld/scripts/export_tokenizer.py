@@ -10,14 +10,14 @@ and writes OUTPUT (default MODEL_DIR/tokenizer.json). Needs `transformers` and `
 from pathlib import Path
 import sys
 
-from transformers import AutoTokenizer
-from transformers.convert_slow_tokenizer import TikTokenConverter
-
 TEXTS = ["Hello world!", "中文与English mixed 123456", "\n\n  foo\tbar\n", "We're testing Ünicode naïve café 🙂",
          "<think>reason</think><|media_pad|>[BOS][EOS]"]
 
 
 def main(model: str, output: str = "") -> int:
+    from transformers import AutoTokenizer
+    from transformers.convert_slow_tokenizer import TikTokenConverter
+
     slow = AutoTokenizer.from_pretrained(model, trust_remote_code=True, local_files_only=True)
     special = [token for token, _ in sorted(slow.special_tokens.items(), key=lambda item: item[1])]
     fast = TikTokenConverter(vocab_file=str(Path(model) / "tiktoken.model"), pattern=slow.pat_str,
@@ -37,6 +37,9 @@ def main(model: str, output: str = "") -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (2, 3):
+    if sys.argv[1:2] in (["-h"], ["--help"]):
+        print(__doc__)
+        sys.exit(0)
+    if len(sys.argv) not in (2, 3) or sys.argv[1].startswith("-"):
         sys.exit(__doc__)
     raise SystemExit(main(*sys.argv[1:]))

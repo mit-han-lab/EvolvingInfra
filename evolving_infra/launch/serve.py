@@ -34,6 +34,10 @@ class Stack:
         (self.dir / "logs").mkdir(parents=True, exist_ok=True)
         gpus = hardware.gpu_count()
         per_worker = cfg.get("gpus_per_worker") or (gpus if len(hosts) > 1 else gpus // 2)
+        if per_worker < 1:
+            raise SystemExit(f"one host runs a prefill and a decode worker: it needs 2 GPUs or more, this one has {gpus}")
+        if per_worker > gpus:
+            raise SystemExit(f"gpus_per_worker is {per_worker}, but this host has {gpus} GPUs")
         total = (gpus // per_worker) * len(hosts)
         self.workers = workers(self.ips, gpus, per_worker, cfg.get("prefill_workers") or total // 2)
         self.mine = [w for w in self.workers if w.host == rank]
