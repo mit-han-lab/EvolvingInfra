@@ -21,6 +21,10 @@ engine_args:
   - --synthetic-oracle-dspark-accept-rate=0.6
   - --dist-timeout=1800
   - --watchdog-timeout=900
+engine_env:
+  # Register the host KV tier for RDMA in 16 GB pieces: one 71 GB registration per worker fails on
+  # Modal H200 nodes (peer_kv host registration rc=-202); the paper's H200 runs used 16.
+  SGLANG_HICACHE_HOST_REGISTER_CHUNK_GB: 16
 planner:
   prefill_shape_prior: dsv4-flash-h200-tp4
 

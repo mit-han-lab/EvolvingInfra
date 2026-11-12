@@ -78,21 +78,24 @@ is a [skill](skills/README.md) that the agent follows step by step, checking eac
 reporting what it ran. Every component is in the runtime image, built for x86_64 (H200, B300)
 and aarch64 (GB300): `docker.io/weili0234/evolving-infra:v0.1.0`.
 
-### Serve a model
+### Serve an agent with a model
 
-Ask your agent: "Deploy `<model>` on `<hosts>` with Evolving Infra, following
-`skills/deploy-stack/SKILL.md`." Give it the model directory, the hosts and how commands reach
-them (a shell on each, or a scheduler). It inspects the machines, writes a config when the
-model or GPU has no example, starts the stack and checks that it answers.
-
-### Use it from a coding agent
-
-Ask your agent: "Run Pi (or Claude Code, or Codex) on our Evolving Infra stack at `<router url>`,
-following `skills/connect-harness/SKILL.md`." The launch scripts are in
-[`examples/agents`](examples/agents/README.md).
-
-To connect your own agent's code, so that the KV cache of its live branches is kept, ask it to
-follow `skills/connect-agent/SKILL.md`.
+1. **Deploy the model.** Ask your agent: "Deploy `<model>` on `<hosts>` with Evolving Infra,
+   following `skills/deploy-stack/SKILL.md`." Give it the model directory, the hosts and how
+   commands reach them (a shell on each, or a scheduler). It inspects the machines, writes a
+   config when the model or GPU has no example, starts the stack and checks that it answers. For
+   a coding-agent harness, have it use the config of [`examples/agents`](examples/agents/README.md)
+   for your model, which adds the tool-call parsers.
+2. **Connect the agent.** Ask your agent:
+   - **Pi, Claude Code or Codex**: "Run `<harness>` on our Evolving Infra stack at
+     `<router url>`, following `skills/connect-harness/SKILL.md`." Each has a launch script; the
+     harness's own settings do not change.
+   - **Any other harness** (OpenCode, Aider, an in-house CLI, ...): "Add a launch script for
+     `<harness>`, following `skills/add-harness/SKILL.md`." It finds which API the harness
+     sends, writes `examples/agents/<harness>.sh` and checks it with one prompt and one tool call.
+   - **Your own agent's code**: "Connect our agent to Evolving Infra, following
+     `skills/connect-agent/SKILL.md`." Its requests then carry agent identities, so the KV cache
+     of its live branches is kept.
 
 ### Reproduce the paper
 

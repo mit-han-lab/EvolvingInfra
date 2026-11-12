@@ -12,6 +12,15 @@ class ExplicitSwaRatioAction(argparse.Action):
         namespace._swa_ratio_explicit = True
 
 
+class ExplicitLateDAction(argparse.Action):
+    """--disaggregation-late-d: records that the flag was given, so the
+    symmetric `paper` preset keeps an explicit `off`."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace._disaggregation_late_d_explicit = True
+
+
 class LoRAPathAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         lora_paths = []

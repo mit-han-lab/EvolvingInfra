@@ -10,12 +10,13 @@ GLM-5.2 on these hosts, following `skills/deploy-stack/SKILL.md`".
 | [`deploy-stack`](deploy-stack/SKILL.md) | install and start Evolving Infra on one host or several, including a model or GPU without an example | configs under `examples/` | starts GPU processes or a Slurm job |
 | [`connect-agent`](connect-agent/SKILL.md) | connect an agent or agent framework to a running stack: identity on every request, the prepared path under the planner, ending branches | nothing | edits the agent's code |
 | [`connect-harness`](connect-harness/SKILL.md) | run Pi, Claude Code or Codex on a running stack: tool-call parsers, the translator for Claude Code and Codex, one prompt and one tool call | nothing | starts a local translator for Claude Code and Codex |
+| [`add-harness`](add-harness/SKILL.md) | add a launch script for another agent harness (OpenCode, Aider, ...): which API it sends, how to set its provider per process, one prompt and one tool call | `examples/agents/<harness>.sh` and a row in its README | runs the harness against the stack |
 | [`run-benchmark`](run-benchmark/SKILL.md) | run a paper benchmark (Claude Code, Putnam, OSWorld), score it and compare it with the reference | nothing | a Slurm job on nine GPU nodes for about two hours |
 | [`diagnose-run`](diagnose-run/SKILL.md) | find why a run did not start, failed a request, or scored below the reference | the fix, once the cause is named | none |
 | [`check-pr`](check-pr/SKILL.md) | check a change against the contribution rules and fill the pull request description, before opening or re-reviewing a pull request | the fixes for what fails | opens the pull request, publishes the transcript |
 
 They follow one another: `deploy-stack` starts the stack, `connect-agent` sends an agent's
-requests to it (`connect-harness` does it for Pi, Claude Code and Codex), `run-benchmark`
+requests to it (`connect-harness` does it for Pi, Claude Code and Codex, `add-harness` for any other harness), `run-benchmark`
 measures it, `diagnose-run` explains a failure or a gap, and `check-pr` comes before the change
 goes up for review.
 

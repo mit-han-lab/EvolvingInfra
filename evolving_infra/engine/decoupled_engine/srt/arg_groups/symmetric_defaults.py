@@ -252,6 +252,7 @@ def plan_features(
         fields["enable_prefill_work_snapshot"] = True
     if (
         getattr(cfg, "disaggregation_late_d", "off") == "off"
+        and not getattr(cfg, "_disaggregation_late_d_explicit", False)
         and single_engine
         and not getattr(cfg, "disable_overlap_schedule", False)
     ):

@@ -242,6 +242,9 @@ def test_paper_features_keep_what_the_user_set_and_skip_what_cannot_run():
     assert "disaggregation_late_d" not in f
     assert "enable_dsa_hicache_host_dedup" not in f and "hicache_ratio" not in f
     assert "enable_peer_kv_servicer" not in f
+    # An explicit --disaggregation-late-d=off stays off (chat completions need it).
+    f = sd.plan_features(bare(_disaggregation_late_d_explicit=True), DSA, free_port=lambda: 1)
+    assert "disaggregation_late_d" not in f and "disaggregation_late_d_control_port" not in f
     f = sd.plan_features(bare(enable_dp_attention=True), DSA, free_port=lambda: 1)
     assert "disaggregation_late_d" not in f and "enable_dsa_hicache_host_dedup" not in f
     f = sd.plan_features(bare(), {"dedup": "enable_dsv4_hicache_host_dedup", "full_only": False},

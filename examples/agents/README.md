@@ -17,8 +17,8 @@ the launch scripts read.
 
 ## Run
 
-1. Serve a model with its tool-call and reasoning parsers, so the harness gets OpenAI
-   `tool_calls`; without them the model's tool calls arrive as plain text. Start the stack
+1. Serve a model with the config of this directory: it adds the tool-call and reasoning parsers,
+   so the harness gets OpenAI `tool_calls`, and turns late decode choice off (see Limits). Start the stack
    without `--planner` (see Limits):
 
    ```bash
@@ -42,7 +42,8 @@ the launch scripts read.
    `EVOLVING_INFRA_MODEL` to choose another.
 
 The [`connect-harness`](../../skills/connect-harness/SKILL.md) skill does the same steps with
-checks, for a coding agent.
+checks, for a coding agent. For another harness, [`add-harness`](../../skills/add-harness/SKILL.md)
+writes its launch script.
 
 ## Limits
 
@@ -52,6 +53,9 @@ checks, for a coding agent.
   with [`connect-agent`](../../skills/connect-agent/SKILL.md).
 - A stack started with `--planner` (KV retention on) refuses plain requests, so harnesses need a
   stack without `--planner`.
+- The configs here turn late decode choice off on engines and router: it serves `/v1/completions`
+  only, and harnesses send chat completions (a stack with the `paper` preset answers them with
+  HTTP 501 `late_d_route_unsupported`).
 - Requests with tools are placed without the router's prefix lookup (the router does not render
   tool schemas), so placement does not follow cached prefixes for them.
 - Claude Code and Codex do not know the served model: Claude Code assumes a 200K-token context

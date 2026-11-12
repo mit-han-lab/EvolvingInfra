@@ -51,6 +51,7 @@ from decoupled_engine.srt.arg_groups.argparse_actions import (
     DeprecatedAliasStoreAction,
     DeprecatedStoreConstAction,
     DeprecatedStoreTrueAction,
+    ExplicitLateDAction,
     ExplicitSwaRatioAction,
     LoRAPathAction,
 )
@@ -3565,22 +3566,31 @@ class ServerArgs:
     ] = 1
     disaggregation_late_d: A[
         Literal["off", "alloc", "choose"],
-        "Defer decode memory allocation. 'alloc': the router selects the decode "
-        "worker at arrival. That worker holds the request without KV memory, a "
-        "request slot or a metadata buffer until prefill permits allocation. "
-        "'choose': select the decode worker later through the router control "
-        "link, then release the other candidates with HTTP 409. Requests without "
-        "the router's late_d field use alloc behavior. Set the same mode on "
-        "prefill and decode workers. Separate prefill/decode requires Mooncake; "
-        "DP attention and PP > 1 are unsupported. Symmetric mode supports alloc "
-        "and choose with count mode. To compute before reader allocation in "
-        "symmetric mode, use alloc or remote choose + need + first_chunk, with "
-        "router LOCAL off, overlap scheduling and "
-        "context parallel size 1. Symmetric mode also requires "
-        "SGLANG_SYMMETRIC_PD_IMPORT_LOCAL_RESERVE=1 and "
-        "SGLANG_SYMMETRIC_PD_IMPORT_BUDGET_FRACTION > 0.",
+        Arg(
+            help=(
+                "Defer decode memory allocation. 'alloc': the router selects the decode "
+                "worker at arrival. That worker holds the request without KV memory, a "
+                "request slot or a metadata buffer until prefill permits allocation. "
+                "'choose': select the decode worker later through the router control "
+                "link, then release the other candidates with HTTP 409. Requests without "
+                "the router's late_d field use alloc behavior. Set the same mode on "
+                "prefill and decode workers. Separate prefill/decode requires Mooncake; "
+                "DP attention and PP > 1 are unsupported. Symmetric mode supports alloc "
+                "and choose with count mode. To compute before reader allocation in "
+                "symmetric mode, use alloc or remote choose + need + first_chunk, with "
+                "router LOCAL off, overlap scheduling and "
+                "context parallel size 1. Symmetric mode also requires "
+                "SGLANG_SYMMETRIC_PD_IMPORT_LOCAL_RESERVE=1 and "
+                "SGLANG_SYMMETRIC_PD_IMPORT_BUDGET_FRACTION > 0."
+            ),
+            action=ExplicitLateDAction,
+            action_kwargs={"choices": ["off", "alloc", "choose"]},
+        ),
         NS("disagg"),
     ] = "off"
+    # Internal provenance: --disaggregation-late-d was given on the command line,
+    # so the symmetric `paper` preset keeps its value (an explicit `off` included).
+    _disaggregation_late_d_explicit: A[Optional[bool], Arg(no_cli=True), NS("disagg")] = None
     symmetric_preset: A[
         Literal["paper", "none"],
         "--disaggregation-mode symmetric only. 'paper' (default): turn on the "

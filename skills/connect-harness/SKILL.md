@@ -46,7 +46,9 @@ curl -s $EVOLVING_INFRA_URL/v1/chat/completions -H 'Content-Type: application/js
 
 **Check**: the reply has `choices[0].message.tool_calls` with `get_weather`. A tool call inside
 `content` means the parser is missing: restart the stack with `examples/agents/<model>.yaml`. An
-HTTP 400 about prepared lifecycle callbacks means the stack runs with `--planner`.
+HTTP 400 about prepared lifecycle callbacks means the stack runs with `--planner`. An HTTP 501
+`late_d_route_unsupported` means the stack was not served with an `examples/agents/<model>.yaml`
+config (late decode choice serves `/v1/completions` only).
 
 ### 2. Start the translator (Claude Code and Codex only)
 
