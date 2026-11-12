@@ -27,7 +27,12 @@
 //! error. A reply that lists the RID of an expired entry again measures the
 //! error: the first such reply per entry writes the event
 //! `expired_rid_listed_again` (the snapshot counts these entries); the work book
-//! does not take the work back. The check runs when a progress reply of the
+//! does not take the work back. The RID of an expired entry stays reserved,
+//! with its record, until the engine is done with it (a reply listed it
+//! again and a later complete reply of its P omits it) or
+//! [`EXPIRED_RID_HOLD_S`] after the expiry, and at least until the entry
+//! retires; at most [`MAX_EXPIRED_RIDS`] records are kept (the oldest go
+//! first). The check runs when a progress reply of the
 //! entry's P is applied and at each [`PrefillWorkBook::snapshot`], only while unknown
 //! entries exist.
 //!
@@ -110,6 +115,28 @@ const RECENT_FINISHED_S: f64 = 60.0;
 /// [`RECENT_FINISHED_S`], and a late call on its reservation finds it until
 /// then. The snapshot keeps the status counts of the entries that left.
 const RETIRE_AFTER_S: f64 = RECENT_FINISHED_S;
+
+/// The longest time the RID of an expired entry stays reserved when the
+/// engine never lists it again (the router's default
+/// `--stale-request-timeout-secs`).
+const EXPIRED_RID_HOLD_S: f64 = 600.0;
+
+/// The most expired RIDs kept reserved; the oldest are released first.
+const MAX_EXPIRED_RIDS: usize = 65_536;
+
+/// The unknown expiry: the record of one expired entry's RID.
+#[derive(Debug, Clone, PartialEq)]
+struct ExpiredRid {
+    /// ID of the expired entry.
+    id: u64,
+    /// Progress replies of `worker` that listed the RID after the expiry.
+    listed: u64,
+    /// The P that held the entry.
+    worker: String,
+    /// The engine listed the RID again and a later complete reply of
+    /// `worker` omitted it: the engine is done with the request.
+    done: bool,
+}
 
 /// The forecast of one candidate for the forecast wait, under the lock.
 /// `fallback` is None exactly when the candidate is usable: `out` has
@@ -538,10 +565,14 @@ struct State {
     /// P-legs closed with [`crate::proxy::READER_GONE_FINISH_REASON`]: the
     /// engine ended them because their reader left (cancelled, not failed).
     prefill_reader_gone: u64,
-    /// The unknown expiry: RID -> (ID of the expired entry, progress replies
-    /// of its P that listed the RID after the expiry).
-    /// The worker URL is kept, so the record outlives the entry's retirement.
-    expired_by_rid: BTreeMap<String, (u64, u64, String)>,
+    /// The unknown expiry: the record of each expired RID that is still
+    /// reserved (see the module docs).
+    expired_by_rid: BTreeMap<String, ExpiredRid>,
+    /// The records of `expired_by_rid` in expiry order: (expiry time, RID,
+    /// entry ID); an item whose record is gone is skipped.
+    expired_order: VecDeque<(Instant, String, u64)>,
+    /// Expired RIDs listed again and not yet seen done.
+    expired_relisted: BTreeSet<String>,
     /// The unknown expiry: expired entries whose RID a reply listed again.
     expired_listed_again: u64,
     /// `--global-queue` only (None: off): T_react per P.
@@ -1059,6 +1090,8 @@ impl PrefillWorkBook {
                 unknown: BTreeSet::new(),
                 prefill_reader_gone: 0,
                 expired_by_rid: BTreeMap::new(),
+                expired_order: VecDeque::new(),
+                expired_relisted: BTreeSet::new(),
                 expired_listed_again: 0,
                 queue_lead: None,
                 session_moves: None,
@@ -2396,7 +2429,19 @@ impl PrefillWorkBook {
             }
             if let Some(rid) = rid {
                 let worker = state.entries[&id].worker_url.clone();
-                state.expired_by_rid.insert(rid, (id, 0, worker));
+                state.expired_order.push_back((now, rid.clone(), id));
+                state.expired_by_rid.insert(
+                    rid,
+                    ExpiredRid {
+                        id,
+                        listed: 0,
+                        worker,
+                        done: false,
+                    },
+                );
+                if state.expired_order.len() > MAX_EXPIRED_RIDS {
+                    Self::release_expired_rids(state, now);
+                }
             }
         }
     }
@@ -2450,9 +2495,9 @@ impl PrefillWorkBook {
         let mut relisted = Vec::new();
         for (rid, remaining) in &progress.remaining {
             let Some(id) = state.active_by_rid.get(rid) else {
-                if let Some((id, _, worker)) = state.expired_by_rid.get(rid) {
-                    if worker == worker_url {
-                        relisted.push((rid.clone(), *id, *remaining));
+                if let Some(record) = state.expired_by_rid.get(rid) {
+                    if record.worker == worker_url {
+                        relisted.push((rid.clone(), record.id, *remaining));
                     }
                 }
                 continue;
@@ -2507,13 +2552,38 @@ impl PrefillWorkBook {
                 "engine_load": engine_load,
             }),
         )?;
+        // An expired RID listed earlier and omitted by this complete reply:
+        // the engine is done with it.
+        if !progress.truncated {
+            let done: Vec<String> = state
+                .expired_relisted
+                .iter()
+                .filter(|rid| !progress.remaining.contains_key(*rid))
+                .filter(|rid| {
+                    state
+                        .expired_by_rid
+                        .get(*rid)
+                        .is_some_and(|r| r.worker == worker_url)
+                })
+                .cloned()
+                .collect();
+            for rid in done {
+                state.expired_relisted.remove(&rid);
+                if let Some(record) = state.expired_by_rid.get_mut(&rid) {
+                    record.done = true;
+                }
+            }
+        }
         // The unknown expiry error bound: the first listing of an expired RID.
         for (rid, id, remaining) in relisted {
             let Some(seen) = state.expired_by_rid.get_mut(&rid) else {
                 continue;
             };
-            seen.1 += 1;
-            if seen.1 > 1 {
+            seen.listed += 1;
+            seen.done = false;
+            let listed = seen.listed;
+            state.expired_relisted.insert(rid.clone());
+            if listed > 1 {
                 continue;
             }
             state.expired_listed_again += 1;
@@ -2611,10 +2681,44 @@ impl PrefillWorkBook {
         Ok(())
     }
 
+    /// Release the expired RIDs whose hold is over (see the module docs):
+    /// the record goes, and the RID is freed when its entry has retired
+    /// (else [`Self::retire_ended`] frees it). Over [`MAX_EXPIRED_RIDS`]
+    /// records the oldest go first.
+    fn release_expired_rids(state: &mut State, now: Instant) {
+        let live = state
+            .expired_order
+            .iter()
+            .filter(|(_, rid, id)| state.expired_by_rid.get(rid).is_some_and(|r| r.id == *id))
+            .count();
+        let mut over = live.saturating_sub(MAX_EXPIRED_RIDS);
+        let mut keep = VecDeque::with_capacity(state.expired_order.len());
+        while let Some((at, rid, id)) = state.expired_order.pop_front() {
+            let Some(record) = state.expired_by_rid.get(&rid).filter(|r| r.id == id) else {
+                continue;
+            };
+            let retired = !state.entries.contains_key(&id);
+            let aged = now.saturating_duration_since(at).as_secs_f64() > EXPIRED_RID_HOLD_S;
+            let size = over > 0;
+            if size || (retired && (record.done || aged)) {
+                over = over.saturating_sub(1);
+                state.expired_by_rid.remove(&rid);
+                state.expired_relisted.remove(&rid);
+                if retired {
+                    state.used_rids.remove(&rid);
+                }
+                continue;
+            }
+            keep.push_back((at, rid, id));
+        }
+        state.expired_order = keep;
+    }
+
     /// Remove the entries that ended more than [`RETIRE_AFTER_S`] before
     /// `now` from `entries`, count their statuses per worker, and free their
     /// rids (a rid released by a rollback before dispatch was freed then).
-    /// The record of an expired rid goes with its entry.
+    /// The rid of an expired entry stays reserved while its record holds it
+    /// ([`Self::release_expired_rids`]).
     fn retire_ended(state: &mut State, now: Instant) {
         while let Some(&(ended_at, id)) = state.ended.front() {
             if now.saturating_duration_since(ended_at).as_secs_f64() <= RETIRE_AFTER_S {
@@ -2625,11 +2729,9 @@ impl PrefillWorkBook {
                 continue;
             };
             if let Some(rid) = &entry.rid {
-                if !entry.rid_released {
+                let held = state.expired_by_rid.get(rid).is_some_and(|e| e.id == id);
+                if !entry.rid_released && !held {
                     state.used_rids.remove(rid);
-                }
-                if state.expired_by_rid.get(rid).is_some_and(|e| e.0 == id) {
-                    state.expired_by_rid.remove(rid);
                 }
             }
             *state
@@ -2649,6 +2751,7 @@ impl PrefillWorkBook {
         let mut state = self.state.lock();
         self.expire_unknown(&mut state, None, Instant::now());
         Self::retire_ended(&mut state, Instant::now());
+        Self::release_expired_rids(&mut state, Instant::now());
         // Status counts (retired entries included) and the oldest active
         // assigned time of each worker.
         let mut by_worker = HashMap::<&str, (BTreeMap<&str, u64>, Option<u64>)>::new();
@@ -2712,6 +2815,7 @@ impl PrefillWorkBook {
             // Only with an unknown expiry, so other traces keep their fields.
             value["unknown_expire_s"] = json!(expire.as_secs_f64());
             value["expired_rid_listed_again"] = json!(state.expired_listed_again);
+            value["expired_rids_held"] = json!(state.expired_by_rid.len());
         }
         if let Some(book) = &state.session_moves {
             // --symmetric-pd-trace-session-moves only: decisions with a session,
@@ -5073,6 +5177,62 @@ mod tests {
         assert!(trace_rows(&path).iter().all(|e| e["event"] != "expired"));
     }
 
+    /// An expired rid stays reserved after the retire window while the
+    /// engine may still work on it: a listing after 60 s still counts and
+    /// the rid cannot be reused. It is released once a later complete reply
+    /// of its P omits it, or after the hold cap when it is never listed
+    /// again.
+    #[test]
+    fn expired_rids_stay_reserved_until_the_engine_is_done() {
+        let book = PrefillWorkBook::new(None, "test", Some(secs(60))).unwrap();
+        let lose = |rid: &str| {
+            let mut r = uncached(&book, rid, "a", 4_000);
+            r.mark_dispatched().unwrap();
+            r.mark_unknown("prefill_transport_error: upstream timed out")
+                .unwrap();
+            let since = unknown_since(&book, &r);
+            reply(&book, "a", since + secs(60), &[]);
+            r
+        };
+        let (x, y) = (lose("x"), lose("y"));
+        let t = Instant::now() + secs(120);
+        PrefillWorkBook::retire_ended(&mut book.state.lock(), t);
+        PrefillWorkBook::release_expired_rids(&mut book.state.lock(), t);
+        {
+            let state = book.state.lock();
+            assert!(!state.entries.contains_key(&x.id) && !state.entries.contains_key(&y.id));
+            assert_eq!(state.expired_by_rid.len(), 2);
+        }
+        assert!(
+            book.rid_refusal(Some("x")).is_some(),
+            "x is reserved after retirement"
+        );
+        reply(&book, "a", t, &[("x", 1_000)]);
+        let snapshot = book.snapshot();
+        assert_eq!(
+            snapshot["expired_rid_listed_again"], 1,
+            "counted after 60 s"
+        );
+        assert_eq!(snapshot["expired_rids_held"], 2);
+        assert!(
+            book.rid_refusal(Some("x")).is_some(),
+            "the engine still works on x"
+        );
+        // A later complete reply omits x: the engine is done with it.
+        reply(&book, "a", t + secs(1), &[]);
+        PrefillWorkBook::release_expired_rids(&mut book.state.lock(), t + secs(2));
+        assert!(book.rid_refusal(Some("x")).is_none());
+        assert!(
+            book.rid_refusal(Some("y")).is_some(),
+            "y waits for the hold cap"
+        );
+        let capped = Instant::now() + secs(EXPIRED_RID_HOLD_S as u64 + 10);
+        PrefillWorkBook::release_expired_rids(&mut book.state.lock(), capped);
+        assert!(book.rid_refusal(Some("y")).is_none());
+        assert_eq!(book.snapshot()["expired_rids_held"], 0);
+        drop((x, y));
+    }
+
     /// After an expiry, the owner's late results change nothing and do not
     /// panic: a finish or another unknown is ignored (no trace event), a
     /// dispatch is refused as for any terminal entry, and a drop is a no-op.
@@ -5113,9 +5273,14 @@ mod tests {
         assert_eq!(snapshot["expired_rid_listed_again"], 2);
         assert_eq!(
             book.state.lock().expired_by_rid["f"],
-            (f.id, 2, "a".to_string())
+            ExpiredRid {
+                id: f.id,
+                listed: 2,
+                worker: "a".to_string(),
+                done: false,
+            }
         );
-        assert_eq!(book.state.lock().expired_by_rid["d"].1, 0);
+        assert_eq!(book.state.lock().expired_by_rid["d"].listed, 0);
         for r in [&f, &u] {
             assert_eq!(r.debuginfo()["status"], "expired");
             assert_eq!(r.debuginfo()["reason"], UNKNOWN_EXPIRED_REASON);
