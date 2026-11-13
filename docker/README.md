@@ -14,14 +14,18 @@ Singularity image from the same steps.
 ## Prebuilt image
 
 `docker.io/weili0234/evolving-infra:v0.1.0` is one tag for both architectures
-(index `sha256:10abf6974aa39bb170e1faea30a4559c29b92354532bf35403389229f4a9f9b3`); `docker pull`
+(index `sha256:9d7d128f9e258ef2fcff01988e5c4e41b6a1d5e5c0045b1c8fa55b2bd08809d3`); `docker pull`
 picks the one of the host. A tag can be moved and a digest cannot, so a deployment that must
 run the same image every time pins the digest of its architecture:
 
 | Architecture | Image | Source |
 |---|---|---|
 | x86_64 (H200, B300) | `docker.io/weili0234/evolving-infra@sha256:55a40438be30bb3ccf3d5b9211cd9d110c8b355c56f8f8d59ae105a55563fe0a` | `67b4761` |
-| aarch64 (GB300) | `docker.io/weili0234/evolving-infra@sha256:d1a2d2923e9c8bbe4e37a2acd9826c6d4abe886c7297b9c371b6d93d139e9ce8` | `c17a7f4` |
+| aarch64 (GB300) | `docker.io/weili0234/evolving-infra@sha256:ef0ecc7b1aed1937a32ce4d968131418a8330540b74bc7b0868f22ee12f6241e` | `486dcd1` |
+
+The x86_64 image predates the router flag names of the release (for example `--prefill-wait`,
+`--global-queue`, `--copy-price`); until it is rebuilt, build it from this repository on x86_64 hosts
+(`docker build` or `docker/build_and_push.sh`).
 
 `docker/build_and_push.sh` builds and pushes one architecture from a committed revision
 (`git archive`, so local files never enter the image) and prints the digest; build each
