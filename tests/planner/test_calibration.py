@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The learning-end fit end to end, through the HTTP trace path: no engines, no GPU."""
 import json
 import math

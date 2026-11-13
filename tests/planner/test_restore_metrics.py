@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Restored-token counters: what the scraper records and how the fit reads them back."""
 import http.server
 import threading

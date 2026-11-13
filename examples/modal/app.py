@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Reference benchmarks of evolving-infra on Modal H200 nodes (see README.md in this directory).
 
   modal run examples/modal/app.py::check_image                 # CPU: image contents and name checks

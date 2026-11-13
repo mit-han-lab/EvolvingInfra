@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The Slurm job script of the GB300 example."""
 from pathlib import Path
 import subprocess

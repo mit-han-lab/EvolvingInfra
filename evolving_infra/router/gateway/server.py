@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Agent gateway: an OpenAI-compatible endpoint that adds agent identities for coding-agent harnesses.
 
 Harnesses (Pi, Claude Code, Codex, ...) send plain chat completions without `x-agent-context`.
@@ -150,7 +152,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="python -m evolving_infra.router.gateway",
                                      description="OpenAI-compatible gateway that adds agent identities.")
     parser.add_argument("--router-url", default="http://127.0.0.1:30900")
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1: this host only)")
     parser.add_argument("--port", type=int, default=30800)
     parser.add_argument("--no-retention", action="store_true",
                         help="the router runs without KV session retention: send no session END")

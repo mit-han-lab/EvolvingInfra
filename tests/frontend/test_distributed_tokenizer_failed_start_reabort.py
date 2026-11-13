@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """A prefill failure must not leave the D request running (execution-ledger race).
 
 The tokenizer submits the P and D legs concurrently. In an open-loop dry run the fake P engine

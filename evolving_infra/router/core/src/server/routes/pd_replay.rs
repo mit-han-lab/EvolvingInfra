@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Traditional-PD per-request decision replay (`--pd-decision-replay`).
 //!
 //! A controlled comparison pins symmetric_pd routing to the per-request

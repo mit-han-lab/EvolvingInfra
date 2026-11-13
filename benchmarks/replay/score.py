@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Steady-window score of a run over all Trie processes' lifecycle files (standard library only).
 
 Same definition as the reference runs: the window opens `skip_s` after the first lifecycle event

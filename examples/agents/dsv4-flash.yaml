@@ -30,3 +30,5 @@ router_args:
   # paper reproduction, as h200/dsv4-flash.yaml: the token-count wait and no global queue (page 256 is outside the forecast error table)
   - --prefill-wait=tokens
   - --global-queue=false
+gateway:
+  host: 0.0.0.0                  # the agent gateway (port 30800) for harnesses on other machines

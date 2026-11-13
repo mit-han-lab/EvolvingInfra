@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The workload a decision scores: completed usage between two router snapshots, the decode population, and the
 slices of an interval (``--slice-secs``, 60 s by default). Inputs are completed usage and a sampled execution population, never trace future
 outputs.

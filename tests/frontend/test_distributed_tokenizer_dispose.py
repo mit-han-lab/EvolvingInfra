@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Normal completion cleanup must survive cancellation of its HTTP caller."""
 
 import asyncio

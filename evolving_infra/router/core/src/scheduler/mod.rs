@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! External scheduling: policy selects per-request P/D roles on capable backends.
 //! Exposes pure placement/cost extension APIs and runtime orchestration. Backend
 //! remains the owner of worker observations, reservations, and execution state.

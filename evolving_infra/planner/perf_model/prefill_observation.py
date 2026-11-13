@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Observe the restore ratio and packing of the current P workers before each decision; every fit stays frozen.
 
 The input is the closed P busy windows (one slice long) of the decision interval. The seconds per restored token is a

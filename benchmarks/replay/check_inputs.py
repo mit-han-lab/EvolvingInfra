@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Check a workload against its offline validation report.
 
 `convert_traces_to_strict.py validate --report <workload>.validate.json` records the

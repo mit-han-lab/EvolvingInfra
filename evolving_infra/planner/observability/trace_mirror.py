@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The controller's copies of every worker's scheduler traces, read from the hosts' trace servers."""
 from pathlib import Path
 import re

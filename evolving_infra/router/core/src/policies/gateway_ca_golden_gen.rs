@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Synthetic request sequences for the gateway parity test. The same code

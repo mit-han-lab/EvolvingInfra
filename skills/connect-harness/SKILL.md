@@ -24,7 +24,8 @@ harness installed on the machine where it runs.
 ## Inputs
 
 - The gateway URL: `gateway_url` in the `stack.json` of the work directory of `evolving-infra serve`
-  on the first host (port 30800), reachable from the machine that runs the harness.
+  on the first host (port 30800), reachable from the machine that runs the harness. Only a config
+  with a `gateway` section starts the gateway; the `examples/agents/` configs have one.
 - Which harness, and whether it is installed (`pi --version`, `claude --version`,
   `codex --version`). Do not install a harness without asking.
 - Never ask for a token or password: the scripts use no credential of the person's.

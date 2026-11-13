@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Scaffolding shared by the planner tests.
 
 tests/planner has no __init__.py, so pytest's default (prepend) import mode puts this directory on sys.path and the

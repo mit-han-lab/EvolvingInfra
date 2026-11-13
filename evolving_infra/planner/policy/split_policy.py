@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The decision rule: move to the P count whose minute-by-minute gain is consistent and largest."""
 import math
 from statistics import fmean, stdev

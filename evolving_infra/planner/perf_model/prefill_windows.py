@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Closed P windows of an ongoing run (one slice long, 60 s by default); never waits for engines to idle.
 
 Callers supply complete JSONL records cut at the declared deadline and a closed telemetry snapshot. Worker clock

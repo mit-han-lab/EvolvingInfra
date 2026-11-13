@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Decode-abort evidence must survive a client cancellation (execution-ledger leak).
 
 An open-loop dry run left one execution unresolved forever: the D engine's abort

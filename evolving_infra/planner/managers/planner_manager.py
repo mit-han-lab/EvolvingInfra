@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The planner's main loop: wait out the cold start, fit each worker once after learning, then move P/D roles.
 
 From the first completed request the planner waits until the share of input tokens served from cache settles

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """KV-event wire compatibility: the engine's KV-event format -> Dynamo 1.4.0.
 
 One process per worker. This changes representation only: existing salted STORE

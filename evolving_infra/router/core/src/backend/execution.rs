@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Lifecycle for externally forwarded prepared inputs. This owns handles to the
 //! existing Backend ledger (the P-leg's reservation and the D-leg's in-flight
 //! decode count), never a separate load counter. Uncertain transport

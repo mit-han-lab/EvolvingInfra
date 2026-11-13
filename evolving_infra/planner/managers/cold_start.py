@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """When the cold start is over: the share of input tokens served from cache stops rising.
 
 From the first observation with completed requests on, the router's completed-usage counters are cut into slices

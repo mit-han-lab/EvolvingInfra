@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Real TCP protocol tests for descriptor-only placement and prepared forwarding."""
 import asyncio
 import copy

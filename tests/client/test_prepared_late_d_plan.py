@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Late D choose through the client SDK: the router's prepared plan with decode candidates.
 
 With ``--pd-late-decode choose`` under external role control, the router's

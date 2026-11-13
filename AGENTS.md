@@ -68,6 +68,11 @@ fails for the reported reason.
 Docs and comments: plain statements of what the code does. No hedging ("not tested yet",
 "may change"), no history of how a file came to be.
 
+File headers: a new source file starts with `SPDX-FileCopyrightText: Copyright (c) 2026 The
+evolving-infra Authors` and `SPDX-License-Identifier: MIT` (Apache-2.0 under
+`evolving_infra/engine/` and `evolving_infra/router/core/`). Files copied from another project
+keep its header ([`NOTICE`](NOTICE)).
+
 Commits: imperative subject that says what changed for the user, body that says why.
 
 ## 4. Skills

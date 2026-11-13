@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Clock audit of the worker hosts against the controller, over the trace servers' ``GET /time``."""
 from concurrent.futures import ThreadPoolExecutor
 import http.client

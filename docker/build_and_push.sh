@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 # Build the runtime image from one committed revision and push it to Docker Hub.
 #
 #   bash docker/build_and_push.sh                      # origin/main

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Dynamo cache observations adapted to the existing cache-aware selector.
 //! This adapter has no pull-hint injection or independent placement algorithm.
 //!

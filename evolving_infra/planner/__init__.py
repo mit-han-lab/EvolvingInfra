@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Planner: adapts the prefill/decode split of a fixed set of symmetric workers while the service runs.
 
 The packages follow the data from the engines to a role change:

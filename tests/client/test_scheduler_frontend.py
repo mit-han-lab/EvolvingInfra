@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Identity and real HTTP protocol checks without a GPU or SGLang process."""
 import asyncio
 from concurrent.futures import ThreadPoolExecutor

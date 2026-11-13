@@ -3,7 +3,10 @@
 `evolving_infra/router/core/` is derived from SGLang's experimental `sgl-router` (Apache-2.0)
 at upstream commit `9a489f8d2f` and developed for this project. The import kept the Rust workspace and its
 `sgl-kv-indexer` path dependency. Original SPDX and "SGLang Authors" notices are
-kept; `LICENSE` here is the Apache-2.0 text of the imported repository.
+kept, also on the files ported from sgl-model-gateway (`src/policies/gateway_ca_tree.rs`,
+`gateway_cache_aware.rs`, `decode_po2_smg.rs`). Files written for this project carry
+`SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors` and are Apache-2.0
+like the rest of the crate; `LICENSE` here is the Apache-2.0 text of the imported repository.
 
 The binary and crate names (`sgl-router`, `sgl_router`, `sgl-kv-indexer`) are
 kept for CLI compatibility. Building and running needs no SGLang or engine

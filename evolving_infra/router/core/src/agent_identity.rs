@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! The Python frontend's problem / branch / step identity at HTTP ingress.
 //! Identity is independent of routing affinity, cache namespace and retries.
 //!

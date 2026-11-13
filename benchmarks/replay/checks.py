@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The runtime checks that decide whether a replay run is valid.
 
 Before load every worker drains and stays quiet (wait_for_quiet); after it the steady window

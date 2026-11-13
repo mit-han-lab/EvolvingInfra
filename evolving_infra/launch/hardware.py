@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """What the launcher reads from the node: GPUs, the RDMA NIC of each GPU, GPU peer memory, addresses."""
 import os
 from pathlib import Path

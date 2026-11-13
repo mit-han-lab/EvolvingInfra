@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The replay adapter's arguments: the paper preset, stack.json, and the record of differences."""
 import importlib.util
 import json

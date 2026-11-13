@@ -32,3 +32,7 @@ The Rust router (`sgl-router`). [`README.md`](README.md) has the build;
   `data/forecast-error-table.json`, the same file as `tests/fixtures/forecast/bound-params.json`.
 - **A flag that only makes sense with `--policy symmetric_pd`** is listed in the check that
   rejects it under other policies (search `symmetric_pd_import_cache_policy.is_some()`).
+- **File headers.** A new file starts with
+  `// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors` and
+  `// SPDX-License-Identifier: Apache-2.0`. Files with an "SGLang Authors" header come from
+  upstream and keep it ([`PROVENANCE.md`](PROVENANCE.md)).

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Turn an agent session into a Markdown transcript that is safe to attach to a pull request.
 
     python tools/scrub_transcript.py SESSION [-o transcript.md] [--redact NAME ...]

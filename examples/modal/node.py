@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """What runs in each container of a benchmark cluster (Modal-agnostic apart from the Dict and Volumes
 handed in by app.py).
 

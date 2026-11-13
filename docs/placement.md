@@ -80,12 +80,12 @@ DeepSeek-V4-Flash example configs pin these settings.
 
 ### Names in the code
 
-| Term here | Code | Earlier name |
-|---|---|---|
-| Placement cost function | `scheduler/placement_cost.rs`, `PlacementCostParams` | trade |
-| Prefill completion forecast | `forecast/`, `prefill_forecast.rs` | e3 |
-| Global queue | `global_queue.rs`, `scheduler/cost_function/queue.rs` | gwq |
-| Token-count wait (`--prefill-wait tokens`) | `PrefillWait::Tokens`, `prefill_work.rs` (`PrefillWorkBook`) | ledger |
+| Term here | Code |
+|---|---|
+| Placement cost function | `scheduler/placement_cost.rs`, `PlacementCostParams` |
+| Prefill completion forecast | `forecast/`, `prefill_forecast.rs` |
+| Global queue | `global_queue.rs`, `scheduler/cost_function/queue.rs` |
+| Token-count wait (`--prefill-wait tokens`) | `PrefillWait::Tokens`, `prefill_work.rs` (`PrefillWorkBook`) |
 
 ## Peer pulls
 

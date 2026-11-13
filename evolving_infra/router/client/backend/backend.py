@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Async client for the Rust runtime; engine adaptation and state stay in Rust."""
 from collections.abc import AsyncIterator
 import asyncio

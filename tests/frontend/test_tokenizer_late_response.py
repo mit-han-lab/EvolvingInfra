@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Real tokenizer-owned HTTP pool against an independent Uvicorn process."""
 import asyncio
 import multiprocessing

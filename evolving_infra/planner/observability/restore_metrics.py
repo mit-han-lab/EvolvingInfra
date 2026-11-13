@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Restored-token counters of the P workers: scraped by the controller, read back by the fit.
 
 Every P engine exports ``sglang:load_back_tokens_total{pool="kv"}``, the tokens it loaded back from host memory into

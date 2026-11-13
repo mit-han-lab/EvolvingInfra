@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The planner's timeline of a run: cold start, fit, and every role change.
 
     python switch_times.py PLANNER_DIR [BENCH_DIR]

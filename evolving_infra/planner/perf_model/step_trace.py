@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Scheduler step traces: loading the iteration records, D step features and groups of consecutive steps."""
 from functools import cache
 

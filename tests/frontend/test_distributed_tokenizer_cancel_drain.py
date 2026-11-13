@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Real TCP cancellation fixtures; abort ACKs deliberately precede engine termination."""
 import asyncio
 import json

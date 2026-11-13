@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """AGENTS.md files and skills follow docs/contributing/agent-instructions.md."""
 import importlib.util
 from pathlib import Path

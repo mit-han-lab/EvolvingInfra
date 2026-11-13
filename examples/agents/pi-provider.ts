@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: MIT
 // Pi provider for the Evolving Infra agent gateway (OpenAI chat completions), loaded by pi.sh with
 // `pi -e`. The gateway and the model come from EVOLVING_INFRA_URL and EVOLVING_INFRA_MODEL.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

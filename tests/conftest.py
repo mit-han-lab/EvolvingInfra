@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Skip a test module, with its reason, when the extra it exercises is not installed.
 
 Install everything with ``pip install -e ".[client,frontend,indexer,planner,test]"``.

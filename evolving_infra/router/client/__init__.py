@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Python client for the Router: agent identities and the Scheduler facade.
 
 Importing this package loads no HTTP transport; ``Agent``, ``Backend`` and

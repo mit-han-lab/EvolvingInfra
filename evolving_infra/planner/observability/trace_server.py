@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The trace server on every worker host.
 
 Every worker host runs ``python -m evolving_infra.planner serve-traces`` over the parent of the engines'

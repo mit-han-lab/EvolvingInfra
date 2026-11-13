@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! SGLang request bodies. No placement or load accounting lives here.
 //!
 //! Builds prepared-input targets and per-leg JSON payloads, estimates prompt

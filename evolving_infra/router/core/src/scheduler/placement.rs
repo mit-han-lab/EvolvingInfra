@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 The SGLang Authors
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
 // SPDX-License-Identifier: Apache-2.0
 
 //! `place()` - the symmetric P/D leg-placement function.

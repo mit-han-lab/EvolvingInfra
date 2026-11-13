@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Dynamo owns the directory. Prepared hashes bypass central token hashing.
 
 Every query leaves through Dynamo's `/query_by_hash`: token IDs are hashed here

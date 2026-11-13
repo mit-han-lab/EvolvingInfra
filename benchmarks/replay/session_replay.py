@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Extra-only replay wiring: preserve prepared identities and signal real branch END.
 
 install(end_outcomes=...) names the branch outcomes that send END (default: only "complete"). With

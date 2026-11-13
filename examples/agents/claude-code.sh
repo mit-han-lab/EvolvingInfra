@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 # Claude Code on Evolving Infra, through translator.sh (Anthropic Messages -> chat completions).
 #   bash examples/agents/translator.sh &          # once
 #   bash examples/agents/claude-code.sh [claude arguments...]

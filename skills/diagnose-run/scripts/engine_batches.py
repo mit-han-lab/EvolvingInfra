@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Decode and prefill batch statistics of engines in one window of a replay, from engine logs.
 
     python engine_batches.py decode  RUN_DIR --skip-s 1200 --window-s 600 ENGINE_LOG [ENGINE_LOG ...]

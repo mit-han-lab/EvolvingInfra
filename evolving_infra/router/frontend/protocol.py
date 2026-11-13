@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Versioned tokenizer envelopes shared by the service and forwarding code."""
 
 from typing import Annotated, Literal

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Export request identities and lazily load the Agent identity allocator.
 """
 from .identity import RequestIdentity

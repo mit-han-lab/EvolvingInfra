@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! SGLang symmetric KV side-channel adapter. Engines own actual page lifetimes.
 //!
 //! Resolves worker side-channel endpoints and creates matching export/import

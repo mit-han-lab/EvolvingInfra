@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+// SPDX-License-Identifier: Apache-2.0
+
 //! Versioned trajectory retention, independent of placement and cache hashes.
 //!
 //! The request path only updates bounded local metadata. One background task
@@ -2101,10 +2104,12 @@ mod tests {
         assert_eq!(live.state.lock().sessions.len(), MAX_SESSIONS);
     }
 
-    /// MEASURE. Control cycles a decode->prefill clear needs when N live
-    /// sessions recorded the worker and every engine answers at once.
+    /// Control cycles a decode->prefill clear needs when N live sessions
+    /// recorded the worker and every engine answers at once: clears run on
+    /// every other cycle, one `status` round learns the boot, then one
+    /// `release` round per `BATCH` sessions.
     #[test]
-    fn measure_worker_clear_cycles() {
+    fn worker_clear_cycles_grow_with_batches() {
         for n in [1_000usize, 10_000] {
             let owner = KvSessions::new("controller".into());
             for i in 0..n {
@@ -2138,7 +2143,7 @@ mod tests {
                 }
                 assert!(cycles < 1_000_000);
             }
-            println!("MEASURE sessions={n} clear_cycles={cycles}");
+            assert_eq!(cycles, 1 + 2 * n.div_ceil(BATCH), "sessions={n}");
         }
     }
 }

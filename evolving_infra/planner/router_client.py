@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The router endpoints the planner reads or writes.
 
 Role changes use the router's ``GET``/``PUT /symmetric_pd/roles`` with epoch/revision compare-and-set (the Router

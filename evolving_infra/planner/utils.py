@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Helpers shared across the planner: JSON files, HTTP without proxies, and a number check."""
 import json
 import math

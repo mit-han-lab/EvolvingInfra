@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Opt-in task / child / model-step identities for the frozen DAG replay client.
 
 request_id = event_index * MIGRATION_SLOTS + attempt, so a Trie request migration (a fresh rid_<hex>

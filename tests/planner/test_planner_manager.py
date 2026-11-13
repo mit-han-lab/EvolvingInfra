@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """The control loop against a fake router and fake engines on a virtual clock: no network, no GPU.
 
 The router serves roles with epoch/revision compare-and-set, drains a switched worker for a few seconds, and reports

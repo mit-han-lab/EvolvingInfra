@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
 // SPDX-License-Identifier: Apache-2.0
 
 //! `--chat-tools-tokenize`: token ids of a chat request with tools, from an

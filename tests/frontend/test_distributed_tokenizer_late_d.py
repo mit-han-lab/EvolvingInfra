@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Late D choose through the distributed tokenizer: one D-leg per candidate.
 
 CPU protocol tests with real local TCP upstreams (fake engines); not GPU tests.

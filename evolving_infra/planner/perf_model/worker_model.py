@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The evolving-infra Authors
+# SPDX-License-Identifier: MIT
 """Per-worker P and D step-time models, fitted on the learning interval with a chronological 70/30 holdout."""
 import math
 
