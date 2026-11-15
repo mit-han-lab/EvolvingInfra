@@ -1,3 +1,4 @@
+// Adapted from SGLang python/sglang/kernels/jit/csrc/deepseek_v4/hash_topk.cuh (commit 9a489f8d2f), modified for evolving-infra.
 #include <sgl_kernel/tensor.h>
 #include <sgl_kernel/utils.h>
 

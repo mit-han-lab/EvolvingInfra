@@ -1,7 +1,7 @@
 # Changes from SGLang
 
 The engine is SGLang's `python/sglang` at upstream commit `9a489f8d2f`, renamed to
-`decoupled_engine`. Of its 3443 files, 85 are new and 152 are modified upstream files; the
+`decoupled_engine`. Of its 3443 files, 85 are new and 160 are modified upstream files; the
 rest differ from upstream only by the rename. Paths below are relative to `decoupled_engine/`.
 [README.md](README.md#relation-to-sglang) says what the changes do.
 
@@ -22,7 +22,7 @@ git grep -l 'Adapted from SGLang' -- evolving_infra/engine/decoupled_engine
 | `srt/disaggregation/symmetric/` | `README.md`, `__init__.py`, `admit_after_launch.py`, `consensus.py`, `export_table.py`, `fake_planes.py`, `import_queue.py`, `late_d_sym.py`, `launch_thread.py`, `marks.py`, `planes.py`, `publish_readback.py`, `scheduler_mixin.py` |
 | `srt/layers/attention/dsv4/` | `visible_window.py` |
 | `srt/managers/scheduler_components/` | `collective_guard.py`, `decode_load_consumer.py`, `deferred_write_submit.py`, `gate_pending_reorder.py`, `m2_lockstep_stats.py`, `next_batch_host_prefetch.py`, `phase_timers.py`, `prefill_routing_snapshot.py`, `prefill_state_push.py`, `prefill_timeline.py`, `prefill_work.py`, `sched_tracer.py` |
-| `srt/mem_cache/` | `ce_2d_load.py`, `ce_loader.py`, `ce_peer.py`, `ce_submit.c`, `cpu_page_book.py`, `dedup_ipc_fanout.py`, `dsa_host_dedup.py`, `dsv4_host_dedup.py`, `dsv4_window_defaults.py`, `hicache_pipelined_sync.py`, `host_copy_bytes.py`, `load_quarantine.py`, `mla_host_dedup.py`, `peer_gpu_export.py`, `peer_gpu_export_cache.py`, `peer_kv_demote.py`, `peer_kv_namespace.py`, `peer_kv_servicer.py`, `peer_kv_touch.py`, `staged_ce_load.py`, `swa_backfill.py` |
+| `srt/mem_cache/` | `ce_2d_load.py`, `ce_loader.py`, `ce_peer.py`, `ce_submit.c`, `cpu_page_book.py`, `dedup_ipc_fanout.py`, `dsa_host_dedup.py`, `dsv4_host_dedup.py`, `dsv4_window_defaults.py`, `hicache_pipelined_sync.py`, `host_copy_bytes.py`, `load_quarantine.py`, `mamba_radix_cache.py`, `mla_host_dedup.py`, `peer_gpu_export.py`, `peer_gpu_export_cache.py`, `peer_kv_demote.py`, `peer_kv_namespace.py`, `peer_kv_servicer.py`, `peer_kv_touch.py`, `staged_ce_load.py`, `swa_backfill.py` |
 | `srt/mem_cache/allocator/` | `cpu_paged.py` |
 | `srt/mem_cache/pool_host/` | `numa_split.py`, `numa_split_policy.py`, `shared_dedup.py`, `slot_allocator.py`, `vmm_share.py` |
 | `srt/mem_cache/storage/peer_kv/` | `__init__.py`, `peer_kv_backend.py` |
@@ -31,18 +31,22 @@ git grep -l 'Adapted from SGLang' -- evolving_infra/engine/decoupled_engine
 | `srt/multimodal/processors/` | `deepseek_v4_vl.py`, `glm5v.py` |
 | `srt/speculative/dspark_components/` | `dspark_synthetic_oracle.py` |
 
-## Modified upstream files (152)
+## Modified upstream files (160)
 
 Each carries the header `Adapted from SGLang <upstream path> (commit 9a489f8d2f)`.
 
 | Directory | Files |
 |---|---|
 | (top level) | `__init__.py`, `launch_server.py` |
+| `kernels/jit/csrc/deepseek_v4/` | `hash_topk.cuh`, `main_norm_rope.cuh` |
+| `kernels/jit/csrc/moe/` | `moe_fused_gate.cuh` |
 | `kernels/ops/attention/` | `dsv4_attn_metadata_kernels.py` |
 | `kernels/ops/attention/dsa/` | `index_buf_accessor.py`, `transform_index.py` |
 | `kernels/ops/attention/dsv4/` | `sparse_prefill_kernels.py` |
 | `kernels/ops/layernorm/` | `mhc.py` |
 | `kernels/ops/memory/` | `allocator.py`, `common.py` |
+| `kernels/ops/moe/` | `moe_fused_gate.py` |
+| `kernels/ops/speculative/dspark/` | `dspark_accept.py`, `dspark_verify_window.py` |
 | `srt/` | `environ.py`, `server_args.py` |
 | `srt/arg_groups/` | `argparse_actions.py`, `attention_hook.py`, `deepseek_v4_hook.py`, `hicache_hook.py`, `kv_cache_hook.py`, `model_hook.py`, `overrides.py`, `pd_disaggregation_hook.py`, `pipeline.py`, `serving_hook.py`, `speculative_hook.py` |
 | `srt/batch_overlap/` | `two_batch_overlap.py` |
@@ -80,7 +84,7 @@ Each carries the header `Adapted from SGLang <upstream path> (commit 9a489f8d2f)
 | `srt/parser/` | `reasoning_parser.py` |
 | `srt/sampling/` | `sampling_batch_info.py`, `sampling_params.py` |
 | `srt/session/` | `streaming_session.py` |
-| `srt/speculative/` | `eagle_disaggregation.py`, `eagle_info.py`, `eagle_utils.py`, `eagle_worker_common.py`, `eagle_worker_v2.py` |
+| `srt/speculative/` | `dflash_utils.py`, `eagle_disaggregation.py`, `eagle_info.py`, `eagle_utils.py`, `eagle_worker_common.py`, `eagle_worker_v2.py` |
 | `srt/speculative/dspark_components/` | `dspark_verify.py`, `dspark_worker_v2.py` |
 | `srt/utils/` | `common.py`, `device_timer.py`, `json_response.py`, `numa_utils.py`, `triton_load_watch.py` |
 | `srt/utils/hf_transformers/` | `processor.py` |
@@ -101,3 +105,10 @@ Later SGLang fixes taken by hand; the files they touch count as modified above.
 | #47116 | `68e57f4005` | `reasoning_tokens` is clamped to the output kept after stop truncation |
 | #48343 (generic parts) | `851642ade7` | Tool schemas with draft-07 `$id` pass validation; an explicit `include_usage: false` overrides the server default |
 | #46586 | `c81230bffe` | A streaming request whose client is gone is aborted at its next output; a closed chat stream closes its generator, and a closed or failed handler aborts the dispatched request it still owns |
+| #38409 | `2123aca87e` | The DeepSeek V4 K norm/RoPE kernel reads its cache locations after the PDL wait |
+| #34459 | `7152c14384` | DeepSeek V4 routing: sqrtsoftplus no longer underflows or overflows; hash top-k renormalization is floored (no NaN) |
+| #37472 | `c4b6338f3e` | DSPARK verify rows without candidates keep their indices in range (no device assert on padded graph rows) |
+| #42701, #44800 (scheduler line) | `3b0003dac1`, `f75232cb42` | HiCache write-through device-to-host copies wait for the forward stream |
+| #38138, #38835 | `f25848913d`, `a713349faf` | A split SWA node keeps its host lock and `host_uuid` on the new parent; host-locked halves stay out of the host LRU |
+| #47620 | `e886acfa8b` | The storage prefetch timeout is voted once per scheduler tick, not once per admission poll |
+| #38204 | `6e312af8c2` | Prefix hash values are collected iteratively (no RecursionError on deep chains) |

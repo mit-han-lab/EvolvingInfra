@@ -1,3 +1,4 @@
+# Adapted from SGLang python/sglang/kernels/ops/speculative/dspark/dspark_accept.py (commit 9a489f8d2f), modified for evolving-infra.
 from __future__ import annotations
 
 from typing import Optional
