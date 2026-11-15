@@ -82,6 +82,8 @@ class PrefetchOperation(StorageOperation):
         self.requires_exact_endpoint = False
         self._lock = threading.Lock()
         self._terminated_flag = False
+        # Rank-agreed timeout verdict (unified cache deadline vote).
+        self.deadline_expired = False
         self.storage_hit_count = 0
         self.start_time = time.monotonic()
         # Cross-engine KV pull hint (kv-p2p); opaque, surfaced to the storage
