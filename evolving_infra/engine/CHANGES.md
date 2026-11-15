@@ -1,7 +1,7 @@
 # Changes from SGLang
 
 The engine is SGLang's `python/sglang` at upstream commit `9a489f8d2f`, renamed to
-`decoupled_engine`. Of its 3443 files, 85 are new and 150 are modified upstream files; the
+`decoupled_engine`. Of its 3443 files, 85 are new and 151 are modified upstream files; the
 rest differ from upstream only by the rename. Paths below are relative to `decoupled_engine/`.
 [README.md](README.md#relation-to-sglang) says what the changes do.
 
@@ -31,7 +31,7 @@ git grep -l 'Adapted from SGLang' -- evolving_infra/engine/decoupled_engine
 | `srt/multimodal/processors/` | `deepseek_v4_vl.py`, `glm5v.py` |
 | `srt/speculative/dspark_components/` | `dspark_synthetic_oracle.py` |
 
-## Modified upstream files (150)
+## Modified upstream files (151)
 
 Each carries the header `Adapted from SGLang <upstream path> (commit 9a489f8d2f)`.
 
@@ -55,7 +55,7 @@ Each carries the header `Adapted from SGLang <upstream path> (commit 9a489f8d2f)
 | `srt/disaggregation/nixl/` | `conn.py` |
 | `srt/distributed/device_communicators/` | `mooncake_transfer_engine.py` |
 | `srt/entrypoints/` | `engine.py`, `grpc_bridge.py`, `http_server.py` |
-| `srt/entrypoints/openai/` | `encoding_dsv4.py`, `protocol.py`, `serving_chat.py`, `serving_completions.py` |
+| `srt/entrypoints/openai/` | `encoding_dsv4.py`, `protocol.py`, `serving_chat.py`, `serving_completions.py`, `usage_processor.py` |
 | `srt/function_call/` | `deepseekv32_detector.py`, `glm47_moe_detector.py`, `glm4_moe_detector.py`, `utils.py` |
 | `srt/hardware_backend/npu/` | `memory_pool_npu.py` |
 | `srt/hardware_backend/npu/dsv4/` | `dsv4_memory_pool.py` |
@@ -97,3 +97,4 @@ Later SGLang fixes taken by hand; the files they touch count as modified above.
 | #46053 | `1442917b4a` | GLM non-streaming tool names are stripped of surrounding whitespace |
 | #43006 | `4d5692b6cd` | DeepSeek V3.2/V4 encoders leave the tools out of the prompt when `tool_choice` is `none` |
 | #48228 | `e15d36b9b2` | A prompt longer than the KV pool is rejected with OpenAI's "maximum context length" wording |
+| #43005 | `11cd2701a8` | With `--enable-cache-report`, usage carries `prompt_tokens_details.cached_tokens` even when it is 0 |

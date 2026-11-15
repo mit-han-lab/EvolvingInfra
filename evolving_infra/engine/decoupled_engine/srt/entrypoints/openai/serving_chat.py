@@ -714,8 +714,8 @@ class OpenAIServingChat(OpenAIServingBase):
     ) -> Optional[PromptTokensDetails]:
         if not self.tokenizer_manager.server_args.enable_cache_report:
             return None
-        return UsageProcessor._details_if_cached(
-            content["meta_info"].get("cached_tokens", 0)
+        return PromptTokensDetails(
+            cached_tokens=content["meta_info"].get("cached_tokens", 0)
         )
 
     def _reported_prompt_tokens(self, meta_info: Dict[str, Any]) -> int:
