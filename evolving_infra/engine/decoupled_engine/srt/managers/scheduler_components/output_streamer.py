@@ -506,7 +506,9 @@ class _GenerationStreamAccumulator:
                 req.sampling_params.spaces_between_special_tokens
             )
             self.no_stop_trim.append(req.sampling_params.no_stop_trim)
-            self.reasoning_tokens.append(req.reasoning_tokens)
+            # A verified token block can extend past the stop position. Report
+            # reasoning usage only within the same prefix as completion usage.
+            self.reasoning_tokens.append(min(req.reasoning_tokens, len(output_ids_)))
             self.completion_tokens.append(
                 beam_completion_tokens(beam_output)
                 if beam_output is not None

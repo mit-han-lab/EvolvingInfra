@@ -98,3 +98,4 @@ Later SGLang fixes taken by hand; the files they touch count as modified above.
 | #43006 | `4d5692b6cd` | DeepSeek V3.2/V4 encoders leave the tools out of the prompt when `tool_choice` is `none` |
 | #48228 | `e15d36b9b2` | A prompt longer than the KV pool is rejected with OpenAI's "maximum context length" wording |
 | #43005 | `11cd2701a8` | With `--enable-cache-report`, usage carries `prompt_tokens_details.cached_tokens` even when it is 0 |
+| #47116 | `68e57f4005` | `reasoning_tokens` is clamped to the output kept after stop truncation |
