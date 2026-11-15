@@ -656,12 +656,28 @@ class SWAComponent(TreeComponent):
             child.component_data[self.component_type].host_value = child_swa_host_value[
                 split_len:
             ].clone()
+            parent_swa_data = new_parent.component_data[self.component_type]
+            child_swa_data = child.component_data[self.component_type]
+            parent_swa_data.host_lock_ref = child_swa_data.host_lock_ref
+            # The host lock's release walk stops at the host_uuid node, so the
+            # upper half that now holds the lock boundary must carry it.
+            host_uuid = child_swa_data.metadata.pop("host_uuid", None)
+            if host_uuid is not None:
+                parent_swa_data.metadata["host_uuid"] = host_uuid
+
             host_lru = self.tree_core.host_lru_lists[self.component_type]
-            if new_parent.component_data[self.component_type].value is None:
+            # Host-locked halves stay out of the host LRU: in-flight IO
+            # holds them, and host acquire removed the node at 0->1.
+            if (
+                new_parent.component_data[self.component_type].value is None
+                and parent_swa_data.host_lock_ref == 0
+            ):
                 host_lru.insert_mru(new_parent)
-            if child.component_data[
-                self.component_type
-            ].value is None and not host_lru.in_list(child):
+            if (
+                child.component_data[self.component_type].value is None
+                and child_swa_data.host_lock_ref == 0
+                and not host_lru.in_list(child)
+            ):
                 host_lru.insert_mru(child)
 
         # parent inherits the swa_uuid from child for swa lock ref
