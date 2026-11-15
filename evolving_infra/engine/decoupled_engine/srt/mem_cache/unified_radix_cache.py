@@ -17,6 +17,7 @@ import socket
 import threading
 import time
 import uuid
+import zlib
 from array import array
 from dataclasses import dataclass, replace
 from queue import Queue
@@ -1828,6 +1829,10 @@ class UnifiedRadixCache(BasePrefixCache):
             # As of this check (likewise for the pipelined sync).
             detail["digest_without_order"] = self._step_sync_digest(with_order=False)
             detail["evict_order"] = list(self._evict_order_fields())
+        prefetch_check = self._prefetch_vote_on()
+        if prefetch_check:
+            live = list(self.ongoing_prefetch)
+            detail["live_prefetches"] = {"len": len(live), "head": live[:16]}
         gathered: list = [detail]
         if dist_ready:
             try:
@@ -1843,14 +1848,19 @@ class UnifiedRadixCache(BasePrefixCache):
             parts.append("HiCache ack queues")
         if settle_check:
             parts.append("settled write acks")
+        if prefetch_check:
+            parts.append("live storage prefetches")
         if order_check:
             parts.append("eviction order")
             base = detail["digest_without_order"]
+            live = detail.get("live_prefetches")
             if (
                 self._evict_order_check_mode() == "log"
                 and len(gathered) > 1
                 and all(
-                    isinstance(g, dict) and g.get("digest_without_order") == base
+                    isinstance(g, dict)
+                    and g.get("digest_without_order") == base
+                    and g.get("live_prefetches") == live
                     for g in gathered
                 )
             ):
@@ -4096,22 +4106,59 @@ class UnifiedRadixCache(BasePrefixCache):
         if self.prefetch_stop_policy == "wait_complete":
             return False
         elif self.prefetch_stop_policy == "timeout":
-            # Wall-clock time may differ among ranks, all-reduce is needed to ensure
-            # all ranks reach the same final result. Otherwise PP/TP ranks will diverge.
-            #
-            # For TP, if any rank reaches the timeout, the final result is timeout.
-            #
-            # For PP, PP0 makes the decision and other ranks follow PP0's decision.
-            should_terminate = False
-            if self.pp_rank == 0:
-                should_terminate = self._prefetch_timeout_check_linear_func(operation)
-            should_terminate_tensor = torch.tensor(
-                int(should_terminate), dtype=torch.int, device="cpu"
-            )
-            self._all_reduce(should_terminate_tensor, torch.distributed.ReduceOp.MAX)
-            return should_terminate_tensor.item() == 1
+            # The verdict is agreed once per tick by _vote_prefetch_deadlines;
+            # a poll only reads it, so ranks may poll different requests
+            # (batch_is_full, allocatable-request exits) without a collective.
+            return operation.deadline_expired
         else:
             return True
+
+    def _vote_prefetch_deadlines(self) -> None:
+        """One MAX vote per tick over every live prefetch's timeout budget.
+
+        Wall clocks differ across ranks: PP0 decides per operation, TP takes
+        MAX (any rank timed out) and _all_reduce relays the verdict along PP.
+        The tensor has one slot per ``ongoing_prefetch`` entry in insertion
+        order; the step sync checks that set is rank-identical
+        (_prefetch_live_digest), and the drain between them retires in
+        lockstep. With no live prefetch no rank issues a collective. An
+        expired verdict is sticky; the admission poll terminates and retires
+        the operation as before.
+        """
+        if self.prefetch_stop_policy != "timeout" or not self.ongoing_prefetch:
+            return
+        operations = [info.operation for info in self.ongoing_prefetch.values()]
+        expired = [0] * len(operations)
+        if self.pp_rank == 0:
+            expired = [
+                int(
+                    operation.deadline_expired
+                    or self._prefetch_timeout_check_linear_func(operation)
+                )
+                for operation in operations
+            ]
+        verdicts = torch.tensor(expired, dtype=torch.int, device="cpu")
+        self._all_reduce(verdicts, torch.distributed.ReduceOp.MAX)
+        for operation, verdict in zip(operations, verdicts.tolist()):
+            if verdict:
+                operation.deadline_expired = True
+
+    def _prefetch_vote_on(self) -> bool:
+        return (
+            self.enable_storage
+            and self.prefetch_stop_policy == "timeout"
+            and bool(self.ongoing_prefetch)
+        )
+
+    def _prefetch_live_digest(self, digest: int) -> int:
+        """Fold the live prefetch set (``ongoing_prefetch`` keys in insertion
+        order) into a step-sync digest while the deadline vote reads it, so a
+        rank whose admission polls retired a different set raises at the
+        sync, on every rank, instead of entering a vote of another length."""
+        if not self._prefetch_vote_on():
+            return digest
+        live = "\0".join(map(str, self.ongoing_prefetch)).encode()
+        return (digest * 1000003 + zlib.crc32(live) + 1) & self._TP_DIGEST_MASK
 
     @rank_consensus(same_params=True, same_results=True)
     def check_prefetch_progress(self, req_id: str) -> bool:
@@ -5221,7 +5268,7 @@ class UnifiedRadixCache(BasePrefixCache):
         # x matched on every rank. x = the write_back reclaim digest (victim
         # order) folded with the ack-queue shapes (_step_sync_digest), and the
         # structural digest (free with the reduce).
-        digest = self._step_sync_digest()
+        digest = self._prefetch_live_digest(self._step_sync_digest())
         sd = self.structural_digest_pair()[0] if self.tp_digest_mode() != "off" else 0
         # Window SWA backfill: the job-list digest, checked every step in any
         # digest mode. poll()'s all-reduce is sized by the job count, so a
@@ -5661,6 +5708,10 @@ class UnifiedRadixCache(BasePrefixCache):
                     extra_release_counts=extra_release_counts,
                     log_metrics=True,
                 )
+        if self.enable_storage and not skip_sync:
+            # After the drain: a prefetch it retired is not voted on. A skipped
+            # step skips on every rank alike; the vote waits for the next sync.
+            self._vote_prefetch_deadlines()
         if self._swa_window:
             if self.swa_backfill is not None and not skip_sync and not pipelined:
                 # Lockstep point: commits land here, one MIN all-reduce.
@@ -5826,7 +5877,7 @@ class UnifiedRadixCache(BasePrefixCache):
                 *(extra[name] for name in extra_pool_names),
             )
         exporter = getattr(self, "gpu_export_manager", None)
-        digest = self._step_sync_digest()
+        digest = self._prefetch_live_digest(self._step_sync_digest())
         sd = self.structural_digest_pair()[0] if self.tp_digest_mode() != "off" else 0
         track_idle = getattr(self, "_idle_sync_enabled", False)
         backfill = self.swa_backfill

@@ -648,6 +648,9 @@ class Scheduler(
                 cache_controller.load_fence_stream = (
                     self.tp_worker.model_runner.forward_stream
                 )
+                cache_controller.write_fence_stream = (
+                    self.tp_worker.model_runner.forward_stream
+                )
                 # Overlap load-back: layer-wise config checks and the
                 # shared loader's I9 overlap check / redraw (flag-gated).
                 from decoupled_engine.srt.mem_cache.ce_loader import init_layerwise_loadback
