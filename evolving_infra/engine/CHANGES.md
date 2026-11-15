@@ -95,3 +95,4 @@ Later SGLang fixes taken by hand; the files they touch count as modified above.
 | #39136 | `6d6d42d1c0` | GLM-4.7 tool parser keeps argument types across JSON Schema unions (`anyOf`/`oneOf`/`$ref`/`const`) |
 | #45143 | `316ff4dce2` | GLM-4.5/4.7 streaming tool parsers scan only the new tail of an open call (was O(n²)) |
 | #46053 | `1442917b4a` | GLM non-streaming tool names are stripped of surrounding whitespace |
+| #43006 | `4d5692b6cd` | DeepSeek V3.2/V4 encoders leave the tools out of the prompt when `tool_choice` is `none` |

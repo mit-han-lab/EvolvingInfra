@@ -1338,11 +1338,15 @@ class OpenAIServingChat(OpenAIServingBase):
                 messages, request
             )
 
+            # tools is None when tool_choice is "none" (or no tool matched):
+            # render the request tools only when the request may call them.
+            request_tools = request.tools if tools else None
+
             if messages[0]["role"] != "system":
                 # insert an empty system prompt to help render tool system prompt
                 messages.insert(0, {"role": "system", "content": ""})
-            if request.tools:
-                messages[0]["tools"] = [tool.model_dump() for tool in request.tools]
+            if request_tools:
+                messages[0]["tools"] = [tool.model_dump() for tool in request_tools]
 
             # Default encoding (dsv4/dsv32)
             if self.chat_encoding_spec == "dsv4":
