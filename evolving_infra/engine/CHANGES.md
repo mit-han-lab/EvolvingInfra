@@ -1,7 +1,7 @@
 # Changes from SGLang
 
 The engine is SGLang's `python/sglang` at upstream commit `9a489f8d2f`, renamed to
-`decoupled_engine`. Of its 3443 files, 85 are new and 145 are modified upstream files; the
+`decoupled_engine`. Of its 3443 files, 85 are new and 148 are modified upstream files; the
 rest differ from upstream only by the rename. Paths below are relative to `decoupled_engine/`.
 [README.md](README.md#relation-to-sglang) says what the changes do.
 
@@ -31,7 +31,7 @@ git grep -l 'Adapted from SGLang' -- evolving_infra/engine/decoupled_engine
 | `srt/multimodal/processors/` | `deepseek_v4_vl.py`, `glm5v.py` |
 | `srt/speculative/dspark_components/` | `dspark_synthetic_oracle.py` |
 
-## Modified upstream files (145)
+## Modified upstream files (148)
 
 Each carries the header `Adapted from SGLang <upstream path> (commit 9a489f8d2f)`.
 
@@ -56,6 +56,7 @@ Each carries the header `Adapted from SGLang <upstream path> (commit 9a489f8d2f)
 | `srt/distributed/device_communicators/` | `mooncake_transfer_engine.py` |
 | `srt/entrypoints/` | `engine.py`, `grpc_bridge.py`, `http_server.py` |
 | `srt/entrypoints/openai/` | `encoding_dsv4.py`, `protocol.py`, `serving_chat.py`, `serving_completions.py` |
+| `srt/function_call/` | `deepseekv32_detector.py`, `utils.py` |
 | `srt/hardware_backend/npu/` | `memory_pool_npu.py` |
 | `srt/hardware_backend/npu/dsv4/` | `dsv4_memory_pool.py` |
 | `srt/layers/attention/` | `deepseek_v4_backend.py`, `dsa_backend.py` |
@@ -76,9 +77,18 @@ Each carries the header `Adapted from SGLang <upstream path> (commit 9a489f8d2f)
 | `srt/models/` | `deepseek_v2.py`, `deepseek_v4.py`, `deepseek_v4_dspark.py`, `kimi_k25.py` |
 | `srt/multimodal/processors/` | `kimi_k25.py` |
 | `srt/observability/` | `metrics_collector.py`, `req_time_stats.py` |
+| `srt/parser/` | `reasoning_parser.py` |
 | `srt/sampling/` | `sampling_batch_info.py`, `sampling_params.py` |
 | `srt/session/` | `streaming_session.py` |
 | `srt/speculative/` | `eagle_disaggregation.py`, `eagle_info.py`, `eagle_utils.py`, `eagle_worker_common.py`, `eagle_worker_v2.py` |
 | `srt/speculative/dspark_components/` | `dspark_verify.py`, `dspark_worker_v2.py` |
 | `srt/utils/` | `common.py`, `device_timer.py`, `json_response.py`, `numa_utils.py`, `triton_load_watch.py` |
 | `srt/utils/hf_transformers/` | `processor.py` |
+
+## Upstream fixes ported after 9a489f8d2f
+
+Later SGLang fixes taken by hand; the files they touch count as modified above.
+
+| Upstream | Commit | What |
+|---|---|---|
+| #39632 | `19ee4b566b` | DeepSeek DSML: emit only complete invokes; reasoning ends only at a line-start `<｜DSML｜tool_calls>`; think tokens leave structural-tag excludes |
