@@ -151,6 +151,21 @@ def parse_tool_call_arguments(arguments: str) -> Dict[str, Any]:
     return parsed_arguments
 
 
+class _ClosingStreamingResponse(StreamingResponse):
+    """Close the body iterator however streaming ends.
+
+    Starlette leaves the iterator suspended when a send fails, and on ASGI
+    spec >= 2.4 it also skips the background task, so nothing would abort the
+    request until the generator is garbage collected.
+    """
+
+    async def stream_response(self, send) -> None:
+        try:
+            await super().stream_response(send)
+        finally:
+            await self.body_iterator.aclose()
+
+
 def normalize_assistant_tool_call_arguments(
     message: Dict[str, Any], *, strict: bool = True
 ) -> None:
@@ -1613,11 +1628,14 @@ class OpenAIServingChat(OpenAIServingBase):
             return self.late_d_error_response(ended)
 
         async def prepend_first_chunk():
-            yield first_chunk
-            async for chunk in generator:
-                yield chunk
+            try:
+                yield first_chunk
+                async for chunk in generator:
+                    yield chunk
+            finally:
+                await generator.aclose()
 
-        return StreamingResponse(
+        return _ClosingStreamingResponse(
             prepend_first_chunk(),
             media_type="text/event-stream",
             background=self.tokenizer_manager.create_abort_task(adapted_request),
@@ -1658,15 +1676,14 @@ class OpenAIServingChat(OpenAIServingBase):
         video_tokens = {}
 
         stream_started = False
+        stream = self.tokenizer_manager.generate_request(adapted_request, raw_request)
         try:
             include_usage, continuous_usage_stats = should_include_usage(
                 request.stream_options,
                 self.tokenizer_manager.server_args.stream_response_default_include_usage,
             )
 
-            async for content in self.tokenizer_manager.generate_request(
-                adapted_request, raw_request
-            ):
+            async for content in stream:
                 index = content.get("index", 0)
                 if not hasattr(adapted_request, LATE_D_OUTCOME_ATTR):
                     # The first chunk says whether a symmetric choose
@@ -1897,6 +1914,10 @@ class OpenAIServingChat(OpenAIServingBase):
                 raise
             error = self.create_streaming_error_response(str(e))
             yield f"data: {error}\n\n"
+        finally:
+            # Closing generate_request runs its cleanup, which aborts the
+            # request only while this request still owns its rid.
+            await stream.aclose()
 
         yield "data: [DONE]\n\n"
 

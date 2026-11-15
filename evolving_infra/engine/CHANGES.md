@@ -100,3 +100,4 @@ Later SGLang fixes taken by hand; the files they touch count as modified above.
 | #43005 | `11cd2701a8` | With `--enable-cache-report`, usage carries `prompt_tokens_details.cached_tokens` even when it is 0 |
 | #47116 | `68e57f4005` | `reasoning_tokens` is clamped to the output kept after stop truncation |
 | #48343 (generic parts) | `851642ade7` | Tool schemas with draft-07 `$id` pass validation; an explicit `include_usage: false` overrides the server default |
+| #46586 | `c81230bffe` | A streaming request whose client is gone is aborted at its next output; a closed chat stream closes its generator, and a closed or failed handler aborts the dispatched request it still owns |

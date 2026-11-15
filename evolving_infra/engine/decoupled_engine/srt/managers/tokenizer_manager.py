@@ -1928,6 +1928,24 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 yield out
                 break
 
+            if (
+                request is not None
+                and not obj.background
+                and await request.is_disconnected()
+            ):
+                # Abort the request for disconnected requests (running)
+                self.abort_request(
+                    obj.rid,
+                    audit_client_disconnect=(
+                        isinstance(obj, GenerateReqInput)
+                        and obj.strict_replay_deadline_audit
+                    ),
+                )
+                # Use exception to kill the whole call stack and asyncio task
+                raise ValueError(
+                    f"Request is disconnected from the client side (type 3). Abort request {obj.rid=}"
+                )
+
             if is_stream:
                 # Record response sent time right before we send response.
                 if not state.time_stats.response_sent_to_client_time:
@@ -1937,18 +1955,6 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     ] = state.time_stats.get_response_sent_to_client_realtime()
                 chunk_sent = True
                 yield out
-            else:
-                if (
-                    request is not None
-                    and not obj.background
-                    and await request.is_disconnected()
-                ):
-                    # Abort the request for disconnected requests (non-streaming, running)
-                    self.abort_request(obj.rid)
-                    # Use exception to kill the whole call stack and asyncio task
-                    raise ValueError(
-                        f"Request is disconnected from the client side (type 3). Abort request {obj.rid=}"
-                    )
 
     async def _handle_batch_request(
         self,
@@ -2112,9 +2118,30 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             if state is not None and state.dispatched_to_scheduler:
                 self.abort_request(rid, audit_client_disconnect=True)
 
+    def _abort_dispatched_on_failure(self, obj) -> None:
+        """Abort the dispatched requests of a handler that failed or was closed
+        (the OpenAI stream closes it when the client is gone) while they still
+        own their rid. Dropping the state alone would leave the scheduler
+        running them, and the post-stream abort task finds no state later.
+        Strict-replay requests take the audited abort instead."""
+        if isinstance(obj, GenerateReqInput) and obj.strict_replay_deadline_audit:
+            return
+        if not hasattr(obj, "is_single") or obj.is_single:
+            rids = [obj.rid]
+        else:
+            rids = obj.rid
+        for rid in rids:
+            state = self.rid_to_state.get(rid)
+            if state is not None and state.dispatched_to_scheduler:
+                try:
+                    self.abort_request(rid)
+                except Exception:
+                    logger.exception("Failed to abort request %s during cleanup", rid)
+
     def _cleanup_failed_request(self, obj: GenerateReqInput) -> None:
         try:
             self._abort_dispatched_strict_replay(obj)
+            self._abort_dispatched_on_failure(obj)
         finally:
             self._discard_pending_req_states(obj)
 
