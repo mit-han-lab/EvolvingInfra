@@ -94,3 +94,4 @@ Later SGLang fixes taken by hand; the files they touch count as modified above.
 | #39632 | `19ee4b566b` | DeepSeek DSML: emit only complete invokes; reasoning ends only at a line-start `<｜DSML｜tool_calls>`; think tokens leave structural-tag excludes |
 | #39136 | `6d6d42d1c0` | GLM-4.7 tool parser keeps argument types across JSON Schema unions (`anyOf`/`oneOf`/`$ref`/`const`) |
 | #45143 | `316ff4dce2` | GLM-4.5/4.7 streaming tool parsers scan only the new tail of an open call (was O(n²)) |
+| #46053 | `1442917b4a` | GLM non-streaming tool names are stripped of surrounding whitespace |
