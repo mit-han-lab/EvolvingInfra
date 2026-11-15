@@ -218,7 +218,7 @@ class UsageInfo(BaseModel):
 
 
 class StreamOptions(BaseModel):
-    include_usage: Optional[bool] = False
+    include_usage: Optional[bool] = None
     continuous_usage_stats: Optional[bool] = False
 
 
