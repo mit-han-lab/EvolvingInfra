@@ -5,6 +5,16 @@ router picks the legs per request and the decode leg (reader) pulls KV from the 
 Mooncake one-sided RDMA READ, chunk by chunk under the running prefill (`export_table.py`, `import_queue.py`,
 `planes.py`, `scheduler_mixin.py`). The router side is in `docs/placement.md` at the repository root.
 
+## Reader progress
+
+The reader's socket thread receives control messages and enqueues chunk work.
+Transfer threads resolve destination pages and execute READs. A CUDA wait in
+one page lookup leaves the socket thread free to receive FINAL, ABORT and
+other imports. Page lookups are read-only over scheduler-allocated pages;
+the lookup and its READ share an in-flight reservation. Cancellation waits
+for both before acknowledging ABORT or permitting destination-page reuse.
+The scheduler phase timer records page translation as `xfer.dst_pages`.
+
 ## Request-held transfer lifetime
 
 Symmetric exports retain their source KV and metadata until every TP reader

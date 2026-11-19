@@ -1747,15 +1747,15 @@ class ImportQueue:
         self, req: Req
     ) -> Callable[[ChunkReady], Dict[str, Sequence[int]]]:
         """Per-chunk {pool: reader page indices}; read-only lookup, called on the
-        plane's IO thread. Aux / state slots are not chunk pages: they travel on
+        plane's transfer threads. Aux / state slots are not chunk pages: they travel on
         the ImportMark and are READ at FINAL."""
         import torch
 
-        # The plane's IO thread starts on CUDA device 0; on TP rank i the pool
+        # Transfer threads start on CUDA device 0; on TP rank i the pool
         # tensors live on device i, so pin the current device for any index
         # tensors the translation creates.
         device = self.req_to_token_pool.req_to_token.device
-        # The scheduler writes the row on its own CUDA stream. The IO thread
+        # The scheduler writes the row on its own CUDA stream. Each lookup
         # must observe those writes before translating it into RDMA pages.
         row_ready = None
         if device.type == "cuda":

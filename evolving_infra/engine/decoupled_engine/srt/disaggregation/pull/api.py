@@ -241,6 +241,8 @@ class ReaderPlane(Protocol):
     ) -> None:
         """dst_pages(chunk) returns the reader's local page indices per pool for that
         chunk's token range (allocated up front by the scheduler at request arrival).
+        The real plane calls it on transfer threads; lookups must be thread-safe
+        and read-only. Cancellation drains queued lookups and READs before return.
         ``mark.local_aux_index`` must already be set (and ``mark.local_state_indices``
         for every state type the owner will report in FINAL)."""
 
