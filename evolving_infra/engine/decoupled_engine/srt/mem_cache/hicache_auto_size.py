@@ -1,3 +1,4 @@
+# Adapted from SGLang python/sglang/srt/mem_cache/hicache_auto_size.py (commit 297e54fd10), modified for evolving-infra.
 from __future__ import annotations
 
 import logging
@@ -7,6 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from decoupled_engine.srt.mem_cache.base_swa_memory_pool import BaseSWAKVPool
+from decoupled_engine.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
 from decoupled_engine.srt.mem_cache.memory_pool import (
     HybridLinearKVPool,
     HybridReqToTokenPool,
@@ -60,11 +62,29 @@ def _draft_bytes(target, draft) -> int:
     return _pool_bytes(draft) * target.size // draft.size
 
 
+def _dsv4_bytes(pool: DeepSeekV4TokenToKVPool, drafts) -> int:
+    """Device bytes of the DeepSeek-V4 page state, which the DSv4 host stack mirrors
+    page for page at the ratio: the FULL-paged compressed, indexer and ratio-1/2 pools,
+    the SWA pages and c4 state rings (the buffers P/D transfers), and the drafts' SWA
+    layers, which take one host page per target SWA page."""
+    total = sum(pool.get_contiguous_buf_infos()[1]) + sum(pool.get_state_buf_infos()[1])
+    if pool.swa_kv_pool is not None:
+        swa_pages = pool.swa_kv_pool.kv_buffer[0].shape[0]
+        total += sum(
+            buf[0].nbytes * swa_pages
+            for draft in drafts
+            for buf in draft.swa_kv_pool.kv_buffer
+        )
+    return total
+
+
 def _estimate_hicache_bytes(
     params: CacheInitParams, draft_plan: HiCacheDraftPlan | None
 ) -> int:
     """Device bytes whose host mirrors scale with the HiCache ratio."""
     pool = params.token_to_kv_pool_allocator.get_kvcache()
+    if isinstance(pool, DeepSeekV4TokenToKVPool):
+        return _dsv4_bytes(pool, params.mtp_draft_device_pools)
     if not isinstance(pool, _SIZEABLE_POOLS):
         raise ValueError(
             f"HiCache auto-sizing does not support {type(pool).__name__}; "

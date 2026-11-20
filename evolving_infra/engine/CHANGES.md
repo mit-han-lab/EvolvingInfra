@@ -1,7 +1,7 @@
 # Changes from SGLang
 
 The engine is SGLang's `python/sglang` at upstream release v0.5.23 (commit `297e54fd10`), renamed to
-`decoupled_engine`. Of its 6149 files, 87 are new and 149 are modified upstream files; the
+`decoupled_engine`. Of its 6149 files, 87 are new and 150 are modified upstream files; the
 rest differ from upstream only by the rename. Paths below are relative to `decoupled_engine/`.
 [README.md](README.md#relation-to-sglang) says what the changes do.
 
@@ -33,7 +33,7 @@ git grep -l 'Adapted from SGLang' -- evolving_infra/engine/decoupled_engine
 | `srt/sampling/` | `token_blacklist.py` |
 | `srt/speculative/dspark_components/` | `dspark_synthetic_oracle.py` |
 
-## Modified upstream files (149)
+## Modified upstream files (150)
 
 Each carries the header `Adapted from SGLang <upstream path> (commit 297e54fd10)`.
 
@@ -70,7 +70,7 @@ Each carries the header `Adapted from SGLang <upstream path> (commit 297e54fd10)
 | `srt/layers/moe/` | `hash_topk.py`, `mega_moe.py`, `topk.py` |
 | `srt/managers/` | `cache_controller.py`, `data_parallel_controller.py`, `detokenizer_manager.py`, `io_struct.py`, `load_snapshot.py`, `multi_tokenizer_mixin.py`, `schedule_batch.py`, `schedule_policy.py`, `scheduler.py`, `tokenizer_control_mixin.py`, `tokenizer_manager.py`, `tp_worker.py`, `utils.py` |
 | `srt/managers/scheduler_components/` | `batch_result_processor.py`, `dp_attn.py`, `invariant_checker.py`, `kv_events_publisher.py`, `load_inquirer.py`, `metrics_reporter.py`, `output_streamer.py`, `request_receiver.py`, `weight_updater.py` |
-| `srt/mem_cache/` | `allocation.py`, `base_prefix_cache.py`, `cache_init_params.py`, `common.py`, `deepseek_v4_memory_pool.py`, `events.py`, `hicache_storage.py`, `index_key_cache.py`, `kv_cache_builder.py`, `kv_cache_configurator.py`, `l2_transfer.py`, `memory_pool.py`, `memory_pool_host.py`, `radix_cache.py`, `registry.py`, `unified_radix_cache.py`, `utils.py` |
+| `srt/mem_cache/` | `allocation.py`, `base_prefix_cache.py`, `cache_init_params.py`, `common.py`, `deepseek_v4_memory_pool.py`, `events.py`, `hicache_auto_size.py`, `hicache_storage.py`, `index_key_cache.py`, `kv_cache_builder.py`, `kv_cache_configurator.py`, `l2_transfer.py`, `memory_pool.py`, `memory_pool_host.py`, `radix_cache.py`, `registry.py`, `unified_radix_cache.py`, `utils.py` |
 | `srt/mem_cache/allocator/` | `paged.py`, `swa.py` |
 | `srt/mem_cache/buffer_mode/` | `pipeline.py` |
 | `srt/mem_cache/cpp_utils/` | `native_hash.py` |
