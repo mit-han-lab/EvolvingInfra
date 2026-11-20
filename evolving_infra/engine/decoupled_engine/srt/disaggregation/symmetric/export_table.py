@@ -55,6 +55,10 @@ POOL_FULL = "full"  # allocator page index space; on DSv4 it carries no bytes
 POOL_SWA = "swa"  # SWA physical pages (DSv4: swa_page_size tokens each)
 POOL_C4 = "c4"  # DSv4 CSA pages + c4 indexer pages, addressed by the FULL page index
 POOL_C128 = "c128"  # DSv4 HCA pages, addressed by the FULL page index
+POOL_C1 = "c1"  # DSv4.1 ratio-1 KV + indexer pages, addressed by the FULL page index
+POOL_C2 = "c2"  # DSv4.1 ratio-2 KV + indexer pages, addressed by the FULL page index
+# The DSv4 pool of each compression ratio. Every one is addressed by the FULL page index.
+COMPRESSED_POOLS = {4: POOL_C4, 128: POOL_C128, 1: POOL_C1, 2: POOL_C2}
 # DSv4 request-scoped C128 state rows: FINAL only, never a chunk pool.
 POOL_STATE = state_pool_key(StateType.DSV4_REQUEST_STATE)
 
@@ -168,8 +172,9 @@ def make_generation_of(
 ) -> Callable[[str, Sequence[int]], List[int]]:
     """GpuLeaseTable(generation_of=...) callback: (pool, page_indices) -> the
     owner's current generation per page, from the allocator that owns the
-    pool's index space. c4/c128 share the FULL page index (and allocator);
-    SWA physical pages map to their allocator page by _swa_pages_per_page."""
+    pool's index space. The compressed pools (COMPRESSED_POOLS) share the FULL
+    page index (and allocator); SWA physical pages map to their allocator page
+    by _swa_pages_per_page."""
     full_alloc, swa_alloc = _sub_allocators(token_to_kv_pool_allocator)
     kvcache = token_to_kv_pool_allocator.get_kvcache()
     swa_ratio = _swa_pages_per_page(kvcache, page_size) if swa_alloc is not None else 1
@@ -179,7 +184,7 @@ def make_generation_of(
         # -1 = "no page on this side" (pool_pages_for_range swa_skip_before):
         # never an allocator index, reported with generation 0.
         live = [p for p in pages if p >= 0]
-        if pool in (POOL_FULL, POOL_C4, POOL_C128):
+        if pool == POOL_FULL or pool in COMPRESSED_POOLS.values():
             gens = page_generations(full_alloc, live, page_size)
         elif pool == POOL_SWA and swa_alloc is not None:
             gens = page_generations(
@@ -208,6 +213,45 @@ def enable_page_generation_tracking(token_to_kv_pool_allocator: Any) -> None:
 # -- Registration layouts -----------------
 
 
+def _dsv4_stage_ratios(kvcache: Any) -> List[int]:
+    return list(kvcache.compression_ratios[kvcache._stage_start : kvcache._stage_end])
+
+
+def _dsv4_page_pools(kvcache: Any) -> List[str]:
+    """The compressed pools a DSv4 cache registers and pages: c4 and c128
+    always, the ratio-1/2 pools when its stage has such layers (DSv4.1)."""
+    ratios = set(_dsv4_stage_ratios(kvcache))
+    return [POOL_C4, POOL_C128] + [COMPRESSED_POOLS[r] for r in (1, 2) if r in ratios]
+
+
+def _dsv4_pool_entries(kvcache: Any) -> Dict[str, List[int]]:
+    """kv_data_ptrs entry indices of each compressed pool, in the order
+    get_contiguous_buf_infos lists them: per ratio of `kvcache.kv_pools`, the
+    KV buffers and then the indexer's contiguous_page_row_buffers. The unified
+    layout keeps c4 KV + c4 indexer, then c128 KV."""
+    entries: Dict[str, List[int]] = {name: [] for name in _dsv4_page_pools(kvcache)}
+    if _is_unified_kv(kvcache):
+        ratios = _dsv4_stage_ratios(kvcache)
+        c4 = 2 * ratios.count(4)
+        entries[POOL_C4] = list(range(c4))
+        entries[POOL_C128] = list(range(c4, c4 + ratios.count(128)))
+        return entries
+    start = 0
+    for ratio, kv_pool in kvcache.kv_pools.items():
+        count = len(kv_pool.kv_buffer) if kv_pool is not None else 0
+        index_pool = kvcache.index_pools.get(ratio)
+        if index_pool is not None:
+            count += len(index_pool.contiguous_page_row_buffers())
+        if count:
+            if ratio not in COMPRESSED_POOLS:
+                raise NotImplementedError(
+                    f"symmetric-pd symmetric: DSv4 compression ratio {ratio} has no page pool"
+                )
+            entries.setdefault(COMPRESSED_POOLS[ratio], []).extend(range(start, start + count))
+        start += count
+    return entries
+
+
 def registration_pools_for(
     *, kvcache: Any, kv_args: Any
 ) -> Tuple[Optional[List[PoolLayout]], Dict[str, PoolRegion]]:
@@ -220,13 +264,14 @@ def registration_pools_for(
     page, as the page strides (mooncake/conn.py addresses
     `ptr + page_index * item_len`). DSv4:
 
-    kv_data_ptrs (get_contiguous_buf_infos) is ordered [c4 kv x c4_layer_num,
-    c4 indexer x c4_layer_num, c128 kv x c128_layer_num] and every entry is a
-    2D [num_pages, bytes_per_page] buffer, so kv_item_lens[e] is the page
-    stride. c4 and c128
-    pages are addressed by the FULL page index; "full" itself owns no bytes.
-    SWA pages live in the StateType.SWA state entries (get_state_buf_infos),
-    one page of swa_page_size tokens per index, and become the "swa" pool.
+    kv_data_ptrs (get_contiguous_buf_infos) holds, per compression ratio in the
+    pool's order, that ratio's KV layers and then its indexer buffers (DSv4: c4
+    and c128; DSv4.1: also ratios 1 and 2). Every entry is a 2D
+    [num_pages, bytes_per_page] buffer, so kv_item_lens[e] is the page stride,
+    and every ratio's pool (COMPRESSED_POOLS) is addressed by the FULL page
+    index; "full" itself owns no bytes. SWA pages live in the StateType.SWA
+    state entries (get_state_buf_infos), one page of swa_page_size tokens per
+    index, and become the "swa" pool.
     """
 
     if any(cls.__name__ == "DSATokenToKVPool" for cls in type(kvcache).__mro__):
@@ -254,33 +299,19 @@ def registration_pools_for(
             "symmetric-pd symmetric: DSv4 HiSparse c4 pages are remapped through a device "
             "mapping and are not addressable by the FULL page index"
         )
-    stage_ratios = list(
-        kvcache.compression_ratios[kvcache._stage_start : kvcache._stage_end]
-    )
-    c4_layer_num = sum(1 for r in stage_ratios if r == 4)
-    c128_layer_num = sum(1 for r in stage_ratios if r == 128)
     num_entries = len(kv_args.kv_data_ptrs)
-    if num_entries != 2 * c4_layer_num + c128_layer_num:
+    entries = _dsv4_pool_entries(kvcache)
+    expected = sum(len(e) for e in entries.values())
+    if num_entries != expected:
         raise NotImplementedError(
             f"symmetric-pd symmetric: DSv4 kv_data_ptrs has {num_entries} entries, expected "
-            f"{2 * c4_layer_num + c128_layer_num} (c4 kv + c4 indexer + c128 kv); "
+            f"{expected} (the KV and indexer buffers of each compression ratio); "
             "draft/MTP KV entries are not laid out yet"
         )
     item_lens = [int(n) for n in kv_args.kv_item_lens]
-    c4_entries = list(range(0, 2 * c4_layer_num))
-    c128_entries = list(range(2 * c4_layer_num, num_entries))
-    layouts = [
-        PoolLayout(name=POOL_FULL, entry_indices=[], page_nbytes=[]),
-        PoolLayout(
-            name=POOL_C4,
-            entry_indices=c4_entries,
-            page_nbytes=[item_lens[e] for e in c4_entries],
-        ),
-        PoolLayout(
-            name=POOL_C128,
-            entry_indices=c128_entries,
-            page_nbytes=[item_lens[e] for e in c128_entries],
-        ),
+    layouts = [PoolLayout(name=POOL_FULL, entry_indices=[], page_nbytes=[])] + [
+        PoolLayout(name=name, entry_indices=idx, page_nbytes=[item_lens[e] for e in idx])
+        for name, idx in entries.items()
     ]
     extra: Dict[str, PoolRegion] = {}
     if not _is_unified_kv(kvcache):
@@ -431,12 +462,12 @@ def pool_pages_for_range(
     tombstoned prefix). Those SWA entries are reported as -1 with generation 0:
     importer._chunk_plan drops a pair the reader does not need and fails the
     import (layout_mismatch -> local recompute) when the reader needs a page
-    the owner cannot supply; the FULL / c4 / c128 lists are unaffected.
+    the owner cannot supply; the FULL and compressed-pool lists are unaffected.
 
     Same translation prefill.py uses for the push path (send_kv_chunk):
     req_to_token row -> `translate_kv_indices_for_transfer` (unified memory
-    virtual->physical) -> `kv_to_page_indices`. DSv4: the
-    c4 and c128 pools are addressed by the same page indices (and carry the
+    virtual->physical) -> `kv_to_page_indices`. DSv4: the compressed pools
+    (_dsv4_page_pools) are addressed by the same page indices (and carry the
     same generations) as FULL; SWA is reached through
     `translate_loc_from_full_to_swa` and paged by swa_page_size. State rows are
     not chunk pages (see state_indices_for).
@@ -509,7 +540,7 @@ def pool_pages_for_range(
         )
 
     if _is_dsv4_pool(kvcache):
-        for pool in (POOL_C4, POOL_C128):
+        for pool in _dsv4_page_pools(kvcache):
             pools.append(
                 PoolPages(
                     pool=pool,
