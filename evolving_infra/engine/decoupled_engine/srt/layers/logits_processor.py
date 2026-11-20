@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+# Adapted from SGLang python/sglang/srt/layers/logits_processor.py (commit 297e54fd10), modified for evolving-infra.
 """Logits processing."""
 
 import dataclasses
@@ -65,8 +66,13 @@ from decoupled_engine.srt.model_executor.forward_batch_info import (
 from decoupled_engine.srt.runtime_context import (
     LoRABatchLayout,
     get_exec,
+    get_flags,
     get_forward,
     get_parallel,
+)
+from decoupled_engine.srt.sampling.token_blacklist import (
+    apply_token_blacklist,
+    parse_token_blacklist,
 )
 from decoupled_engine.srt.utils.common import (
     is_cpu,
@@ -490,6 +496,15 @@ class LogitsProcessor(nn.Module):
         # Set before graph capture by a speculative worker that finishes the TP
         # gather itself (see finish_deferred_gather / deferred_argmax).
         self.defer_verify_gather = False
+        # V4.1 parity (SGLANG_V41_DECODE_TOKEN_BLACKLIST): -inf on these ids in the
+        # target's next-token logits, so prefill/decode sampling and speculative
+        # verify never pick them. A draft model's processor (built inside
+        # draft_model_build_scope) keeps its logits.
+        self._token_blacklist = (
+            ()
+            if get_flags().moe.in_speculative_scope
+            else parse_token_blacklist(envs.SGLANG_V41_DECODE_TOKEN_BLACKLIST.get())
+        )
         self.final_logit_softcapping = getattr(
             self.config, "final_logit_softcapping", None
         )
@@ -635,6 +650,7 @@ class LogitsProcessor(nn.Module):
             sampled_logits = (
                 logits[sample_indices] if sample_indices is not None else logits
             )
+            sampled_logits = self._mask_token_blacklist(sampled_logits)
 
             # Decode mode or extend mode without return_logprob.
             return LogitsProcessorOutput(
@@ -654,6 +670,7 @@ class LogitsProcessor(nn.Module):
             logits_metadata=logits_metadata,
             skip_chunking_for_dp_attn=self.do_tensor_parallel_all_gather_dp_attn,
         )
+        sampled_logits = self._mask_token_blacklist(sampled_logits)
 
         logits_output = LogitsProcessorOutput(
             next_token_logits=sampled_logits,
@@ -1095,6 +1112,16 @@ class LogitsProcessor(nn.Module):
 
     def is_deferred_shard(self, logits: torch.Tensor) -> bool:
         return self.defer_verify_gather and logits.shape[-1] < self.vocab_size
+
+    def _mask_token_blacklist(self, logits: Optional[torch.Tensor]):
+        if not self._token_blacklist or logits is None:
+            return logits
+        col_offset = 0
+        if self.is_deferred_shard(logits):
+            # A target-verify vocab shard, gathered or argmaxed later
+            # (finish_deferred_gather / deferred_argmax use the same offset).
+            col_offset = get_parallel().tp_group.rank_in_group * logits.shape[-1]
+        return apply_token_blacklist(logits, self._token_blacklist, col_offset)
 
     def finish_deferred_gather(self, logits: torch.Tensor) -> torch.Tensor:
         """Full softcapped logits from a target-verify vocab shard."""
