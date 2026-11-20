@@ -838,6 +838,10 @@ class Envs:
     # next-token logits before sampling and speculative verify, as DeepInfer's
     # DEEPINFER_DECODE_TOKEN_BLACKLIST; empty = off. sampling/token_blacklist.py.
     SGLANG_V41_DECODE_TOKEN_BLACKLIST = EnvStr("")
+    # EPLB: the first rebalance after interval // 4 forward passes (no fewer than
+    # the statistics window), as DeepInfer does; later ones keep the full interval.
+    # Off: the first rebalance waits a full interval.
+    SGLANG_V41_EPLB_EARLY_FIRST_REBALANCE = EnvBool(False)
 
     # ===================================================================
     # Memory pools and KV-cache sizing
