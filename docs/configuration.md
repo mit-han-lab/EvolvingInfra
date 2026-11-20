@@ -51,6 +51,8 @@ The engine keeps SGLang's `SGLANG_*` variables. Set these yourself:
 |---|---|
 | `SGLANG_HOST_IP` | Address Mooncake and the KV events advertise. Set it when the default route is not reachable from the other workers. |
 | `WITH_NVIDIA_PEERMEM=0` | Register GPU memory with RDMA through dma-buf. Set it on hosts without the `nvidia_peermem` module, such as GB300 nodes and gVisor sandboxes. |
+| `SGLANG_V41_DECODE_TOKEN_BLACKLIST` | Comma-separated token ids that are never sampled: -inf on the target model's next-token logits before sampling and speculative verify, as DeepSeek's reference engine masks them. `1` masks DeepSeek-V4.1's EOS, so a trace replay runs every output to its recorded length. Empty (default): off. |
+| `SGLANG_V41_EPLB_EARLY_FIRST_REBALANCE` | `1`: the first EPLB rebalance after `--eplb-rebalance-num-iterations` / 4 forward passes (at least the statistics window), as DeepSeek's reference engine does; later ones keep the full interval. Default off. |
 | `SGLANG_KV_EVENTS_WIRE_FORMAT` | Encoding of the published KV events. `ei_array` (default): positional msgpack arrays, the format the router's KV directory (`sgl-kv-indexer`) decodes, and replay replies framed `[empty, sequence, payload]` as the router's KV-event bridge reads them. `upstream_map`: SGLang's tagged maps and its replay framing with the topic frame, for consumers that expect upstream SGLang's format. |
 
 The features turn on the variables they use, and the engine logs them in one

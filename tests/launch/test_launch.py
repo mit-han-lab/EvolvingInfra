@@ -189,6 +189,20 @@ def test_a_child_config_merges_the_roles_of_its_base(tmp_path):
     assert roles["decode"] == {"engine_args": ["--d=1"]}
 
 
+def test_v41_6p6d_config_is_a_static_dp4_split(stack):
+    # Two hosts here: one prefill worker instead of six.
+    s = stack(["--config", "examples/gb300/v41-flash-6p6d-ep4.yaml", "--prefill-workers", "1"], hosts=("a", "b"))
+    assert s.cfg["dp_attention"] and not s.retention and s.cfg["page_size"] == 256
+    assert s.cfg["engine_env"]["SGLANG_V41_DECODE_TOKEN_BLACKLIST"] == 1
+    assert "--pd-late-decode=off" in s.cfg["router_args"]
+    p, d = (s.engine_argv(w, {}) for w in s.workers)
+    assert "--ep-num-redundant-experts=16" in p and "--eplb-rebalance-num-iterations=1000" in p
+    assert "--ep-num-redundant-experts=4" in d and "--eplb-rebalance-num-iterations=10000" in d
+    assert "--dp-size" in p and "--enable-dp-attention" in d
+    with pytest.raises(SystemExit):
+        stack(["--config", "examples/gb300/v41-flash-6p6d-ep4.yaml", "--planner"])
+
+
 def test_a_config_keeps_the_router_flags_and_env_of_its_base(tmp_path):
     from evolving_infra.launch.__main__ import load
     (tmp_path / "base.yaml").write_text(
