@@ -26,8 +26,9 @@ from decoupled_engine.srt.disaggregation.symmetric.planes import (  # noqa: E402
 PAGE = 4
 
 
-def snapshot(rank, queued, stamp):
-    return SimpleNamespace(dp_rank=rank, num_waiting_uncached_tokens=queued, timestamp=stamp)
+def snapshot(rank, queued, stamp, waiting=0):
+    return SimpleNamespace(dp_rank=rank, num_waiting_uncached_tokens=queued, num_waiting_reqs=waiting,
+                           num_running_reqs=0, timestamp=stamp)
 
 
 def test_dp_pairing_needs_attention_tp_one_and_several_dp_ranks():
@@ -57,19 +58,34 @@ def test_the_next_turn_returns_to_the_rank_that_holds_the_conversation():
 def test_a_prefix_every_rank_holds_prefers_the_least_loaded_rank():
     placement = SymmetricDpPlacement(dp_size=4, page_size=PAGE)
     system = list(range(40))
+    # Conversations longer than twice the shared prefix go by load, which leaves the prefix on every rank.
     for t, rank in enumerate(range(4)):
         placement.update_loads([snapshot(r, 0 if r == rank else 1000, t + 1.0) for r in range(4)])
-        assert placement.place(system + [9000 + t] * 8, {"transfer_id": t}, None) == rank
+        assert placement.place(system + [9000 + t] * 48, {"transfer_id": t}, None) == rank
     placement.update_loads([snapshot(r, 0 if r == 2 else 50, 9.0) for r in range(4)])
     assert placement.place(system + [7] * 8, {"transfer_id": 9}, None) == 2
 
 
-def test_a_busy_holder_loses_the_request_when_waiting_costs_more_than_recomputing():
+def test_a_turn_stays_on_its_rank_when_that_rank_has_the_longest_queue():
+    # The queues measured on a saturated 6P6D prefill worker at c=1024: waiting requests and queued uncached
+    # tokens per DP rank. The holder's queue is 1.36M tokens longer than the shortest one.
+    placement = SymmetricDpPlacement(dp_size=4, page_size=PAGE)
+    prompt = list(range(4096))
+    holder = placement.place(prompt, {"transfer_id": 1}, None)
+    loads = {holder: (42, 6_349_056)}
+    others = [r for r in range(4) if r != holder]
+    loads.update(zip(others, [(43, 4_989_056), (43, 5_469_888), (25, 5_767_296)]))
+    placement.update_loads([snapshot(r, loads[r][1], 2.0, waiting=loads[r][0]) for r in range(4)])
+    assert placement.place(prompt + list(range(9000, 9064)), {"transfer_id": 2}, None) == holder
+
+
+def test_ranks_imbalanced_by_requests_take_the_least_loaded_rank():
+    # The router's imbalance fast path: more than 32 requests apart and more than 1.1 times the least loaded.
     placement = SymmetricDpPlacement(dp_size=4, page_size=PAGE)
     prompt = list(range(64))
     holder = placement.place(prompt, {"transfer_id": 1}, None)
     other = (holder + 1) % 4
-    placement.update_loads([snapshot(r, 0 if r == other else 10_000, 2.0) for r in range(4)])
+    placement.update_loads([snapshot(r, 0, 2.0, waiting=10 if r == other else 80) for r in range(4)])
     assert placement.place(prompt + [1, 2, 3, 4], {"transfer_id": 2}, None) == other
 
 
