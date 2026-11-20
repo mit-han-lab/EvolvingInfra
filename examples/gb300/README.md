@@ -47,7 +47,10 @@ and score it with `benchmarks/replay/score.py <dir> --skip-s 1800 --window-s 360
 DP attention over the node's 4 GPUs, experts over the same 4 GPUs (EP4, DeepGEMM Mega MoE),
 DSpark speculative decoding with 5 drafts, and DeepSeek's EPLB values for each starting role
 (`roles`). [`v41-flash-6p6d-ep4.yaml`](v41-flash-6p6d-ep4.yaml) is a static split on 12 nodes,
-6 prefill and 6 decode workers, with the EOS masked for trace replay. Run it without `--planner`:
+6 prefill and 6 decode workers, with the EOS masked for trace replay. Its engines log a
+`ReqTimeStats` line per finished request: on a prefill worker the request's prefill leg ends
+when its prefill completes, so its entry time plus its queue and forward durations is the time
+to the first token at prefill completion. Run it without `--planner`:
 
 ```bash
 evolving-infra serve --config examples/gb300/v41-flash-6p6d-ep4.yaml --hosts <node0>,...,<node11>

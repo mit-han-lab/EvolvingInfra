@@ -199,6 +199,8 @@ def test_v41_6p6d_config_is_a_static_dp4_split(stack):
     assert "--ep-num-redundant-experts=16" in p and "--eplb-rebalance-num-iterations=1000" in p
     assert "--ep-num-redundant-experts=4" in d and "--eplb-rebalance-num-iterations=10000" in d
     assert "--dp-size" in p and "--enable-dp-attention" in d
+    assert all("--enable-request-time-stats-logging" in argv and "--speculative-algorithm=DSPARK" in argv
+               for argv in (p, d))
     with pytest.raises(SystemExit):
         stack(["--config", "examples/gb300/v41-flash-6p6d-ep4.yaml", "--planner"])
 

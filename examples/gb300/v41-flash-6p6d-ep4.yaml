@@ -2,9 +2,12 @@
 # the other 6 decode, each a node with EP4 and DP4 attention (v41-flash.yaml). Run without
 # --planner:
 #   evolving-infra serve --config examples/gb300/v41-flash-6p6d-ep4.yaml --hosts <12 nodes>
-# The engines mask the EOS, so a trace replay runs every output to its recorded length.
+# The engines mask the EOS, so a trace replay runs every output to its recorded length, and log
+# each request's times, so TTFT can be taken at prefill completion as well as at the first token.
 base: v41-flash.yaml
 prefill_workers: 6
+engine_args:
+  - --enable-request-time-stats-logging    # a ReqTimeStats line per finished request and leg
 engine_env:
   SGLANG_V41_DECODE_TOKEN_BLACKLIST: 1     # the EOS (token id 1) is never sampled
 
