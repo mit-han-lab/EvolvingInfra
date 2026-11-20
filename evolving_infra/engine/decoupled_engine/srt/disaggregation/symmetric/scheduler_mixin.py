@@ -898,9 +898,27 @@ class SchedulerSymmetricMixin:
         # The router advertises rank-0 endpoints; every TP rank talks to its
         # own peer rank (homogeneous TP), so rewrite the
         # address to this rank's channel (planes.plane_bind_addrs convention).
-        from decoupled_engine.srt.disaggregation.symmetric.planes import rank_addr
+        from decoupled_engine.srt.disaggregation.symmetric.planes import (
+            dp_pairing,
+            import_dp_rank,
+            rank_addr,
+        )
 
-        tp_rank = get_parallel().tp_rank
+        parallel = get_parallel()
+        tp_rank = parallel.tp_rank
+        if dp_pairing(parallel):
+            # DP attention: the D-leg sits on import_dp_rank of its worker (the
+            # DP controller put it there); this rank publishes to that reader.
+            # An import keeps the owner worker's rank-0 channel until the
+            # owner's first publication names its rank (pull/importer.py).
+            if export_mark is not None and not export_mark.candidates:
+                export_mark.reader_addr = rank_addr(
+                    export_mark.reader_addr,
+                    import_dp_rank(export_mark.transfer_id, parallel.attn_dp_size),
+                )
+                return export_mark, import_mark, None
+            if export_mark is None:
+                return export_mark, import_mark, None
         if export_mark is not None and export_mark.candidates:
             # Late D stage 2: every candidate reader, before any bind.
             for cand in export_mark.candidates:

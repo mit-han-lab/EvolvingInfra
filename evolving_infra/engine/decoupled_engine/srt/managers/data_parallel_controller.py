@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+# Adapted from SGLang python/sglang/srt/managers/data_parallel_controller.py (commit 297e54fd10), modified for evolving-infra.
 """A controller that dispatches requests to multiple data parallel workers."""
 
 import faulthandler
@@ -60,6 +61,11 @@ from decoupled_engine.srt.observability.req_time_stats import DPControllerReqTim
 from decoupled_engine.srt.observability.startup_time import aggregate_scheduler_startup_times
 from decoupled_engine.srt.observability.trace import process_tracing_init, trace_set_thread_info
 from decoupled_engine.srt.plugins import load_plugins
+from decoupled_engine.srt.arg_groups.overrides import resolution_result
+from decoupled_engine.srt.disaggregation.symmetric.dp_placement import (
+    SymmetricDpPlacement,
+)
+from decoupled_engine.srt.disaggregation.symmetric.planes import dp_pairing
 from decoupled_engine.srt.runtime_context import (
     get_device,
     get_disagg,
@@ -227,6 +233,13 @@ class DataParallelController:
             caller="DataParallelController",
         )
         self._last_refresh_time = 0.0
+        # Symmetric P/D under DP attention: a decode leg goes to the rank its
+        # owner sends to, the rest by prefix and load (dp_placement.py).
+        self.symmetric_dp: SymmetricDpPlacement | None = None
+        if get_disagg().disaggregation_mode == "symmetric" and dp_pairing(parallel):
+            self.symmetric_dp = SymmetricDpPlacement(
+                parallel.num_dp_ranks, resolution_result(server_args, "page_size")
+            )
 
         # To protect changing env vars to set CUDA_VISIBLE_DEVICES.
         self.env_lock = threading.Lock()
@@ -377,6 +390,8 @@ class DataParallelController:
         req.time_stats = wrap_as_pickle(time_stats)
         if is_health_check:
             self.dispatch_health_check(req)
+        elif self.symmetric_dp is not None:
+            self.symmetric_dp_scheduler(req)
         else:
             self.dispatching(req)
         req.time_stats = time_stats
@@ -897,6 +912,18 @@ class DataParallelController:
             f"Cannot route request: all {len(active)} active DP workers "
             "are unavailable."
         )
+
+    def symmetric_dp_scheduler(self, req: Req):
+        if self.maybe_external_dp_rank_routing(req):
+            return
+        now = time.perf_counter()
+        if now - self._last_refresh_time >= 0.02:
+            self._last_refresh_time = now
+            self.symmetric_dp.update_loads(self.load_snapshot_reader.read_all())
+        rank = self.symmetric_dp.place(req.input_ids, req.kv_export, req.kv_import)
+        if rank not in self._active_workers or self.workers[rank] is None:
+            raise RuntimeError(f"DP rank {rank} of a symmetric P/D leg is not active.")
+        sock_send(self.workers[rank], req)
 
     def follow_bootstrap_room_scheduler(self, req: Req):
         if self.maybe_external_dp_rank_routing(req):

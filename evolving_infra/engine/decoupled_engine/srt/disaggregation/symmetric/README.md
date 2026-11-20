@@ -45,6 +45,24 @@ marks does not provide this guarantee. Cancellation before the owner has
 registered its export remains a separate limitation. CPU protocol coverage
 does not replace real-load cleanup validation.
 
+## DP attention
+
+With `--enable-dp-attention` and attention TP 1 (for example `--tp-size 4 --dp-size 4`), each DP rank
+of a worker has its own requests, radix tree and host tier, and the router addresses the worker as
+a whole. The worker's DP controller places the legs (`dp_placement.py`):
+
+- A decode leg goes to `planes.import_dp_rank(transfer_id)`. The prefill leg's owner computes the
+  same rank and sends its CHUNK_READY, FINAL and ABORT to that reader rank.
+- A prefill leg goes to the rank with the lowest queued uncached tokens plus the tokens of its
+  prompt that the rank does not hold. The controller tracks what each rank holds from the prompts
+  it sent there (a chained hash per page), so the next turn of a conversation returns to the rank
+  that holds the previous one.
+
+Every publication names the owner's channel (`owner_addr`); the reader moves the import to that
+owner rank on the first one, and until then sends an ABORT to every rank of the prefill worker.
+Owner and reader registrations match on `kv_shard` (the part of a request's KV a rank holds,
+0 for every rank here) instead of `tp_rank`. The peer KV servicer is off under DP attention.
+
 ## Known gaps (bookkept TODOs)
 
 - **Reader-side host-pool READ for Split is not implemented.** The intended path is a per-page-range fallback

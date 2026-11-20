@@ -234,7 +234,9 @@ class OwnerPlane:
         )
         self._send(
             ex.mark.reader_addr,
-            wire.make_chunk_ready(chunk=chunk, attempt_id=ex.attempt_id),
+            wire.make_chunk_ready(
+                chunk=chunk, attempt_id=ex.attempt_id, owner_addr=self.advertised_addr
+            ),
         )
         logger.info(
             "pull owner: transfer %d (%s) CHUNK_READY seq=%d tokens=[%d,%d) last=%s -> %s",
@@ -271,6 +273,7 @@ class OwnerPlane:
                 final=final,
                 attempt_id=ex.attempt_id,
                 generations=self._lease.current_generations(final.transfer_id),
+                owner_addr=self.advertised_addr,
             ),
         )
 
@@ -379,7 +382,10 @@ class OwnerPlane:
             self._send(
                 addr,
                 wire.make_abort(
-                    transfer_id=transfer_id, attempt_id=attempt, reason=reason
+                    transfer_id=transfer_id,
+                    attempt_id=attempt,
+                    reason=reason,
+                    owner_addr=self.advertised_addr,
                 ),
             )
         # An ABORT is a revocation request, not proof that remote READs have

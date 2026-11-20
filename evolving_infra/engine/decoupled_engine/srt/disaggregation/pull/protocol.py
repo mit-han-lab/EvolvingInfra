@@ -18,6 +18,12 @@ Message flow per TP rank (rank i <-> rank i, homogeneous TP):
     reader <--- FINAL        {aux_index, state_indices, gens} ---- owner
     reader ---- DONE | ABORT {reason} ---------------------------> owner
 
+Under DP attention (attention TP 1) each DP rank holds whole requests, so an
+owner rank pairs with any reader rank of the same layout: CHUNK_READY, FINAL
+and ABORT carry the owner's channel (``owner_addr``), and the reader sends its
+later messages there (pull/importer.py). Registrations then match on the
+attention-TP rank (check_compatible).
+
 With SGLANG_SYMMETRIC_PD_EXPORT_AWAIT_READER the reader also sends BEGIN {} when the
 scheduler admits the import (pages allocated); the owner queues the P-leg for
 prefill only after it (reader-first exports). BEGIN may overtake the owner's
@@ -172,9 +178,14 @@ class Registration(msgspec.Struct):
     # decodes as "off". A mismatch never makes the pair incompatible
     # (check_compatible); the reader logs it (late_d_mismatch).
     late_d: str = "off"
+    # Which part of a request's KV this rank holds inside its DP replica
+    # ((attn_cp_rank * attn_tp_size) + attn_tp_rank; 0 for every rank under DP
+    # attention with attention TP 1). Additive like late_d: None from a peer
+    # that does not send it, and check_compatible then compares tp_rank.
+    kv_shard: Optional[int] = None
 
     def to_wire(self) -> Dict[str, Any]:
-        return {
+        out = {
             "v": self.version,
             "session_id": self.session_id,
             "tp_rank": self.tp_rank,
@@ -186,6 +197,9 @@ class Registration(msgspec.Struct):
             "worker": self.worker,
             "late_d": self.late_d,
         }
+        if self.kv_shard is not None:
+            out["kv_shard"] = int(self.kv_shard)
+        return out
 
     @classmethod
     def from_wire(cls, d: Mapping[str, Any]) -> Registration:
@@ -202,6 +216,7 @@ class Registration(msgspec.Struct):
             },
             worker=str(d.get("worker", "")),
             late_d=str(d.get("late_d", "off")),
+            kv_shard=int(d["kv_shard"]) if d.get("kv_shard") is not None else None,
         )
 
     @classmethod
@@ -215,6 +230,7 @@ class Registration(msgspec.Struct):
         worker: str = "",
         default_pool: str = "full",
         late_d: str = "off",
+        kv_shard: Optional[int] = None,
     ) -> Registration:
         """Build from a disaggregation ``KVArgs`` (base/conn.py). Without
         ``pool_layouts`` every kv_data_ptrs entry belongs to one pool named
@@ -259,6 +275,7 @@ class Registration(msgspec.Struct):
             states=states,
             worker=worker,
             late_d=late_d,
+            kv_shard=kv_shard,
         )
 
 
@@ -285,13 +302,28 @@ def _pool_region_from_layout(
     )
 
 
+def rank_channel(base_addr: str, rank: int) -> str:
+    """The channel of ``rank`` from a worker's rank-0 channel: rank i listens on
+    port + 2*i (owner = bootstrap_port, reader = bootstrap_port + 1)."""
+    if rank == 0 or not base_addr.startswith("tcp://"):
+        return base_addr
+    host, _, port = base_addr[len("tcp://") :].rpartition(":")
+    if not port.isdigit():
+        return base_addr
+    return f"tcp://{host}:{int(port) + 2 * rank}"
+
+
 def check_compatible(*, local: Registration, remote: Registration) -> Optional[str]:
-    """Homogeneous-TP / identical-layout precondition.
-    Returns a failure reason or None."""
+    """Identical-layout precondition: the same KV shard (``kv_shard``; the
+    tp_rank when a peer does not send it) and the same pool layouts. Returns a
+    failure reason or None."""
     if local.version != remote.version:
         return f"protocol_version {local.version}!={remote.version}"
-    if local.tp_rank != remote.tp_rank:
-        return f"tp_rank {local.tp_rank}!={remote.tp_rank} (homogeneous TP only)"
+    if local.kv_shard is None or remote.kv_shard is None:
+        if local.tp_rank != remote.tp_rank:
+            return f"tp_rank {local.tp_rank}!={remote.tp_rank} (homogeneous TP only)"
+    elif local.kv_shard != remote.kv_shard:
+        return f"kv_shard {local.kv_shard}!={remote.kv_shard}"
     if local.attn_tp_size != remote.attn_tp_size:
         return f"attn_tp_size {local.attn_tp_size}!={remote.attn_tp_size}"
     if local.page_size != remote.page_size:
@@ -579,26 +611,38 @@ def make_register(*, reg: Registration, owner_addr: str) -> Message:
     )
 
 
-def make_chunk_ready(*, chunk: ChunkReady, attempt_id: int) -> Message:
+def _with_owner(payload: Dict[str, Any], owner_addr: str) -> Dict[str, Any]:
+    """Name the sending owner's channel on a publication (DP attention: the
+    reader learns its owner rank from it). Additive: readers that predate it
+    ignore the key."""
+    if owner_addr:
+        payload["owner_addr"] = str(owner_addr)
+    return payload
+
+
+def make_chunk_ready(*, chunk: ChunkReady, attempt_id: int, owner_addr: str = "") -> Message:
     return Message(
         type=MSG_CHUNK_READY,
         transfer_id=chunk.transfer_id,
         attempt_id=attempt_id,
-        payload={
-            "chunk_seq": int(chunk.chunk_seq),
-            "token_start": int(chunk.token_start),
-            "token_end": int(chunk.token_end),
-            "is_last": bool(chunk.is_last),
-            "tier": chunk.tier,
-            "pools": [
-                {
-                    "pool": pp.pool,
-                    "pages": [int(x) for x in pp.page_indices],
-                    "gens": [int(x) for x in pp.generations],
-                }
-                for pp in chunk.pools
-            ],
-        },
+        payload=_with_owner(
+            {
+                "chunk_seq": int(chunk.chunk_seq),
+                "token_start": int(chunk.token_start),
+                "token_end": int(chunk.token_end),
+                "is_last": bool(chunk.is_last),
+                "tier": chunk.tier,
+                "pools": [
+                    {
+                        "pool": pp.pool,
+                        "pages": [int(x) for x in pp.page_indices],
+                        "gens": [int(x) for x in pp.generations],
+                    }
+                    for pp in chunk.pools
+                ],
+            },
+            owner_addr,
+        ),
     )
 
 
@@ -607,6 +651,7 @@ def make_final(
     final: FinalMeta,
     attempt_id: int,
     generations: Optional[Mapping[str, Mapping[int, int]]] = None,
+    owner_addr: str = "",
 ) -> Message:
     """``generations`` is the owner's current {pool: {page: gen}} for every page it
     published; the reader verifies it against CHUNK_READY."""
@@ -633,7 +678,7 @@ def make_final(
         type=MSG_FINAL,
         transfer_id=final.transfer_id,
         attempt_id=attempt_id,
-        payload=payload,
+        payload=_with_owner(payload, owner_addr),
     )
 
 
@@ -716,12 +761,13 @@ def make_release(*, transfer_id: int, attempt_id: int, seq: int) -> Message:
     )
 
 
-def make_abort(*, transfer_id: int, attempt_id: int, reason: str) -> Message:
+def make_abort(*, transfer_id: int, attempt_id: int, reason: str, owner_addr: str = "") -> Message:
+    """Either direction; an owner names its channel (``owner_addr``)."""
     return Message(
         type=MSG_ABORT,
         transfer_id=transfer_id,
         attempt_id=attempt_id,
-        payload={"reason": str(reason)},
+        payload=_with_owner({"reason": str(reason)}, owner_addr),
     )
 
 

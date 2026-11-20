@@ -179,16 +179,43 @@ def advertised_host(server_args: ServerArgs) -> str:
     return host
 
 
+def _mix64(x: int) -> int:
+    """splitmix64 finalizer: decorrelates consecutive transfer ids."""
+    x &= (1 << 64) - 1
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & ((1 << 64) - 1)
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & ((1 << 64) - 1)
+    return x ^ (x >> 31)
+
+
+def import_dp_rank(transfer_id: int, dp_size: int) -> int:
+    """DP rank of the decode leg of ``transfer_id`` under DP attention.
+
+    The decode worker's DP controller places the leg there, and the prefill
+    leg's owner sends its publications there, so both sides agree without
+    asking each other. The prefill leg's own DP rank is free (prefix
+    affinity); the reader learns it from the owner's first publication
+    (``owner_addr`` in CHUNK_READY, FINAL and ABORT)."""
+    return _mix64(int(transfer_id)) % max(1, int(dp_size))
+
+
+def dp_pairing(parallel: Any) -> bool:
+    """Whether P and D legs may sit on different DP ranks: under DP attention
+    with attention TP 1 and no attention CP each DP rank holds whole requests,
+    so any owner rank can serve any reader rank of the same layout."""
+    return (
+        int(getattr(parallel, "attn_dp_size", 1) or 1) > 1
+        and int(getattr(parallel, "attn_tp_size", 1) or 1) == 1
+        and int(getattr(parallel, "attn_cp_size", 1) or 1) == 1
+    )
+
+
 def rank_addr(base_addr: str, tp_rank: int) -> str:
     """Per-rank endpoint from the rank-0 endpoint the router/driver advertises
     (owner = bootstrap_port, reader = bootstrap_port + 1): rank i lives at
     port + 2*i on both channels (homogeneous TP, rank i talks to rank i)."""
-    if tp_rank == 0 or not base_addr.startswith("tcp://"):
-        return base_addr
-    host, _, port = base_addr[len("tcp://") :].rpartition(":")
-    if not port.isdigit():
-        return base_addr
-    return f"tcp://{host}:{int(port) + 2 * tp_rank}"
+    from decoupled_engine.srt.disaggregation.pull.protocol import rank_channel
+
+    return rank_channel(base_addr, tp_rank)
 
 
 def _build_real_planes(ctx: PlaneBuildContext) -> Tuple[OwnerPlane, ReaderPlane]:
@@ -231,6 +258,9 @@ def _build_real_planes(ctx: PlaneBuildContext) -> Tuple[OwnerPlane, ReaderPlane]
         kvcache=ctx.token_to_kv_pool, kv_args=ctx.kv_args
     )
     late_d = _late_d_mode()
+    from decoupled_engine.srt.runtime_context import get_parallel
+
+    parallel = get_parallel()
     registration = Registration.from_kv_args(
         kv_args=ctx.kv_args,
         session_id=te.get_session_id(),
@@ -239,6 +269,8 @@ def _build_real_planes(ctx: PlaneBuildContext) -> Tuple[OwnerPlane, ReaderPlane]
         worker=ctx.worker_id,
         # Readers compare it at REGISTER (mixed late-D flags).
         late_d=late_d,
+        # The part of a request's KV this rank holds within its DP replica.
+        kv_shard=parallel.attn_cp_rank * parallel.attn_tp_size + parallel.attn_tp_rank,
     )
     if extra_pools:
         registration = msgspec.structs.replace(
@@ -274,6 +306,8 @@ def _build_real_planes(ctx: PlaneBuildContext) -> Tuple[OwnerPlane, ReaderPlane]
         bind_addr=reader_addr,
         worker_name=ctx.worker_id,
         send_begin=True if late_on else None,
+        # DP attention: an import's owner is any DP rank of the prefill worker.
+        owner_ranks=parallel.attn_dp_size if dp_pairing(parallel) else 1,
     )
     logger.info(
         "symmetric-pd planes bound: owner=%s reader=%s session=%s",
