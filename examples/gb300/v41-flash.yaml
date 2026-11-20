@@ -17,6 +17,7 @@ engine_args:
   - --enable-dp-lm-head
   - --speculative-algorithm=DSPARK
   - --speculative-dspark-block-size=5
+  - --mem-fraction-static=0.85            # weights, MegaMoE buffers and KV; the derived default leaves no KV
   - --chunked-prefill-size=131072         # 32,768 prefill tokens per DP rank and step
   - --max-prefill-tokens=32768
   - --enable-eplb
@@ -47,6 +48,9 @@ roles:
       - --ep-num-redundant-experts=4
       - --expert-distribution-recorder-buffer-size=1000
       - --eplb-rebalance-num-iterations=10000
+      - --chunked-prefill-size=65536      # a decode worker prefills only a failed import's fallback
+    engine_env:
+      SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK: 16384  # smaller MegaMoE buffers, more KV
 router_args:
   - --pd-late-decode=off                   # late decode choice needs single-engine workers (no DP attention)
   - --symmetric-pd-p-select=cache-first    # the cost function reads single-DP-rank load snapshots
