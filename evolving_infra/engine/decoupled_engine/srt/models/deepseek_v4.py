@@ -5722,10 +5722,12 @@ class DeepseekV4ForCausalLM(nn.Module):
 # class unchanged. Do not re-add an EntryClass here — the model registry rejects
 # duplicate class names.
 # EntryClass = [DeepseekV4ForCausalLM]  # see deepseek_v4_vl.py
-# The deepseek_v4_vl.py wrapper also serves DeepSeek-V4.1 (text and vision).
-# TODO: make its vision tower, processor and vision_n_layers checks leave
-# model_type "deepseek_v41" to this class's in-model ViT (self.vision,
+# The deepseek_v4_vl.py wrapper also serves DeepSeek-V4.1: for model_type
+# "deepseek_v41" it builds no vision tower of its own and hands the forward,
+# image padding and weights to this class's in-model ViT (self.vision,
 # prepare_language_model_inputs).
+# TODO: register the V4.1 image processor for model_type "deepseek_v41"
+# (multimodal/processors/deepseek_v4_vl.py serves the wrapper's V4 layout).
 
 
 def _dequant_fp8(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:

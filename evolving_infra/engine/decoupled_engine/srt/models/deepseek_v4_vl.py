@@ -46,7 +46,13 @@ class DeepseekV4ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self._vision_weights_loaded = False
-        self.is_multimodal = getattr(config, "vision_n_layers", 0) > 0
+        # DeepSeek-V4.1 runs its vision tower inside the text model
+        # (deepseek_v4.py: vision, pad_input_ids, prepare_language_model_inputs,
+        # load_weights); this wrapper adds one only for DeepSeek-V4 checkpoints.
+        self.in_model_vision = getattr(config, "model_type", None) == "deepseek_v41"
+        self.is_multimodal = (
+            getattr(config, "vision_n_layers", 0) > 0 and not self.in_model_vision
+        )
 
         self.language_model = _DeepseekV4TextLM(
             config, quant_config, prefix=add_prefix("language_model", prefix)
@@ -65,6 +71,8 @@ class DeepseekV4ForCausalLM(nn.Module):
             self.image_pad = nn.Parameter(torch.empty(config.hidden_size))
 
     def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
+        if self.in_model_vision:
+            return self.language_model.pad_input_ids(input_ids, mm_inputs)
         pattern = MultiModalityDataPaddingPatternMultimodalTokens()
         return pattern.pad_input_tokens(input_ids, mm_inputs)
 
@@ -73,6 +81,8 @@ class DeepseekV4ForCausalLM(nn.Module):
 
         Returns [sum(block_len), hidden] concatenated in item order, matching
         the placeholder spans the scheduler padded into input_ids."""
+        if self.in_model_vision:
+            return self.language_model.get_image_feature(items)
         assert self.is_multimodal
         device = self.image_start.device
         dtype = self.image_start.dtype
@@ -120,6 +130,10 @@ class DeepseekV4ForCausalLM(nn.Module):
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
         **kwargs,
     ) -> torch.Tensor:
+        if self.in_model_vision:
+            return self.language_model(
+                input_ids, positions, forward_batch, pp_proxy_tensors=pp_proxy_tensors, **kwargs
+            )
         if forward_batch.contains_mm_inputs():
             # Preserve pad IDs for MoE routing before embedding clamps them.
             forward_batch.dsv4_routing_input_ids = forward_batch.input_ids.clone()
@@ -143,7 +157,8 @@ class DeepseekV4ForCausalLM(nn.Module):
 
         def llm_weights():
             for name, loaded_weight in weights:
-                if (
+                # V4.1's vision weights belong to the text model's own tower.
+                if not self.in_model_vision and (
                     name.startswith(("vision.", "aligner."))
                     or name in self._SENTINEL_NAMES
                 ):
