@@ -96,6 +96,24 @@ def _resolved(server_args, field):
     return resolution_result(server_args, field)
 
 
+def reject_unsupported_symmetric_pool(kvcache) -> None:
+    """Symmetric P/D moves KV pages and DSv4's request-scoped state rows only.
+
+    A hybrid linear-attention pool (Mamba2 / GDN / KDA layers) also holds a
+    per-request recurrent state that the FINAL handoff does not carry yet, so
+    the reader would decode from a state copied from its own local prefix.
+    Refuse it at startup instead of producing wrong output silently.
+    """
+    # Match by class name so this check imports nothing CUDA-only.
+    if any(cls.__name__ == "HybridLinearKVPool" for cls in type(kvcache).__mro__):
+        raise ValueError(
+            "--disaggregation-mode symmetric does not support hybrid "
+            "linear-attention models (Mamba/GDN/KDA state is not transferred "
+            "yet); use standard P/D (--disaggregation-mode prefill/decode) "
+            "or a single engine."
+        )
+
+
 def _is_swa_window(tree_cache) -> bool:
     """DSv4 uniform lifecycle with window SWA residency."""
     return getattr(tree_cache, "dsv4_uniform_swa_residency", "full") == "window"
@@ -460,6 +478,7 @@ class SchedulerSymmetricMixin:
             make_worker_id,
         )
 
+        reject_unsupported_symmetric_pool(self.token_to_kv_pool_allocator.get_kvcache())
         extra_slots = get_disagg().disaggregation_decode_extra_slots or 0
         # Exports and imports share the aux slots; *2 headroom like PD.
         buffer_size = (self.max_running_requests + extra_slots) * 2
