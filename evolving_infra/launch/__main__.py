@@ -9,7 +9,7 @@ import sys
 import yaml
 
 from evolving_infra.launch import hardware
-from evolving_infra.launch.serve import Stack
+from evolving_infra.launch.serve import Stack, _argument_groups, merge_args
 
 
 def parse(argv=None):
@@ -28,29 +28,11 @@ def parse(argv=None):
     return parser.parse_args(argv)
 
 
-def _argument_groups(args: list[str]) -> list[list[str]]:
-    """Keep each option with its following values, including negative numbers."""
-    groups = []
-    for arg in args:
-        if not groups or arg.startswith("--") or (arg.startswith("-") and arg[1:2].isalpha()):
-            groups.append([arg])
-        else:
-            groups[-1].append(arg)
-    return groups
-
-
-def merge_args(base: list[str], overrides: list[str]) -> list[str]:
-    """Replace options together with their values, keeping untouched groups."""
-    replaced = {group[0].split("=", 1)[0] for group in _argument_groups(overrides)}
-    return [arg for group in _argument_groups(base)
-            if group[0].split("=", 1)[0] not in replaced for arg in group] + overrides
-
-
 def load(path: Path) -> dict:
     """A config file; ``base: other.yaml`` starts from that file. Engine and router options given here
     replace the base's options of the same name, together with their values, and keep the others;
-    mappings (``engine_env``, ``frontend``, ``gateway``, ``planner``) are merged key by key; any
-    other key replaces the base's."""
+    mappings (``engine_env``, ``frontend``, ``gateway``, ``planner``) are merged key by key, and each
+    role of ``roles`` the same way; any other key replaces the base's."""
     cfg = yaml.safe_load(path.read_text()) or {}
     if "base" not in cfg:
         return cfg
@@ -61,6 +43,14 @@ def load(path: Path) -> dict:
     for key in ("engine_env", "frontend", "gateway", "planner"):
         if isinstance(cfg.get(key), dict) and isinstance(out.get(key), dict):
             out[key] = {**out[key], **cfg.pop(key)}
+    if isinstance(cfg.get("roles"), dict) and isinstance(out.get("roles"), dict):
+        roles = dict(out["roles"])
+        for role, mine in cfg.pop("roles").items():
+            theirs = roles.get(role) or {}
+            roles[role] = {"engine_args": merge_args(list(theirs.get("engine_args", [])),
+                                                     list((mine or {}).get("engine_args", []))),
+                           "engine_env": {**(theirs.get("engine_env") or {}), **((mine or {}).get("engine_env") or {})}}
+        out["roles"] = roles
     out.update(cfg)
     return out
 
@@ -85,6 +75,16 @@ def config(args) -> dict:
     for key in ("engine_args", "router_args"):
         if cfg.get(key):
             cfg[key] = absolute(cfg[key])
+    roles = cfg.get("roles") or {}
+    unknown = set(roles) - {"prefill", "decode"}
+    if unknown:
+        sys.exit(f"roles: only prefill and decode, not {', '.join(sorted(unknown))}")
+    for role in roles.values():
+        if role and role.get("engine_args"):
+            role["engine_args"] = absolute(role["engine_args"])
+    if roles and args.planner:
+        # A worker keeps the settings of its starting role; the planner changes roles.
+        sys.exit("roles: per-role engine settings need fixed roles; remove them or drop --planner")
     if args.model_path:
         cfg["model"] = args.model_path
     if not cfg.get("model"):

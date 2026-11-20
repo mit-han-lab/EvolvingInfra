@@ -28,6 +28,24 @@ def engine_python() -> str:
     return sys.executable if importlib.util.find_spec("decoupled_engine") else "python3"
 
 
+def _argument_groups(args: list[str]) -> list[list[str]]:
+    """Keep each option with its following values, including negative numbers."""
+    groups = []
+    for arg in args:
+        if not groups or arg.startswith("--") or (arg.startswith("-") and arg[1:2].isalpha()):
+            groups.append([arg])
+        else:
+            groups[-1].append(arg)
+    return groups
+
+
+def merge_args(base: list[str], overrides: list[str]) -> list[str]:
+    """Replace options together with their values, keeping untouched groups."""
+    replaced = {group[0].split("=", 1)[0] for group in _argument_groups(overrides)}
+    return [arg for group in _argument_groups(base)
+            if group[0].split("=", 1)[0] not in replaced for arg in group] + overrides
+
+
 class Stack:
     def __init__(self, cfg: dict, hosts: list, rank: int, work_dir: Path):
         self.cfg, self.rank = cfg, rank
@@ -43,6 +61,8 @@ class Stack:
         total = (gpus // per_worker) * len(hosts)
         self.workers = workers(self.ips, gpus, per_worker, cfg.get("prefill_workers") or total // 2,
                                dp_attention=bool(cfg.get("dp_attention")))
+        # Engine flags and variables per starting role (static P/D only, see config()).
+        self.roles = cfg.get("roles") or {}
         self.mine = [w for w in self.workers if w.host == rank]
         self.head = self.ips[0]
         self.planner = cfg.get("planner")  # None: off; a dict of planner arguments: on
@@ -117,7 +137,13 @@ class Stack:
             argv += ["--disaggregation-ib-device", json.dumps({str(g): n for g, n in nics.items()})]
         if self.planner is not None:
             argv += ["--sched-trace-dir", str(self.dir / "traces" / w.name)]
-        return argv + list(cfg.get("engine_args", []))
+        role = self.roles.get(w.role) or {}
+        return argv + merge_args(list(cfg.get("engine_args", [])), list(role.get("engine_args", [])))
+
+    def engine_env(self, w) -> dict:
+        """The variables of every engine, then those of the worker's starting role."""
+        role = self.roles.get(w.role) or {}
+        return {k: str(v) for k, v in {**(self.cfg.get("engine_env") or {}), **(role.get("engine_env") or {})}.items()}
 
     def kv_instances(self) -> list:
         """One KV-directory instance per worker and DP rank: (instance id, worker, rank, bridge index).
@@ -141,12 +167,11 @@ class Stack:
         self.check_ports()
         nics = hardware.nic_map()
         env = {"SGLANG_HOST_IP": self.ips[self.rank],
-               "WITH_NVIDIA_PEERMEM": "1" if hardware.peer_memory() else "0",
-               **{k: str(v) for k, v in (self.cfg.get("engine_env") or {}).items()}}
+               "WITH_NVIDIA_PEERMEM": "1" if hardware.peer_memory() else "0"}
         print(f"host {self.rank}: {self.ips[self.rank]}, RDMA {nics or 'none'}, "
               f"peer memory {env['WITH_NVIDIA_PEERMEM']}", flush=True)
         for w in self.mine:
-            self.start(f"engine-{w.name}", self.engine_argv(w, nics), env)
+            self.start(f"engine-{w.name}", self.engine_argv(w, nics), {**env, **self.engine_env(w)})
         if self.planner is not None:
             (self.dir / "traces").mkdir(exist_ok=True)
             self.start("trace-server", [sys.executable, "-m", "evolving_infra.planner", "serve-traces",

@@ -163,6 +163,32 @@ def test_dp_attention_workers_publish_kv_events_per_rank(stack, tmp_path):
     assert plain.workers[0].replay_port == plain.workers[0].events_port + 1
 
 
+def test_roles_give_each_starting_role_its_engine_settings(stack, tmp_path):
+    (tmp_path / "r.yaml").write_text(
+        "model: /m\ngpus_per_worker: 4\nengine_args: [--trust-remote-code, --max-running-requests=256]\n"
+        "engine_env: {A: 1, B: 1}\nroles:\n  prefill: {engine_args: [--chunked-prefill-size=131072]}\n"
+        "  decode: {engine_args: [--max-running-requests, '512'], engine_env: {B: 2}}\n")
+    s = stack(["--config", str(tmp_path / "r.yaml")], hosts=("a", "b"))
+    p, d = s.workers
+    pa, da = s.engine_argv(p, {}), s.engine_argv(d, {})
+    assert "--chunked-prefill-size=131072" in pa and "--max-running-requests=256" in pa
+    assert da[da.index("--max-running-requests") + 1] == "512" and "--max-running-requests=256" not in da
+    assert s.engine_env(p) == {"A": "1", "B": "1"} and s.engine_env(d) == {"A": "1", "B": "2"}
+    with pytest.raises(SystemExit):
+        stack(["--config", str(tmp_path / "r.yaml"), "--planner"])
+
+
+def test_a_child_config_merges_the_roles_of_its_base(tmp_path):
+    from evolving_infra.launch.__main__ import load
+    (tmp_path / "base.yaml").write_text(
+        "model: /m\nroles:\n  prefill: {engine_args: [--a=1, --b=1], engine_env: {X: 1}}\n"
+        "  decode: {engine_args: [--d=1]}\n")
+    (tmp_path / "top.yaml").write_text("base: base.yaml\nroles:\n  prefill: {engine_args: [--b=2], engine_env: {Y: 2}}\n")
+    roles = load(tmp_path / "top.yaml")["roles"]
+    assert roles["prefill"] == {"engine_args": ["--a=1", "--b=2"], "engine_env": {"X": 1, "Y": 2}}
+    assert roles["decode"] == {"engine_args": ["--d=1"]}
+
+
 def test_a_config_keeps_the_router_flags_and_env_of_its_base(tmp_path):
     from evolving_infra.launch.__main__ import load
     (tmp_path / "base.yaml").write_text(

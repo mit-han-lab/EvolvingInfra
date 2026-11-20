@@ -199,6 +199,7 @@ holds what it cannot detect.
 | `gpus_per_worker` | TP size of one worker | all GPUs of a host; half of them on a single host |
 | `dp_attention` | every GPU of a worker is one DP-attention rank (`--dp-size` = `gpus_per_worker`, `--enable-dp-attention`); each rank publishes its KV events to its own KV-directory instance | `false` |
 | `prefill_workers` | workers that start as prefill | half of the workers |
+| `roles` | `prefill` and `decode`, each with `engine_args` and `engine_env` added to the workers that start in that role (an option replaces the shared one of the same name); for a fixed P/D split only, so not with `--planner` | none |
 | `retention` | KV session retention in the router; `false` for a model whose engine runs without it (a Mamba state, or sliding-window layers outside DeepSeek-V4) | `true` |
 | `tokenizer` | the `tokenizers` file the router reads | `<model>/tokenizer.json` |
 | `engine_env` | environment variables of every engine | none |
