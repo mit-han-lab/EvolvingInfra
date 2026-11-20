@@ -5,9 +5,10 @@ With ``--disaggregation-mode symmetric`` and ``--symmetric-preset paper`` (the
 default), resolution first turns on the features of the paper's configuration
 that the other flags leave off (:func:`plan_features`): the host KV tier, the
 prefill work snapshot, late decode choice computing before the decode is
-bound, the peer KV servicer and pulls (when the RDMA devices are known), KV
-session retention (FULL-only models and DeepSeek-V4) and host dedup for the model's attention
-kind (single-node TP). ``--symmetric-preset none`` leaves the flags as given.
+bound, the peer KV servicer and pulls (when the RDMA devices are known; not
+under DP attention), KV session retention (FULL-only models and DeepSeek-V4)
+and host dedup for the model's attention kind (single-node TP).
+``--symmetric-preset none`` leaves the flags as given.
 
 Each switch below is an environment variable that is off on its own. When the
 server arguments select the feature it belongs to, resolution turns it on,
@@ -267,8 +268,11 @@ def plan_features(
         if getattr(cfg, "disaggregation_late_d_allocation_trigger", "lead") == "lead":
             fields["disaggregation_late_d_allocation_trigger"] = "first_chunk"
     devices = ib_devices(getattr(cfg, "disaggregation_ib_device", None))
+    # The servicer listens on one port per attention-TP rank and its clients
+    # dial that rank: under DP attention every rank is attention-TP rank 0.
     if (
         devices
+        and single_engine
         and not getattr(cfg, "enable_peer_kv_servicer", False)
         and getattr(cfg, "hicache_storage_backend", None) is None
     ):

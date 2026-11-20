@@ -250,6 +250,9 @@ def test_paper_features_keep_what_the_user_set_and_skip_what_cannot_run():
     assert "disaggregation_late_d" not in f and "disaggregation_late_d_control_port" not in f
     f = sd.plan_features(bare(enable_dp_attention=True), DSA, free_port=lambda: 1)
     assert "disaggregation_late_d" not in f and "enable_dsa_hicache_host_dedup" not in f
+    # Every DP rank is attention-TP rank 0: the servicer's per-rank ports would collide.
+    assert "enable_peer_kv_servicer" not in f and "hicache_storage_backend" not in f
+    assert f["enable_hierarchical_cache"] and f["enable_prefill_work_snapshot"]
     # A model the preset gives retention (DeepSeek-V4 here), and one it does not.
     f = sd.plan_features(bare(), {"dedup": "enable_dsv4_hicache_host_dedup", "retention": True},
                          free_port=lambda: 1, ratio_unset=True)
