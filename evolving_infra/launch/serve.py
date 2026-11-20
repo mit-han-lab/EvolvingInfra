@@ -41,7 +41,8 @@ class Stack:
         if per_worker > gpus:
             raise SystemExit(f"gpus_per_worker is {per_worker}, but this host has {gpus} GPUs")
         total = (gpus // per_worker) * len(hosts)
-        self.workers = workers(self.ips, gpus, per_worker, cfg.get("prefill_workers") or total // 2)
+        self.workers = workers(self.ips, gpus, per_worker, cfg.get("prefill_workers") or total // 2,
+                               dp_attention=bool(cfg.get("dp_attention")))
         self.mine = [w for w in self.workers if w.host == rank]
         self.head = self.ips[0]
         self.planner = cfg.get("planner")  # None: off; a dict of planner arguments: on
@@ -106,8 +107,10 @@ class Stack:
                 "--peer-kv-servicer-port", str(w.servicer_port),
                 "--disaggregation-late-d-control-port", str(w.late_decode_port),
                 "--kv-events-config", json.dumps({"publisher": "zmq", "endpoint": f"tcp://*:{w.events_port}",
-                                                  "replay_endpoint": f"tcp://*:{w.events_port + 1}"}),
+                                                  "replay_endpoint": f"tcp://*:{w.replay_port}"}),
                 "--enable-metrics", "--enable-cache-report", "--incremental-streaming-output"]
+        if w.dp > 1:
+            argv += ["--dp-size", str(w.dp), "--enable-dp-attention"]
         if cfg.get("context_length"):
             argv += ["--context-length", str(cfg["context_length"])]
         if nics:
@@ -115,6 +118,12 @@ class Stack:
         if self.planner is not None:
             argv += ["--sched-trace-dir", str(self.dir / "traces" / w.name)]
         return argv + list(cfg.get("engine_args", []))
+
+    def kv_instances(self) -> list:
+        """One KV-directory instance per worker and DP rank: (instance id, worker, rank, bridge index).
+        Without DP attention it is the worker's id 20001 + idx and bridge index idx."""
+        return [(20001 + w.idx + 1000 * r, w, r, r * len(self.workers) + w.idx)
+                for r in range(max(w.dp for w in self.workers)) for w in self.workers if r < w.dp]
 
     def check_ports(self):
         busy = []
@@ -155,10 +164,10 @@ class Stack:
         indexer = self.write("indexer.json", {
             "model_name": cfg["served_model_name"], "block_size": page, "eagle": self.eagle,
             "indexer_port": INDEXER_PORT, "query_port": INDEXER_QUERY_PORT, "threads": 4,
-            "workers": [{"instance_id": 20001 + w.idx, "events_endpoint": f"tcp://{w.ip}:{w.events_port}",
-                         "replay_endpoint": f"tcp://{w.ip}:{w.events_port + 1}",
-                         "bridge_pub_port": 26100 + 2 * w.idx, "bridge_replay_port": 26101 + 2 * w.idx}
-                        for w in ws]})
+            "workers": [{"instance_id": iid, "events_endpoint": f"tcp://{w.ip}:{w.events_port + r}",
+                         "replay_endpoint": f"tcp://{w.ip}:{w.replay_port + r}",
+                         "bridge_pub_port": 26100 + 2 * k, "bridge_replay_port": 26101 + 2 * k}
+                        for iid, w, r, k in self.kv_instances()]})
         shutil.rmtree(self.dir / "indexer", ignore_errors=True)
         self.start("indexer", [sys.executable, "-m", "evolving_infra.router.indexer", "--config", indexer,
                                "--output", str(self.dir / "indexer")])
@@ -191,8 +200,8 @@ class Stack:
                 "--tokenizer-path", cfg.get("tokenizer") or f"{model}/tokenizer.json",
                 "--policy", "symmetric_pd", "--request-timeout-secs", "3600", "--stale-request-timeout-secs", "3600",
                 "--kv-indexer-url", query,
-                "--kv-worker-map", json.dumps([{"id": 20001 + w.idx, "url": w.url,
-                                                "servicer": f"{w.ip}:{w.servicer_port}"} for w in ws])]
+                "--kv-worker-map", json.dumps([{"id": iid, "url": w.url, "servicer": f"{w.ip}:{w.servicer_port}"}
+                                               for iid, w, _, _ in self.kv_instances()])]
         for w in ws:
             p = int(w.role == "prefill")
             argv += ["--symmetric-pd-worker", f"{w.url},{w.bootstrap_port},{p},{1 - p}"]

@@ -143,6 +143,26 @@ def test_paper_configs_pin_the_token_wait_without_the_global_queue():
         assert "--prefill-wait=tokens" in args and "--global-queue=false" in args, path
 
 
+def test_dp_attention_workers_publish_kv_events_per_rank(stack, tmp_path):
+    (tmp_path / "dp.yaml").write_text("model: /m\npage_size: 256\ngpus_per_worker: 4\ndp_attention: true\n")
+    s = stack(["--config", str(tmp_path / "dp.yaml")], hosts=("a", "b"))
+    w = s.workers[0]
+    assert (w.dp, w.events_port, w.replay_port) == (4, 5557, 5561)
+    assert len(set(w.ports())) == len(w.ports()) and set(range(5557, 5565)) <= set(w.ports())
+    argv = s.engine_argv(w, {})
+    assert argv[argv.index("--dp-size") + 1] == "4" and "--enable-dp-attention" in argv
+    events = json.loads(argv[argv.index("--kv-events-config") + 1])
+    assert (events["endpoint"], events["replay_endpoint"]) == ("tcp://*:5557", "tcp://*:5561")
+    # One KV-directory instance per worker and DP rank, every one mapped to its worker.
+    instances = s.kv_instances()
+    assert len(instances) == 8 and len({i for i, *_ in instances}) == 8 and len({k for *_, k in instances}) == 8
+    assert sorted(r for _, x, r, _ in instances if x is w) == [0, 1, 2, 3]
+    # Without DP attention each worker keeps one instance, id 20001 + idx, and one replay port.
+    plain = stack(["--config", "examples/gb300/glm52.yaml"], hosts=("a", "b"))
+    assert [(i, k) for i, _, _, k in plain.kv_instances()] == [(20001, 0), (20002, 1)]
+    assert plain.workers[0].replay_port == plain.workers[0].events_port + 1
+
+
 def test_a_config_keeps_the_router_flags_and_env_of_its_base(tmp_path):
     from evolving_infra.launch.__main__ import load
     (tmp_path / "base.yaml").write_text(

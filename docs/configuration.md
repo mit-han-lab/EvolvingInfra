@@ -18,7 +18,7 @@ The engine takes SGLang's server arguments. These are the ones Evolving Infra ad
 | `--disaggregation-transfer-backend mooncake` | Move KV between workers with Mooncake over RDMA. |
 | `--disaggregation-ib-device JSON` | RDMA device of every GPU, e.g. `{"0": "mlx5_0", ...}`. List all GPUs the worker uses. Peer KV pulls use the same devices. |
 | `--disaggregation-bootstrap-port N` | Base port of the worker's KV transfer side channel; it uses two ports per GPU from N, so engines on one node need ranges that do not overlap. Must match the router's `--symmetric-pd-worker`. |
-| `--kv-events-config JSON` | Publish KV store and remove events over ZMQ for the KV directory. |
+| `--kv-events-config JSON` | Publish KV store and remove events over ZMQ for the KV directory. Under DP attention DP rank r publishes on the endpoint's port + r and replays on the replay endpoint's port + r. |
 | `--enable-metrics`, `--enable-cache-report` | Prometheus metrics and per-request cached-token counts. The router and planner read both. |
 | `--incremental-streaming-output` | Required by the frontend. |
 
@@ -197,6 +197,7 @@ holds what it cannot detect.
 | `page_size` | KV block size of engine, router and KV directory | 64 |
 | `context_length` | maximum prompt length | 1048576 for the frontend |
 | `gpus_per_worker` | TP size of one worker | all GPUs of a host; half of them on a single host |
+| `dp_attention` | every GPU of a worker is one DP-attention rank (`--dp-size` = `gpus_per_worker`, `--enable-dp-attention`); each rank publishes its KV events to its own KV-directory instance | `false` |
 | `prefill_workers` | workers that start as prefill | half of the workers |
 | `retention` | KV session retention in the router; `false` for a model whose engine runs without it (a Mamba state, or sliding-window layers outside DeepSeek-V4) | `true` |
 | `tokenizer` | the `tokenizers` file the router reads | `<model>/tokenizer.json` |
