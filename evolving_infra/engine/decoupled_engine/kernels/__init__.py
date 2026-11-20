@@ -3,8 +3,8 @@
 SGLang runtime code and tests should import callable kernels from
 ``decoupled_engine.kernels.ops.<group>``, e.g.::
 
-    from decoupled_engine.kernels.ops.layernorm import rmsnorm
     from decoupled_engine.kernels.ops.activation import silu_and_mul
+    from decoupled_engine.kernels.ops.gemm import fp8_scaled_mm
     from decoupled_engine.kernels.ops.kvcache import reshape_and_cache_flash
 
 Implementations still live in ``decoupled_engine.kernels.jit`` (JIT CUDA), the
@@ -39,7 +39,6 @@ from decoupled_engine.kernels.selector import get_kernel, select_kernel
 from decoupled_engine.kernels.spec import (
     CapabilityRequirement,
     DeviceType,
-    FormatSignature,
     KernelBackend,
     KernelSpec,
     PlatformInfo,
@@ -57,7 +56,6 @@ __all__ = [
     "CapabilityRequirement",
     "DeviceType",
     "capabilities_satisfied",
-    "FormatSignature",
     "FusedOpTraceRecord",
     "KernelBackend",
     "KernelRegistry",

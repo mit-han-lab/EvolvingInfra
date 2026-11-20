@@ -56,7 +56,7 @@ POOL_SWA = "swa"  # SWA physical pages (DSv4: swa_page_size tokens each)
 POOL_C4 = "c4"  # DSv4 CSA pages + c4 indexer pages, addressed by the FULL page index
 POOL_C128 = "c128"  # DSv4 HCA pages, addressed by the FULL page index
 # DSv4 request-scoped C128 state rows: FINAL only, never a chunk pool.
-POOL_STATE = state_pool_key(StateType.C128_STATE)
+POOL_STATE = state_pool_key(StateType.DSV4_REQUEST_STATE)
 
 RELEASED = "released"
 EXPORT_TIMEOUT = "export timeout"
@@ -550,15 +550,11 @@ def state_indices_for(
     kvcache = token_to_kv_pool_allocator.get_kvcache()
     if not _is_dsv4_pool(kvcache):
         return {}
-    from decoupled_engine.srt.disaggregation.utils import (
-        get_dsv4_c128_state_indices,
-        is_dsv4_c128_online_enabled,
-    )
-
-    online = is_dsv4_c128_online_enabled()
-    ring_size = 1 if online else kvcache.get_ring_size(128)
-    rows = get_dsv4_c128_state_indices(
-        int(req.req_pool_idx), int(total_tokens), online=online, ring_size=ring_size
+    # v0.5.23 removed get_dsv4_c128_state_indices / is_dsv4_c128_online_enabled:
+    # the pool gives the request-state rows itself (prefill.py
+    # _request_state_payload).
+    rows = kvcache.request_state_transfer_indices(
+        int(req.req_pool_idx), int(total_tokens)
     )
     # No rows when total_tokens % 128 == 0 (prefill.py _c128_state_payload):
     # publish no state entry at all so owner and reader agree (otherwise
@@ -857,8 +853,8 @@ class ExportTable:
         write the aux slot and publish FINAL. The request is now EXPORTED."""
         entry = self.entries[req.transfer_id]
         total = len(req.origin_input_ids)
-        if req.extend_range is not None:
-            total = min(total, req.extend_range.end)
+        if req.extend_end is not None:
+            total = min(total, req.extend_end)
         entry.total_tokens = total
         chunk = self._make_chunk(entry, entry.published_end, total, is_last=True)
         self.owner_plane.publish_chunk(chunk)

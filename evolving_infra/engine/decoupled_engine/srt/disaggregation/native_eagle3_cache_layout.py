@@ -76,7 +76,7 @@ def validate_native_eagle3_cache(tree, target, draft, *, host_enabled):
         "all target and draft layers in backup and restore",
     )
     require(
-        tree.cache_controller.layer_num == target.layer_num,
+        tree.cache_controller.transfer_layer_id_max == target.layer_num,
         "a completion counter covering every target layer",
     )
     specs = [s for s in tree.sidecar_pool_specs if s.pool_name == sidecar.name]

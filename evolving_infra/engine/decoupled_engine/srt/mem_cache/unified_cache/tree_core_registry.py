@@ -1,18 +1,28 @@
 """Registry for pluggable TreeCore implementations.
 
 The unified cache constructs its TreeCore through `create_tree_core`, selected
-by SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND (default "python"). To plug in a custom
-implementation, register it under a string name via
-`register_tree_core_backend(name, factory)`.
+by its per-cache override or SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND (default
+"rust"). Rust selections use centralized compatibility fallbacks. To plug in a
+custom implementation, register it via `register_tree_core_backend(name, factory)`.
 """
 
 from __future__ import annotations
 
+import importlib.util
+import logging
+import re
+import subprocess
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
+
+import torch
+
+from decoupled_engine.srt.environ import envs
+from decoupled_engine.srt.mem_cache.unified_cache.component_type import ComponentType
 
 if TYPE_CHECKING:
     from decoupled_engine.srt.mem_cache.cache_init_params import CacheInitParams
-    from decoupled_engine.srt.mem_cache.unified_cache.component_type import ComponentType
     from decoupled_engine.srt.mem_cache.unified_cache.components import TreeComponent
     from decoupled_engine.srt.mem_cache.unified_cache.unified_tree_core_interface import (
         UnifiedTreeCoreInterface,
@@ -24,6 +34,136 @@ TreeCoreFactory = Callable[
 ]
 
 _TREE_CORE_REGISTRY: dict[str, TreeCoreFactory] = {}
+_RUST_TREE_CORE_MODULE = "decoupled_engine.srt.mem_cache.rust_tree_core.mem_cache"
+_RUST_TREE_CORE_MANIFEST = (
+    Path(__file__).resolve().parents[5] / "rust" / "sglang-radix-tree" / "Cargo.toml"
+)
+logger = logging.getLogger(__name__)
+
+
+def _ei_python_tree_core_reason(params: CacheInitParams) -> Optional[str]:
+    """EI features (symmetric P/D, KV-session retention, host dedup, peer KV,
+    decode-radix modes, lazy/batched KV events) live on the Python TreeCore only."""
+    if getattr(params, "enable_kv_session_retention", False):
+        return "EI KV-session retention requires the Python TreeCore"
+    if (
+        envs.SGLANG_KV_EVENTS_BATCH_PUBLISH.get()
+        or envs.SGLANG_KV_EVENTS_LAZY_LOAD_BACK.get()
+    ):
+        return "EI batched/lazy KV events require the Python TreeCore"
+    try:
+        from decoupled_engine.srt.runtime_context import get_disagg, get_memory
+
+        disagg, memory = get_disagg(), get_memory()
+    except Exception:  # no runtime context (unit tests): nothing to infer
+        return None
+    if getattr(disagg, "disaggregation_mode", None) == "symmetric":
+        return "EI symmetric P/D requires the Python TreeCore"
+    if getattr(disagg, "enable_peer_kv_servicer", False) or getattr(
+        memory, "enable_peer_kv_servicer", False
+    ):
+        return "EI peer-KV servicer requires the Python TreeCore"
+    if getattr(memory, "enable_dsa_hicache_host_dedup", False):
+        return "EI DSA host dedup requires the Python TreeCore"
+    if getattr(disagg, "disaggregation_decode_radix_cache_mode", "full_state") not in (
+        None,
+        "full_state",
+    ):
+        return "EI decode-radix cache modes require the Python TreeCore"
+    return None
+
+
+def _rust_fallback_reason(params: CacheInitParams) -> Optional[str]:
+    ei_reason = _ei_python_tree_core_reason(params)
+    if ei_reason is not None:
+        return ei_reason
+    if params.enable_session_radix_cache:
+        return "session-aware caching requires the Python TreeCore"
+    if params.tree_components is not None and set(params.tree_components) - {
+        ComponentType.FULL,
+        ComponentType.SWA,
+        ComponentType.MAMBA,
+    }:
+        return "the configured components require the Python TreeCore"
+    if params.component_registry_override:
+        return "custom components require the Python TreeCore"
+    if sys.platform != "linux":
+        return "the Rust TreeCore supports Linux only"
+    from decoupled_engine.srt.rust_extensions.torch_build import (
+        _MAX_SUPPORTED_TORCH,
+        _MIN_SUPPORTED_TORCH,
+    )
+
+    match = re.match(r"^(\d+)\.(\d+)", str(torch.__version__))
+    if match is None or not (
+        _MIN_SUPPORTED_TORCH
+        <= (int(match.group(1)), int(match.group(2)))
+        <= _MAX_SUPPORTED_TORCH
+    ):
+        return f"PyTorch {torch.__version__} is outside the Rust TreeCore support range"
+    allocator = params.token_to_kv_pool_allocator
+    device = (
+        torch.device(allocator.device) if allocator is not None else torch.device("cpu")
+    )
+    if device.type not in ("cpu", "cuda"):
+        return f"the Rust TreeCore does not support device {device.type}"
+    mode = envs.SGLANG_RUST_BUILD_MODE.get()
+    if sys.modules.get(_RUST_TREE_CORE_MODULE) is not None or mode not in (
+        "auto",
+        "never",
+        "force",
+    ):
+        # Preserve the loader's invalid-mode and force-after-import errors.
+        return None
+    workspace = _RUST_TREE_CORE_MANIFEST.parent.parent
+    bundled = importlib.util.find_spec(_RUST_TREE_CORE_MODULE) is not None
+    source_checkout = (workspace / "Cargo.toml").is_file()
+    if mode != "force" and (mode == "never" or not source_checkout) and bundled:
+        return None
+    if not _RUST_TREE_CORE_MANIFEST.is_file():
+        if bundled:
+            return "the requested Rust TreeCore source build has no sources"
+        return "this installation contains neither the Rust TreeCore extension nor its sources"
+    # Even a cached source build needs these version queries for its fingerprint.
+    # Match the loader's commands and cwd so rustup workspace overrides apply.
+    for command in (("cargo", "--version", "--verbose"), ("rustc", "-vV")):
+        try:
+            subprocess.run(
+                command,
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return f"the Rust TreeCore toolchain is unavailable ({' '.join(command)})"
+    return None
+
+
+def resolve_tree_core_backend(name: str, params: CacheInitParams) -> str:
+    """Resolve known Rust capability gaps before loading a backend.
+
+    Explicit Rust selections use the same compatibility policy as the default.
+    Build, import, and runtime failures remain errors when the toolchain is usable.
+    """
+    if name != "rust":
+        return name
+    reason = _rust_fallback_reason(params)
+    if reason is not None:
+        logger.info("Using the Python TreeCore: %s", reason)
+        return "python"
+    return name
+
+
+def select_tree_core_backend(params: CacheInitParams) -> str:
+    """Resolve the instance override or default through the shared fallback policy."""
+    name = (
+        params.tree_core_backend
+        if params.tree_core_backend is not None
+        else envs.SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND.get()
+    )
+    return resolve_tree_core_backend(name, params)
 
 
 def register_tree_core_backend(name: str, factory: TreeCoreFactory) -> None:
@@ -54,7 +194,17 @@ def _python_tree_core_factory(
     return UnifiedTreeCore(params, components)
 
 
+def _rust_tree_core_factory(
+    params: CacheInitParams, components: dict[ComponentType, TreeComponent]
+) -> UnifiedTreeCoreInterface:
+    """Load and construct the in-tree Rust TreeCore only when selected."""
+    from decoupled_engine.srt.mem_cache.rust_tree_core.adapter import RustUnifiedTreeCore
+
+    return RustUnifiedTreeCore(params)
+
+
 register_tree_core_backend("python", _python_tree_core_factory)
+register_tree_core_backend("rust", _rust_tree_core_factory)
 
 
 def create_tree_core(
@@ -62,7 +212,8 @@ def create_tree_core(
     params: CacheInitParams,
     components: dict[ComponentType, TreeComponent],
 ) -> UnifiedTreeCoreInterface:
-    """Construct the TreeCore registered under `name`."""
+    """Resolve compatibility and construct the registered TreeCore."""
+    name = resolve_tree_core_backend(name, params)
     factory = get_tree_core_factory(name)
     if factory is None:
         raise ValueError(

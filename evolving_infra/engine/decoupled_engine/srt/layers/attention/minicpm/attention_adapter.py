@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from decoupled_engine.kernels.ops.attention.flash_attention import flash_attn_with_kvcache
-from decoupled_engine.kernels.ops.attention.utils import create_flashinfer_kv_indices_triton
+from decoupled_engine.kernels.ops.attention.kv_indices import create_flashinfer_kv_indices_triton
 from decoupled_engine.srt.layers.attention.flashattention_backend import FlashAttentionBackend
 from decoupled_engine.srt.layers.attention.minicpm.sparse_utils import (
     MiniCPMSparseMetadata,

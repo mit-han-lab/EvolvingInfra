@@ -147,7 +147,7 @@ def touch_page_keys(
     page of the sequence (as the owner's tree computes them), so they equal the
     keys that a LOOKUP of those pages sends."""
     from decoupled_engine.srt.mem_cache.radix_cache import RadixKey
-    from decoupled_engine.srt.mem_cache.utils import get_hash_str
+    from decoupled_engine.srt.mem_cache.utils import get_storage_hash_str
 
     extra = 1 if is_bigram else 0
     num_pages = min(int(num_pages), max(0, len(token_ids) - extra) // page_size)
@@ -160,7 +160,10 @@ def touch_page_keys(
         limit=num_pages * page_size + extra,
         cache_salt=cache_salt,
     )
-    hashes = get_hash_str(key, None, page_size=page_size)
+    # v0.5.23 seeds the owner's node hash chain with the key's namespace
+    # (compute_node_hash_values -> get_storage_hash_str); unnamespaced keys
+    # hash as before.
+    hashes = get_storage_hash_str(key, None, page_size=page_size)
     first = max(0, len(hashes) - int(max_keys))
     return peer_page_keys(hashes[first:], cache_salt, extra_key), first
 

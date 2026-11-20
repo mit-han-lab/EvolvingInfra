@@ -34,6 +34,10 @@ def registered_regions_of_kv_args(kv_args: Any) -> List[Tuple[int, int]]:
 
     def add(ptrs: Sequence[int], lens: Sequence[int]) -> None:
         for ptr, length in zip(ptrs or [], lens or []):
+            if int(length) == 0:
+                # DSA index-K elision gives shared-topk layers a 0-row buffer; Mooncake rejects
+                # zero-length regions (as in mooncake/conn.py _registerable_regions).
+                continue
             key = (int(ptr), int(length))
             if key not in seen:
                 seen.add(key)
@@ -96,6 +100,12 @@ class MooncakeReadEngine:
         remote_ptrs: Sequence[int],
         lengths: Sequence[int],
     ) -> int:
+        if any(int(n) == 0 for n in lengths):
+            # Elided (0-row) layers have nothing to read; Mooncake rejects zero-length descriptors.
+            keep = [i for i, n in enumerate(lengths) if int(n) != 0]
+            local_ptrs = [local_ptrs[i] for i in keep]
+            remote_ptrs = [remote_ptrs[i] for i in keep]
+            lengths = [lengths[i] for i in keep]
         if not lengths:
             return 0
         # Blocking one-sided READ; called from the importer's transfer thread only.

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 
-from decoupled_engine.kernels.ops.gemm.kv_b_lora_absorbed import (
+from decoupled_engine.kernels.ops.lora.dense.kv_b_lora_absorbed import (
     step_a_q_fwd,
     step_a_v_fwd,
     step_b_q_fwd,

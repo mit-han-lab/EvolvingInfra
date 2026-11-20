@@ -419,7 +419,15 @@ def _symmetric_reason(scheduler: Any) -> Optional[str]:
         return "symmetric mode without the load quarantine (SGLANG_DSA_HOST_DEDUP_LOAD_QUARANTINE)"
     if getattr(scheduler, "is_mixed_chunk", False):
         return "mixed chunked prefill (decode tokens in an extend batch)"
-    if getattr(getattr(scheduler, "ps", None), "pp_size", 1) > 1:
+    # v0.5.23 dropped Scheduler.ps: get_parallel() (raises when no parallel
+    # context is published; CPU stand-ins keep the old default 1).
+    try:
+        from decoupled_engine.srt.runtime_context import get_parallel
+
+        pp_size = get_parallel().pp_size
+    except (AttributeError, RuntimeError, ValueError):
+        pp_size = 1
+    if pp_size > 1:
         return "pipeline parallelism"
     algo = getattr(scheduler, "spec_algorithm", None)
     if algo is not None and not algo.is_none():

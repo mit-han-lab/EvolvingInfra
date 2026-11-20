@@ -34,7 +34,7 @@ from decoupled_engine.srt.models.kimi_k25 import (
     KimiK25ForConditionalGeneration,
     MoonViT3dPretrainedModel,
 )
-from decoupled_engine.srt.server_args import get_global_server_args
+from decoupled_engine.srt.runtime_context import get_mm
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class Glm5vForConditionalGeneration(KimiK25ForConditionalGeneration):
         nn.Module.__init__(self)
         self.config = config
         self.quant_config = quant_config
-        self.use_data_parallel = get_global_server_args().mm_enable_dp_encoder
+        self.use_data_parallel = get_mm().mm_enable_dp_encoder
 
         # Vision tower (bf16; quant only under ModelSlim, same as parent).
         self.vision_tower = MoonViT3dPretrainedModel(

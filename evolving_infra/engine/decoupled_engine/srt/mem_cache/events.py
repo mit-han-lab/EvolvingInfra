@@ -11,7 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-# Adapted from SGLang python/sglang/srt/mem_cache/events.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/mem_cache/events.py (commit 297e54fd10), modified for evolving-infra.
 """KV cache placement event recording.
 
 Produces the ``BlockStored`` / ``BlockRemoved`` / ``AllBlocksCleared`` events
@@ -41,18 +41,20 @@ removals of the radix nodes that D-role work created; see its docstring. Without
 a gate the recorder is unchanged.
 """
 
+from __future__ import annotations
+
 import contextlib
 import logging
 import time
-from typing import Any, Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
 
 from decoupled_engine.srt.disaggregation.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
     BlockStored,
-    BlockStoredMetadata,
-    BlockStoredWithMetadata,
     StorageMedium,
+    kv_event_namespace_seed,
+    namespaced_block_hash,
 )
 from decoupled_engine.srt.environ import envs
 from decoupled_engine.srt.mem_cache.utils import (
@@ -63,13 +65,23 @@ from decoupled_engine.srt.mem_cache.utils import (
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from decoupled_engine.srt.lora.lora_registry import LoRARef
+
+# Length of LoRARef.lora_id, a uuid4 or uuid5 hex string. Req adds the id to the
+# end of extra_key, so the last 32 characters of extra_key are the id.
+_LORA_ID_LEN = 32
+
 # 6f: seconds between the lazy-mode counter lines (logged from take() and lazy
 # record_store calls once the interval has passed).
 LAZY_LOG_INTERVAL_S = 60.0
 
 
 class _LazyStore:
-    """A node's store events, captured at record time and built at take()."""
+    """A node's store events, captured at record time and built at take().
+
+    ``parent_block_hash`` is already namespaced; ``namespace_seed`` namespaces
+    the page hashes at build time, as ``record_store`` does eagerly."""
 
     __slots__ = (
         "raw",
@@ -79,6 +91,9 @@ class _LazyStore:
         "hash_values",
         "parent_block_hash",
         "medium",
+        "namespace_seed",
+        "session_id",
+        "lora_name",
         "check",
     )
 
@@ -91,6 +106,9 @@ class _LazyStore:
         hash_values,
         parent_block_hash,
         medium,
+        namespace_seed=None,
+        session_id=None,
+        lora_name=None,
     ):
         self.raw = raw
         self.logical_len = logical_len
@@ -99,6 +117,9 @@ class _LazyStore:
         self.hash_values = hash_values
         self.parent_block_hash = parent_block_hash
         self.medium = medium
+        self.namespace_seed = namespace_seed
+        self.session_id = session_id
+        self.lora_name = lora_name
         self.check = None  # commit-time events (SGLANG_KV_EVENTS_LAZY_LOAD_BACK_CHECK)
 
 
@@ -220,6 +241,78 @@ class DRoleEventGate:
         )
 
 
+class LoRANameTable:
+    """Find the LoRA adapter name from the lora_id at the end of extra_key.
+
+    Req adds lora_id to the end of extra_key, so a tree node has only the id.
+    The table keeps all entries. A lora_id is not used again, and nodes of an
+    unloaded adapter can publish stores until eviction.
+    """
+
+    def __init__(self):
+        self._names: dict[str, str] = {}
+
+    @classmethod
+    def from_lora_refs(cls, lora_refs: Optional[Iterable[LoRARef]]) -> LoRANameTable:
+        table = cls()
+        for lora_ref in lora_refs or ():
+            table.register(lora_id=lora_ref.lora_id, lora_name=lora_ref.lora_name)
+        return table
+
+    def register(self, *, lora_id: str, lora_name: str) -> None:
+        self._names[lora_id] = lora_name
+
+    def get(self, extra_key: Optional[str]) -> Optional[str]:
+        return self.resolve(extra_key)
+
+    def resolve(self, extra_key: Optional[str]) -> Optional[str]:
+        if not extra_key:
+            return None
+        return self._names.get(extra_key[-_LORA_ID_LEN:])
+
+
+class KvEventLoraNames(LoRANameTable):
+    """Public names of selected LoRA namespaces, kept for the publisher lifetime.
+
+    Write-back can publish a host store after the last GPU removal and after
+    its request dies, so request or published-block counts cannot bound this.
+    """
+
+    def __init__(self):
+        # Adapter-id registrations keep the existing Dynamo load-time lookup.
+        self._adapter_names: dict[str, str] = {}
+        self._names: dict[str, str] = {}
+
+    def register(
+        self,
+        req: Any = None,
+        lora_name: Optional[str] = None,
+        *,
+        lora_id: Optional[str] = None,
+    ) -> None:
+        """Name ``req``'s namespace; ``req`` needs ``extra_key`` and ``lora_id``."""
+        if lora_id is not None:
+            self._adapter_names[lora_id] = lora_name
+            return
+        if req.lora_id is None:
+            return
+        # Older IPC senders omit the optional name; admission still resolves an ID.
+        lora_name = lora_name or self._adapter_names.get(req.lora_id)
+        if not lora_name:
+            return
+        self._names[req.extra_key] = lora_name
+
+    def get(self, extra_key: Optional[str]) -> Optional[str]:
+        return self._names.get(extra_key)
+
+    def resolve(self, extra_key: Optional[str]) -> Optional[str]:
+        if not extra_key:
+            return None
+        return self._names.get(extra_key) or self._adapter_names.get(
+            extra_key[-_LORA_ID_LEN:]
+        )
+
+
 class KVCacheEventRecorder:
     """Collects KV placement events for one cache.
 
@@ -227,9 +320,18 @@ class KVCacheEventRecorder:
     empty list, so callers never have to guard.
     """
 
-    def __init__(self, *, enabled: bool, page_size: int):
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        page_size: int,
+        dynamo_format: bool = False,
+        lora_names: Optional[KvEventLoraNames] = None,
+    ):
         self.enabled = enabled
         self.page_size = page_size
+        self.dynamo_format = dynamo_format
+        self.lora_names = lora_names if lora_names is not None else KvEventLoraNames()
         self._queue: list = []
         # Bigram (EAGLE) keys make a page's radix identity depend on the next
         # page's first token, so two chains that diverge exactly at a page
@@ -289,19 +391,13 @@ class KVCacheEventRecorder:
                     return
 
             elif isinstance(tail, BlockStored) and isinstance(event, BlockStored):
-                tail_metadata = (
-                    tail.metadata if isinstance(tail, BlockStoredWithMetadata) else None
-                )
-                event_metadata = (
-                    event.metadata
-                    if isinstance(event, BlockStoredWithMetadata)
-                    else None
-                )
                 if (
                     tail.medium == event.medium
                     and tail.lora_id == event.lora_id
                     and tail.block_size == event.block_size
-                    and tail_metadata == event_metadata
+                    and tail.cache_salt == event.cache_salt
+                    and tail.session_id == event.session_id
+                    and tail.lora_name == event.lora_name
                     and tail.block_hashes
                     and event.parent_block_hash == tail.block_hashes[-1]
                 ):
@@ -312,8 +408,13 @@ class KVCacheEventRecorder:
         queue.append(event)
 
     def _uses_event_hash(self, node: Any) -> bool:
-        return node.key.cache_salt is not None or (
-            self.unigram_bigram and node.key.is_bigram
+        # Upstream: a namespaced key (extra_key or cache_salt) publishes its
+        # event hash; EI adds unigram bigram keys
+        # (SGLANG_KV_EVENTS_UNIGRAM_BLOCK_HASH).
+        return (
+            node.key.extra_key is not None
+            or node.key.cache_salt is not None
+            or (self.unigram_bigram and node.key.is_bigram)
         )
 
     def _node_event_hash_values(self, node: Any) -> list:
@@ -345,7 +446,28 @@ class KVCacheEventRecorder:
             return None
         return hash_str_to_int64(parent_hash_values[-1])
 
-    def record_store(self, node: Any, medium=None, lazy: bool = False) -> None:
+    def _namespace_seed(self, node: Any) -> Optional[bytes]:
+        if not self.dynamo_format:
+            return kv_event_namespace_seed(
+                extra_key=(
+                    node.key.extra_key
+                    if self.lora_names.get(node.key.extra_key) is not None
+                    else None
+                ),
+                cache_salt=None,
+            )
+        return kv_event_namespace_seed(
+            extra_key=node.key.extra_key, cache_salt=node.key.cache_salt
+        )
+
+    def record_store(
+        self,
+        node: Any,
+        medium=None,
+        lazy: bool = False,
+        *,
+        session_id: Optional[str] = None,
+    ) -> None:
         # One BlockStored per ``page_size`` chunk.
         # ``medium`` defaults to StorageMedium.GPU but callers may override
         # for lower-tier insertions (e.g. StorageMedium.CPU for host/L2 cache).
@@ -361,7 +483,17 @@ class KVCacheEventRecorder:
             medium = StorageMedium.GPU
 
         event_hash_values = self._node_event_hash_values(node)
+        namespace_seed = self._namespace_seed(node)
         parent_block_hash = self._parent_block_hash(node)
+        if parent_block_hash is not None:
+            parent_block_hash = namespaced_block_hash(
+                parent_block_hash, namespace_seed=namespace_seed
+            )
+        lora_name = (
+            self.lora_names.resolve(node.key.extra_key)
+            if self.dynamo_format
+            else self.lora_names.get(node.key.extra_key)
+        )
         is_bigram = node.key.is_bigram
         unigram = self.unigram_bigram and is_bigram
         if lazy and self.lazy_load_back and not unigram:
@@ -373,6 +505,9 @@ class KVCacheEventRecorder:
                 event_hash_values,
                 parent_block_hash,
                 medium,
+                namespace_seed=namespace_seed,
+                session_id=session_id,
+                lora_name=lora_name,
             )
             if self.lazy_check:
                 entry.check = list(self._lazy_events(entry))
@@ -397,28 +532,28 @@ class KVCacheEventRecorder:
             else:
                 page_tokens = list(raw[start:end])
 
-            block_hash = hash_str_to_int64(event_hash_values[page_index])
+            block_hash = namespaced_block_hash(
+                hash_str_to_int64(event_hash_values[page_index]),
+                namespace_seed=namespace_seed,
+            )
             if unigram:
                 self._variants.setdefault((medium, block_hash), set()).add(
                     node.hash_value[page_index]
                 )
 
-            event_args = {
-                "block_hashes": [block_hash],
-                "parent_block_hash": parent_block_hash,
-                "token_ids": page_tokens,
-                "block_size": len(page_tokens),
-                "lora_id": None,
-                "medium": medium,
-            }
-            if node.key.cache_salt is None:
-                event = BlockStored(**event_args)
-            else:
-                event = BlockStoredWithMetadata(
-                    **event_args,
-                    metadata=BlockStoredMetadata(cache_salt=node.key.cache_salt),
+            self.enqueue(
+                BlockStored(
+                    block_hashes=[block_hash],
+                    parent_block_hash=parent_block_hash,
+                    token_ids=page_tokens,
+                    block_size=len(page_tokens),
+                    lora_id=None,
+                    medium=medium,
+                    cache_salt=node.key.cache_salt,
+                    session_id=session_id,
+                    lora_name=lora_name,
                 )
-            self.enqueue(event)
+            )
 
             parent_block_hash = block_hash
             page_index += 1
@@ -437,6 +572,7 @@ class KVCacheEventRecorder:
 
         # Hash values must match what was stored.
         event_hash_values = self._node_event_hash_values(node)
+        namespace_seed = self._namespace_seed(node)
 
         block_hashes = []
         logical_len = len(node.key)
@@ -447,7 +583,10 @@ class KVCacheEventRecorder:
             if end <= start:
                 continue
 
-            block_hash = hash_str_to_int64(event_hash_values[page_index])
+            block_hash = namespaced_block_hash(
+                hash_str_to_int64(event_hash_values[page_index]),
+                namespace_seed=namespace_seed,
+            )
             if unigram:
                 variants = self._variants.get((medium, block_hash))
                 if variants is not None:
@@ -485,22 +624,21 @@ class KVCacheEventRecorder:
                 page_tokens = [(raw[j], raw[j + 1]) for j in range(start, end)]
             else:
                 page_tokens = list(raw[start:end])
-            block_hash = hash_str_to_int64(entry.hash_values[page_index])
-            event_args = {
-                "block_hashes": [block_hash],
-                "parent_block_hash": parent_block_hash,
-                "token_ids": page_tokens,
-                "block_size": len(page_tokens),
-                "lora_id": None,
-                "medium": entry.medium,
-            }
-            if entry.cache_salt is None:
-                yield BlockStored(**event_args)
-            else:
-                yield BlockStoredWithMetadata(
-                    **event_args,
-                    metadata=BlockStoredMetadata(cache_salt=entry.cache_salt),
-                )
+            block_hash = namespaced_block_hash(
+                hash_str_to_int64(entry.hash_values[page_index]),
+                namespace_seed=entry.namespace_seed,
+            )
+            yield BlockStored(
+                block_hashes=[block_hash],
+                parent_block_hash=parent_block_hash,
+                token_ids=page_tokens,
+                block_size=len(page_tokens),
+                lora_id=None,
+                medium=entry.medium,
+                cache_salt=entry.cache_salt,
+                session_id=entry.session_id,
+                lora_name=entry.lora_name,
+            )
             parent_block_hash = block_hash
             page_index += 1
 
@@ -525,7 +663,11 @@ class KVCacheEventRecorder:
         n_pages = (n + ps - 1) // ps
         if len(tokens) != n or len(entry.hash_values) < n_pages:
             return None
-        hashes = [hash_str_to_int64(h) for h in entry.hash_values[:n_pages]]
+        seed = entry.namespace_seed
+        hashes = [
+            namespaced_block_hash(hash_str_to_int64(h), namespace_seed=seed)
+            for h in entry.hash_values[:n_pages]
+        ]
         full = n // ps
         segments = []
         if full:
@@ -539,23 +681,19 @@ class KVCacheEventRecorder:
             )
         events = []
         for block_hashes, parent, token_ids, size in segments:
-            event_args = {
-                "block_hashes": block_hashes,
-                "parent_block_hash": parent,
-                "token_ids": token_ids,
-                "block_size": size,
-                "lora_id": None,
-                "medium": entry.medium,
-            }
-            if entry.cache_salt is None:
-                events.append(BlockStored(**event_args))
-            else:
-                events.append(
-                    BlockStoredWithMetadata(
-                        **event_args,
-                        metadata=BlockStoredMetadata(cache_salt=entry.cache_salt),
-                    )
+            events.append(
+                BlockStored(
+                    block_hashes=block_hashes,
+                    parent_block_hash=parent,
+                    token_ids=token_ids,
+                    block_size=size,
+                    lora_id=None,
+                    medium=entry.medium,
+                    cache_salt=entry.cache_salt,
+                    session_id=entry.session_id,
+                    lora_name=entry.lora_name,
                 )
+            )
         return events
 
     def _check_fast_build(self, entry: _LazyStore) -> None:

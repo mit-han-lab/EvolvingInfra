@@ -5,7 +5,7 @@ from typing import Callable, List, Optional, Sequence, Tuple
 import torch
 import triton.testing
 
-from decoupled_engine.kernels.ops.communication.mp import multigpu_launch
+from decoupled_engine.test.kernels.multigpu import multigpu_launch
 from decoupled_engine.utils import is_in_ci
 
 

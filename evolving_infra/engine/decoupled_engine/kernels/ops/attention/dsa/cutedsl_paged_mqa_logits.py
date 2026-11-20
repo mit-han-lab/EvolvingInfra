@@ -17,7 +17,9 @@ import cutlass.cute as cute
 import torch
 from cutlass.utils import HardwareInfo
 
-from decoupled_engine.kernels.ops.attention.cutedsl_fp8_paged_mqa_logits import FP8MQALogitsKernel
+from decoupled_engine.kernels.ops.attention.dsa.cutedsl_fp8_paged_mqa_logits import (
+    FP8MQALogitsKernel,
+)
 from decoupled_engine.srt.utils import is_sm100_supported
 
 logger = logging.getLogger(__name__)

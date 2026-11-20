@@ -88,7 +88,12 @@ class PrefillResultFirst:
     @classmethod
     def for_scheduler(cls, scheduler: Any, loop: str = "pd") -> PrefillResultFirst:
         """Resolve once at loop start; every TP rank logs its setting."""
-        tp_rank = int(getattr(getattr(scheduler, "ps", None), "tp_rank", 0) or 0)
+        from decoupled_engine.srt.runtime_context import get_parallel
+
+        try:
+            tp_rank = int(get_parallel().tp_rank or 0)
+        except (AttributeError, RuntimeError, ValueError):
+            tp_rank = 0  # no parallel context (the old scheduler.ps fallback)
         when_ready = result_first_when_ready_enabled()
         note = ""
         if when_ready and getattr(scheduler, "require_mlp_sync", False):

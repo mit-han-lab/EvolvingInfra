@@ -222,6 +222,7 @@ def test_paper_features_turn_on_for_a_bare_symmetric_engine():
         "peer_kv_servicer_max_leased_gb": 64.0,
         "enable_dsa_hicache_host_dedup": True,
         "hicache_ratio": 4.445,
+        "hicache_host_memory_fraction": None,
         "enable_kv_session_retention": True,
     }
     assert sd.json.loads(extra)["ib_device"] == "mlx5_0,mlx5_1,mlx5_2,mlx5_3"

@@ -1,4 +1,4 @@
-# Adapted from SGLang python/sglang/srt/multimodal/processors/kimi_k25.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/multimodal/processors/kimi_k25.py (commit 297e54fd10), modified for evolving-infra.
 import hashlib
 import io
 import math
@@ -18,6 +18,7 @@ from decoupled_engine.image_layout import (
 )
 
 from decoupled_engine.kernels.ops.mm.process import normalize_and_patchify
+from decoupled_engine.srt.environ import envs
 from decoupled_engine.srt.managers.schedule_batch import (
     Modality,
     MultimodalDataItem,
@@ -34,6 +35,9 @@ from decoupled_engine.srt.multimodal.processors.kimi_common import KimiGridMMDat
 from decoupled_engine.srt.multimodal.transport.cuda_ipc import (
     DEFER_CUDA_IPC_FEATURE_RECONSTRUCTION_KEY,
 )
+from decoupled_engine.srt.runtime_context import get_mm
+
+_FORCE_CPU_IMAGE_PREPROCESSING = envs.SGLANG_FORCE_CPU_IMAGE_PREPROCESSING.get()
 
 # ---------------------------------------------------------------------------
 # GPU image preprocessing utilities (resize, pad, normalize, patchify on CUDA)
@@ -444,12 +448,26 @@ class KimiGPUProcessorWrapper:
         self.tokenizer = hf_processor.tokenizer
         self.media_processor = hf_processor.media_processor
 
+    def preprocess_fingerprint_payload(self):
+        return {
+            "patch_size": self._patch_size,
+            "merge_kernel_size": self._merge_kernel_size,
+            "in_patch_limit": self._in_patch_limit,
+            "patch_limit_on_one_side": self._patch_limit_on_one_side,
+            "fixed_output_tokens": self._fixed_output_tokens,
+            "image_mean": self._image_mean,
+            "image_std": self._image_std,
+            "hf_media_config": self.media_processor.media_proc_cfg,
+            "force_cpu": _FORCE_CPU_IMAGE_PREPROCESSING,
+            "cuda_available": torch.cuda.is_available(),
+        }
+
     def __call__(self, text=None, images=None, **kwargs):
         # process_mm_data passes images via kwargs["images"]
         images = images or kwargs.pop("images", None)
         original_input_ids = kwargs.pop("sglang_original_input_ids", None)
 
-        if images and torch.cuda.is_available():
+        if images and not _FORCE_CPU_IMAGE_PREPROCESSING and torch.cuda.is_available():
             return self._gpu_call(text, images, original_input_ids)
         return self._cpu_call(text, images, original_input_ids, **kwargs)
 
@@ -570,7 +588,7 @@ class KimiGPUProcessorWrapper:
 # Compatible with KimiVLForConditionalGeneration
 class KimiK2_5VLImageProcessor(KimiGridMMDataMixin, SGLangBaseProcessor):
     models = [KimiK25ForConditionalGeneration]
-    gpu_image_decode = True  # nvJPEG for JPEG, PIL fallback for others
+    gpu_image_decode = not _FORCE_CPU_IMAGE_PREPROCESSING
     prefer_tokenized_input = True
     precompute_hash_before_cpu_transfer = True
     # The GPU wrapper expands placeholders from the request's own token IDs.
@@ -578,6 +596,7 @@ class KimiK2_5VLImageProcessor(KimiGridMMDataMixin, SGLangBaseProcessor):
     auto_mm_processor_worker_num = 2
     auto_mm_io_worker_num = 16
     supports_mm_processor_concurrency = True
+    uses_wide_image_identity = True
 
     def __init__(self, hf_config, server_args, _processor, *args, **kwargs):
         mm_tokens = MultimodalSpecialTokens(
@@ -616,6 +635,7 @@ class KimiK2_5VLImageProcessor(KimiGridMMDataMixin, SGLangBaseProcessor):
         *args,
         **kwargs,
     ):
+        self.reject_caller_image_identity(image_data, request_obj)
         layout = getattr(request_obj, "prepared_image_layout", None)
         if layout is not None:
             if not isinstance(input_text, list):
@@ -728,6 +748,15 @@ class KimiK2_5VLImageProcessor(KimiGridMMDataMixin, SGLangBaseProcessor):
                     data["pad_value"],
                     data["offsets"],
                 )
+                # The prepared hash/pad are authoritative, as on the metadata-only
+                # path above: drop the wide identity assign_kimi_image_identities
+                # set, so padding_values() is (pad_value,) on every leg.
+                # TODO: let prepared layouts share radix prefixes with native
+                # requests for the same image. Prepared layouts use scalar pads
+                # and native requests the wide identity, so their image tokens
+                # never match.
+                item.identity = None
+                item.pad_values = None
                 item.model_specific_data.update(
                     image_config=self.image_config,
                     resize_config=data["resize_config"],
@@ -751,7 +780,7 @@ class KimiK2_5VLImageProcessor(KimiGridMMDataMixin, SGLangBaseProcessor):
         # its GPU transport proxy lazy until that assignment is known, avoiding a full
         # image copy to every rank. The scheduler only honors this marker once
         # the processor has already set the item's hash and pad value.
-        if self.keep_mm_features_on_device and self.server_args.mm_enable_dp_encoder:
+        if self.keep_mm_features_on_device and get_mm().mm_enable_dp_encoder:
             for item in mm_items:
                 item.model_specific_data[DEFER_CUDA_IPC_FEATURE_RECONSTRUCTION_KEY] = (
                     True

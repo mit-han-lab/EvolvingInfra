@@ -63,7 +63,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 import torch
 
 from decoupled_engine.srt.disaggregation.utils import DisaggregationMode
-from decoupled_engine.srt.runtime_context import get_memory
+from decoupled_engine.srt.runtime_context import get_memory, get_parallel
 
 if TYPE_CHECKING:
     from decoupled_engine.srt.managers.schedule_batch import Req, ScheduleBatch
@@ -152,11 +152,11 @@ def _unsupported(scheduler: Scheduler, mode: str) -> List[str]:
     if scheduler.is_hybrid_ssm or scheduler.is_hybrid_swa:
         # One host lock protects a FULL path; SWA / mamba host state is not.
         problems.append("a FULL-only model (no SWA, no mamba)")
-    if scheduler.ps.pp_size != 1:
+    if get_parallel().pp_size != 1:
         problems.append("pp_size == 1")
-    if scheduler.ps.attn_cp_size != 1:
+    if get_parallel().attn_cp_size != 1:
         problems.append("attn_cp_size == 1")
-    if scheduler.enable_dp_attention:
+    if scheduler.attn_dp_enabled:
         problems.append("no DP attention")
     if get_memory().hicache_queued_prefix_max_tokens < 1:
         problems.append("--hicache-queued-prefix-max-tokens >= 1")
@@ -199,7 +199,7 @@ class QueuedPrefixGuard:
         self._retry: Dict[str, int] = {}  # S-ARRIVE candidates: rid -> next pass
         self._no_arrive: Dict[str, int] = {}  # pressure-released: rid -> pass
         self.stats: Counter = Counter()
-        self._log = scheduler.ps.attn_tp_rank == 0
+        self._log = get_parallel().attn_tp_rank == 0
         self._last_summary = time.monotonic()
         self.cache.queued_prefix_guard = self
         if self._log:
@@ -294,7 +294,9 @@ class QueuedPrefixGuard:
             result = self.cache.tree_core.drive_host_eviction(
                 component_type, num_tokens - freed
             )
-            self.cache._free_values(result.device_frees, result.host_frees)
+            # v0.5.23: drain the values and the cache actions (an undrained
+            # eviction result asserts on disposal), as evict_host does.
+            self.cache._apply_eviction_result(result)
             freed += result.tracker.get(component_type, 0)
         if released:
             self.stats["pressure_events"] += 1
@@ -383,7 +385,7 @@ class QueuedPrefixGuard:
         if self._no_arrive.get(rid, -1) > self._pass:
             self.stats["skip_suppressed"] += 1
             return
-        if rid in self.cache.ongoing_prefetch:
+        if self.cache.has_ongoing_prefetch(req.cache_request_handle):
             # Its prefetch anchor lock holds the local prefix; S-PULL follows.
             self.stats["skip_inflight"] += 1
             return

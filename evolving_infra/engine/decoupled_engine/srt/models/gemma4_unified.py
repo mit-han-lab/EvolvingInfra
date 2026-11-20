@@ -40,7 +40,6 @@ import torch
 from torch import nn
 from transformers import PreTrainedModel
 
-from decoupled_engine.srt.distributed import get_pp_group
 from decoupled_engine.srt.layers.layernorm import Gemma4RMSNorm
 from decoupled_engine.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from decoupled_engine.srt.layers.quantization.base_config import QuantizationConfig
@@ -53,6 +52,7 @@ from decoupled_engine.srt.managers.schedule_batch import (
 from decoupled_engine.srt.model_loader.weight_utils import default_weight_loader
 from decoupled_engine.srt.models.gemma4_causal import Gemma4TextModel, pp_filter_load_weight
 from decoupled_engine.srt.models.gemma4_mm import Gemma4ForConditionalGeneration
+from decoupled_engine.srt.runtime_context import get_parallel
 from decoupled_engine.srt.utils import add_prefix
 
 logger = logging.getLogger(__name__)
@@ -144,7 +144,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         # Skip Gemma4ForConditionalGeneration.__init__ (it builds the SigLIP /
         # conformer towers we do not have) and initialise the HF base directly.
         PreTrainedModel.__init__(self, config=config)
-        self.pp_group = get_pp_group()
+        self.pp_group = get_parallel().pp_group
         self.config = config
         self.quant_config = quant_config
 
@@ -190,7 +190,8 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         )
 
         text_tie = getattr(text_config, "tie_word_embeddings", True)
-        if self.pp_group.world_size == 1 and text_tie:
+        self.lm_head_is_tied = self.pp_group.world_size == 1 and text_tie
+        if self.lm_head_is_tied:
             self.lm_head = self.language_model.embed_tokens
         elif self.pp_group.is_last_rank:
             self.lm_head = ParallelLMHead(

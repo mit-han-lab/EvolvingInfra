@@ -18,8 +18,8 @@ of this package; the default HTTP server does not use them.
 
 ## Relation to SGLang
 
-The engine is SGLang's `python/sglang` at upstream commit
-[`9a489f8d2f`](https://github.com/sgl-project/sglang/commit/9a489f8d2fc376fbe5594393af367fd99ada7aac),
+The engine is SGLang's `python/sglang` at upstream release v0.5.23, commit
+[`297e54fd10`](https://github.com/sgl-project/sglang/commit/297e54fd105e974cdf401e5b4d20253a22c16f90),
 renamed to `decoupled_engine` and substantially modified. Each modified upstream file says
 so in its header ("Adapted from SGLang ..."); files without that line are new or differ
 only by the rename. [CHANGES.md](CHANGES.md) lists the 85 new files and the 160 modified

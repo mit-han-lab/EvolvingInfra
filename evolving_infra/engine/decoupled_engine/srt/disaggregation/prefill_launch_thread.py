@@ -89,12 +89,23 @@ def launch_thread_enabled() -> bool:
     return bool(envs.SGLANG_PREFILL_LAUNCH_THREAD.get())
 
 
+def _parallel_int(name: str, default: int) -> int:
+    """get_parallel().<name>, or ``default`` when no parallel context is
+    published (stand-ins; the old ``getattr(scheduler.ps, name, default)``)."""
+    from decoupled_engine.srt.runtime_context import get_parallel
+
+    try:
+        return int(getattr(get_parallel(), name) or default)
+    except (AttributeError, RuntimeError, ValueError):
+        return default
+
+
 def _incompatible(scheduler: Any) -> Optional[str]:
     if not getattr(scheduler, "enable_overlap", False):
         return "the overlap scheduler is off"
     if getattr(scheduler, "require_mlp_sync", False):
         return "DP attention (MLP sync) keeps one order on every rank"
-    if int(getattr(getattr(scheduler, "ps", None), "pp_size", 1) or 1) != 1:
+    if _parallel_int("pp_size", 1) != 1:
         return "pipeline parallelism"
     if getattr(scheduler, "_load_quarantine", None) is not None:
         return "the M4 load quarantine records forward_done inside the launch"
@@ -130,7 +141,7 @@ class PrefillLaunchThread:
     def for_scheduler(cls, scheduler: Any) -> Optional[PrefillLaunchThread]:
         """Resolve once at loop start: None when the flag is off. Raises when
         the flag is on with a configuration it does not support."""
-        tp_rank = int(getattr(getattr(scheduler, "ps", None), "tp_rank", 0) or 0)
+        tp_rank = _parallel_int("tp_rank", 0)
         if not launch_thread_enabled():
             logger.info("%s rank=%d off", LOG_TAG, tp_rank)
             return None

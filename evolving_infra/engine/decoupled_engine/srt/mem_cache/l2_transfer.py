@@ -1,14 +1,16 @@
-# Adapted from SGLang python/sglang/srt/mem_cache/l2_transfer.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/mem_cache/l2_transfer.py (commit 297e54fd10), modified for evolving-infra.
 from __future__ import annotations
 
 import logging
 import time
+from contextlib import contextmanager
 from functools import cache
 from typing import Any, Callable, NamedTuple, Optional
 
 import torch
 
 from decoupled_engine.srt.environ import envs
+from decoupled_engine.srt.mem_cache.pool_host.base import shared_host_layout_domains
 from decoupled_engine.srt.utils import get_device_module
 
 logger = logging.getLogger(__name__)
@@ -60,17 +62,87 @@ class L2TransferEngine:
         self.device_to_host_stream = device_module.Stream()
         self.host_to_device_stream = device_module.Stream()
 
+    @staticmethod
+    def _resolve_device_indices(transfer: L2Transfer) -> torch.Tensor:
+        """Resolve controller IDs into this pool's device-buffer indices.
+
+        Call on the transfer stream after the producer event. The host-transfer
+        move gate prevents relocation until the transfer completes.
+        """
+        # Mamba state pools do not inherit KVCache's default attributes.
+        translate = getattr(transfer.device_pool, "host_transfer_translate", None)
+        if translate is None:
+            return transfer.device_indices
+        original_device = transfer.device_indices.device
+        # The direct backend supplies CPU indices even for a CUDA pool.
+        # Translate alongside the v2p table, then restore the backend's device.
+        indices = transfer.device_indices.to(
+            getattr(transfer.device_pool, "device", original_device)
+        ).contiguous()
+        dcp_size = getattr(transfer.host_pool, "dcp_size", 1)
+        if dcp_size > 1:
+            # The MLA host pool selects this rank and collapses logical IDs.
+            # Translate in local virtual space, then preserve that widened
+            # interface (including token order) for the host pool.
+            resolved = translate(indices // dcp_size) * dcp_size + indices % dcp_size
+        else:
+            resolved = translate(indices)
+        return resolved.to(original_device)
+
+    def _prepare_transfers(self, transfers: list[L2Transfer]) -> list[L2Transfer]:
+        prepared = []
+        for transfer in transfers:
+            host_indices, device_indices = transfer.host_pool.prepare_transfer_indices(
+                transfer.host_indices,
+                self._resolve_device_indices(transfer),
+                self.io_backend,
+            )
+            prepared.append(
+                transfer._replace(
+                    host_indices=host_indices,
+                    device_indices=device_indices,
+                )
+            )
+        return prepared
+
+    @contextmanager
+    def _submission(self, transfers, stream, transfer_key, start_event=None):
+        start_event = self._start_event(start_event)
+        ack_start, ack_finish, timing_enabled = make_timing_event_pair()
+        completion = TransferCompletion(ack_start, ack_finish, timing_enabled)
+        domains = shared_host_layout_domains(t.host_pool for t in transfers)
+        for domain in domains:
+            domain.acquire_layout()
+        finish_recorded = False
+        try:
+            with device_module.stream(stream):
+                # Index preparation can read producer-owned device indices.
+                start_event.wait(stream)
+                prepared = self._prepare_transfers(transfers)
+                ack_start.record()
+                yield prepared, completion
+                ack_finish.record()
+                finish_recorded = True
+                self._record_stream(transfers + prepared, stream)
+        except Exception:
+            stream.synchronize()
+            raise
+        finally:
+            for domain in reversed(domains):
+                domain.release_layout(
+                    ack_finish if finish_recorded else None,
+                    (id(self), transfer_key),
+                )
+
     def submit_device_to_host(
         self, transfers: list[L2Transfer], *, sm_copy: bool = False
     ) -> TransferCompletion:
         """``sm_copy``: the caller checked that every host pool here supports
         an SM-kernel backup (``supports_sm_copy_backup``) and moved the
         indices for it (host indices on the device)."""
-        start_event = self._start_event(None)
-        ack_start, ack_finish, timing_enabled = make_timing_event_pair()
-        with device_module.stream(self.device_to_host_stream):
-            start_event.wait(self.device_to_host_stream)
-            ack_start.record()
+        with self._submission(
+            transfers, self.device_to_host_stream, "device_to_host"
+        ) as (transfers, completion):
             for transfer in transfers:
                 if getattr(transfer.host_pool, "_is_dummy", False):
                     continue
@@ -83,21 +155,19 @@ class L2TransferEngine:
                         sm_copy=True,
                     )
                     continue
-                transfer.host_pool.backup_from_device_all_layer(
+                transfer.host_pool.backup_from_device_all_layer_physical(
                     transfer.device_pool,
                     transfer.host_indices,
                     transfer.device_indices,
                     self.io_backend,
                 )
-            ack_finish.record()
-            self._record_stream(transfers, self.device_to_host_stream)
-        return TransferCompletion(ack_start, ack_finish, timing_enabled)
+        return completion
 
     def submit_host_to_device(
         self,
         transfers: list[L2Transfer],
         *,
-        layer_num: int,
+        transfer_layer_id_max: int,
         start_event=None,
         on_layer_done=None,
         wait_on_caller: bool = True,
@@ -115,8 +185,8 @@ class L2TransferEngine:
         clean once ``q3_dirty_event`` (forward_done of their release epoch)
         completes; the shared loader then skips ``start_event`` and the fence.
         Only the shared loader may take such an op (L-g)."""
-        start_event = self._start_event(start_event)
-        ack_start, ack_finish, timing_enabled = make_timing_event_pair()
+        # The host-dedup paths below name the transfer-ID bound layer_num.
+        layer_num = transfer_layer_id_max
         primary = transfers[0] if transfers else None
         dedup = getattr(primary.host_pool, "host_dedup", None) if primary else None
         fanout = getattr(dedup, "ipc_fanout", None) if dedup is not None else None
@@ -128,8 +198,8 @@ class L2TransferEngine:
                 dedup=dedup,
                 fanout=fanout,
                 layer_num=layer_num,
-                start_event=start_event,
-                ack=(ack_start, ack_finish, timing_enabled),
+                start_event=self._start_event(start_event),
+                ack=make_timing_event_pair(),
                 on_layer_done=on_layer_done,
                 wait_on_caller=wait_on_caller,
                 stream=stream if stream is not None else self.host_to_device_stream,
@@ -144,9 +214,9 @@ class L2TransferEngine:
                 transfers,
                 loader,
                 layer_num=layer_num,
-                start_event=start_event,
+                start_event=self._start_event(start_event),
                 fence_event=fence_event,
-                ack=(ack_start, ack_finish, timing_enabled),
+                ack=make_timing_event_pair(),
                 on_layer_done=on_layer_done,
                 background=background,
                 layer_events=layer_events,
@@ -171,8 +241,8 @@ class L2TransferEngine:
                     plans,
                     layer_num=layer_num,
                     h2d=h2d,
-                    start_event=start_event,
-                    ack=(ack_start, ack_finish, timing_enabled),
+                    start_event=self._start_event(start_event),
+                    ack=make_timing_event_pair(),
                     on_layer_done=on_layer_done,
                     wait_on_caller=wait_on_caller,
                     t_submit=t_submit,
@@ -182,11 +252,15 @@ class L2TransferEngine:
             getattr(t.host_pool, "host_dedup", None) is dedup for t in transfers
         ):
             prepare = None
-        with device_module.stream(h2d):
-            start_event.wait(h2d)
-            ack_start.record()
+        with self._submission(
+            transfers, h2d, "host_to_device", start_event
+        ) as (transfers, completion):
+            primary = transfers[0] if transfers else None
+            delay_cycles = envs.SGLANG_TEST_HICACHE_H2D_DELAY_CYCLES.get()
             deferred_layers = []
-            for layer_id in range(layer_num):
+            for layer_id in range(transfer_layer_id_max):
+                if delay_cycles:
+                    torch.cuda._sleep(delay_cycles)
                 layer_transfers = []
                 for transfer in transfers:
                     local_layer_id = (
@@ -210,7 +284,7 @@ class L2TransferEngine:
                     if not getattr(transfer.host_pool, "_is_dummy", False) or getattr(
                         transfer.host_pool, "_shared_reader", False
                     ):
-                        transfer.host_pool.load_to_device_per_layer(
+                        transfer.host_pool.load_to_device_per_layer_physical(
                             transfer.device_pool,
                             transfer.host_indices,
                             transfer.device_indices,
@@ -254,8 +328,6 @@ class L2TransferEngine:
                             )
                 if on_layer_done is not None:
                     on_layer_done(layer_id)
-            ack_finish.record()
-            self._record_stream(transfers, h2d)
         if wait_on_caller and any(
             getattr(t.host_pool, "host_dedup", None) is not None for t in transfers
         ):
@@ -269,14 +341,14 @@ class L2TransferEngine:
             # M0 (LOAD_TIMING): the caller-stream stall this wait causes; on D
             # every running decode request's next step waits for it.
             t = _FWD_WAIT.begin()
-            ack_finish.wait(device_module.current_stream())
+            completion.finish_event.wait(device_module.current_stream())
             _FWD_WAIT.end(t, "caller_load_wait_gpu_ms")
             _FWD_WAIT.resolve()
         if shared:
             from decoupled_engine.srt.mem_cache.ce_2d_load import COST
 
             COST.add("submit_per_layer", (time.perf_counter() - t_submit) * 1e3)
-        return TransferCompletion(ack_start, ack_finish, timing_enabled)
+        return completion
 
     def _submit_shared_loader(
         self,
@@ -650,8 +722,14 @@ class L2TransferEngine:
         return start_event
 
     @staticmethod
-    def _record_stream(transfers: list[L2Transfer], stream) -> None:
+    def _record_stream(transfers: list[L2Transfer], stream, resolved=()) -> None:
+        tensors = []
         for transfer in transfers:
-            for indices in (transfer.host_indices, transfer.device_indices):
-                if indices.is_cuda:
-                    indices.record_stream(stream)
+            tensors.extend((transfer.host_indices, transfer.device_indices))
+        # Keep temporary translated indices alive until the transfer completes.
+        tensors.extend(resolved)
+        for indices in tensors:
+            if indices is not None and (
+                indices.is_cuda or indices.device.type == "xpu"
+            ):
+                indices.record_stream(stream)

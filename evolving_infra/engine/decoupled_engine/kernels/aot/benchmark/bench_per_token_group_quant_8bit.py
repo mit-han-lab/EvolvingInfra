@@ -5,14 +5,12 @@ import torch
 import triton
 from sgl_kernel.test_utils import create_per_token_group_quant_test_data
 
-from decoupled_engine.kernels.ops.quantization.fp8_kernel import (
-    per_token_group_quant_8bit as triton_per_token_group_quant_8bit,
-)
-from decoupled_engine.kernels.ops.quantization.fp8_kernel import (
-    sglang_per_token_group_quant_8bit,
-)
 from decoupled_engine.srt.utils import is_hip
 from decoupled_engine.srt.utils.bench_utils import bench_kineto
+from decoupled_engine.test.kernels.per_token_group_quant import (
+    sglang_per_token_group_quant_8bit,
+    triton_per_token_group_quant_8bit,
+)
 from decoupled_engine.utils import is_in_ci
 
 IS_CI = is_in_ci()

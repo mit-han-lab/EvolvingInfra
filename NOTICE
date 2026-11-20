@@ -10,11 +10,11 @@ This product includes software derived from SGLang
 licensed under the Apache License, Version 2.0:
 
 - evolving_infra/engine/decoupled_engine/ is derived from sglang/python/sglang (srt/, kernels/ and
-  a few top-level modules) at upstream commit 9a489f8d2fc376fbe5594393af367fd99ada7aac,
+  a few top-level modules) at upstream release v0.5.23 (commit 297e54fd105e974cdf401e5b4d20253a22c16f90),
   renamed from the `sglang` package to `decoupled_engine` and modified. Each
   modified upstream file says so in its header ("Adapted from SGLang ...").
-- evolving_infra/router/core/ is derived from sglang/experimental/sgl-router at the same upstream
-  base and modified. The gateway cache-aware policy (src/policies/gateway_ca_tree.rs,
+- evolving_infra/router/core/ is derived from sglang/experimental/sgl-router at upstream commit
+  9a489f8d2fc376fbe5594393af367fd99ada7aac and modified. The gateway cache-aware policy (src/policies/gateway_ca_tree.rs,
   src/policies/gateway_cache_aware.rs) and the power-of-two decode pick
   (src/policies/decode_po2_smg.rs) are ported from sglang/sgl-model-gateway at the same base.
   Files that carry an "SGLang Authors" header keep it; files written for evolving-infra carry

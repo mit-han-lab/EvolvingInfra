@@ -162,7 +162,7 @@ If you use Evolving Infra, please cite the [paper](https://arxiv.org/abs/2611.12
 
 ## License
 
-MIT ([LICENSE](LICENSE)). The engine (`evolving_infra/engine/`) and the router core
-(`evolving_infra/router/core/`) are derived from SGLang at upstream commit `9a489f8d2f` and, with
+MIT ([LICENSE](LICENSE)). The engine (`evolving_infra/engine/`, from SGLang v0.5.23) and the router core
+(`evolving_infra/router/core/`, from SGLang commit `9a489f8d2f`) are derived from SGLang and, with
 Trie (`benchmarks/trie/`), stay under the Apache License 2.0 in their own LICENSE files;
 [NOTICE](NOTICE) lists every included third-party work.

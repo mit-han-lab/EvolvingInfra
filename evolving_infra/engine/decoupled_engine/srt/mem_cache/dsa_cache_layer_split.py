@@ -11,7 +11,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-# Adapted from SGLang python/sglang/srt/mem_cache/dsa_cache_layer_split.py (commit 9a489f8d2f), modified for evolving-infra.
 
 """Layer-sharded DSA KV cache pool for context-parallel prefill.
 
@@ -36,7 +35,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from decoupled_engine.kernels.ops.attention.dsa import index_buf_accessor
+from decoupled_engine.kernels.ops.kvcache import dsa_index_k_cache
 from decoupled_engine.srt.layers.cp.utils import get_layer_owner, get_layer_shard_range
 from decoupled_engine.srt.mem_cache.index_key_cache import IndexKeyCache
 from decoupled_engine.srt.mem_cache.memory_pool import (
@@ -107,7 +106,7 @@ class LayerSplitIndexKeyCache(IndexKeyCache):
     ):
         buf = self.get_buffer(layer_id)
         self.pool.prefetch_kv_buffer(layer_id)
-        return index_buf_accessor.GetKAndS.execute(
+        return dsa_index_k_cache.GetKAndS.execute(
             self.pool,
             buf,
             page_indices=page_indices,
@@ -202,9 +201,9 @@ class LayerSplitDSATokenToKVPool(DSATokenToKVPool):
         layer_shard_size: int,
         **kwargs,
     ):
-        assert (
-            layer_shard_rank is not None and layer_shard_size > 1
-        ), "LayerSplitDSATokenToKVPool requires layer_shard_size > 1"
+        assert layer_shard_rank is not None and layer_shard_size > 1, (
+            "LayerSplitDSATokenToKVPool requires layer_shard_size > 1"
+        )
         self.layer_shard_rank = layer_shard_rank
         self.layer_shard_size = layer_shard_size
         self.layer_shard_enabled = True
@@ -423,10 +422,11 @@ class LayerSplitDSATokenToKVPool(DSATokenToKVPool):
     def set_mla_kv_buffer(
         self,
         layer: RadixAttention,
-        loc: torch.Tensor,
+        loc_info,
         cache_k_nope: torch.Tensor,
         cache_k_rope: torch.Tensor,
     ):
+        loc, _, _ = unwrap_write_loc(loc_info)
         maybe_detect_oob(loc, 0, self.size + self.page_size, "set_mla_kv_buffer (MLA)")
         layer_id = layer.layer_id
         if self.pending_remote_kv_layer_id == layer_id:
@@ -552,7 +552,7 @@ class LayerSplitDSATokenToKVPool(DSATokenToKVPool):
 
     # ---- HiCache CPU offload: skip empty (non-owned) layers ---------------
 
-    def get_cpu_copy(self, indices, mamba_indices=None, req_pool_idx=None):
+    def get_cpu_copy(self, indices, mamba_indices=None, req_pool_index=None):
         from decoupled_engine.srt.utils import current_platform
 
         current_platform.synchronize()
@@ -570,9 +570,18 @@ class LayerSplitDSATokenToKVPool(DSATokenToKVPool):
                 kv_cache_cpu[-1].append(kv_cpu)
         current_platform.synchronize()
 
-        return {"kv": kv_cache_cpu, "index_k": self.index_key_cache.cpu_copy(indices)}
+        return {
+            "kv": kv_cache_cpu,
+            "index_k": self.index_key_cache.cpu_copy(indices),
+        }
 
-    def load_cpu_copy(self, kv_cache_cpu_dict, indices, mamba_indices=None, req_pool_idx=None):
+    def load_cpu_copy(
+        self,
+        kv_cache_cpu_dict,
+        indices,
+        mamba_indices=None,
+        req_pool_index=None,
+    ):
         from decoupled_engine.srt.utils import current_platform
 
         kv_cache_cpu = kv_cache_cpu_dict["kv"]

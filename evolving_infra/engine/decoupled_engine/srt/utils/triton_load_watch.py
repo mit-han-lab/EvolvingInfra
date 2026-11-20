@@ -1,4 +1,4 @@
-# Adapted from SGLang python/sglang/srt/utils/triton_load_watch.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/utils/triton_load_watch.py (commit 297e54fd10), modified for evolving-infra.
 """Detect Triton kernel device-loads after the engine starts serving.
 
 Triton loads each kernel specialization's cubin onto the GPU at its first

@@ -1,6 +1,7 @@
-# Adapted from SGLang python/sglang/srt/managers/scheduler_components/request_receiver.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/managers/scheduler_components/request_receiver.py (commit 297e54fd10), modified for evolving-infra.
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -14,39 +15,49 @@ from typing import (
     Union,
 )
 
+import torch
 import zmq
-from torch.distributed import barrier
+from torch.distributed import ReduceOp, all_reduce, barrier
 
 from decoupled_engine.srt.disaggregation.utils import prepare_abort
+from decoupled_engine.srt.distributed.communication_op import attn_cp_tp_broadcast_pyobj
 from decoupled_engine.srt.environ import envs
 from decoupled_engine.srt.managers.io_struct import (
+    AbortReq,
     BatchTokenizedEmbeddingReqInput,
     BatchTokenizedGenerateReqInput,
+    MMInputsProcessError,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
     sock_recv,
 )
 from decoupled_engine.srt.managers.mm_utils import (
+    discard_shm_features,
     has_shm_features,
     unwrap_shm_features,
 )
-from decoupled_engine.srt.runtime_context import get_disagg, get_parallel, is_ep_scale_joiner
+from decoupled_engine.srt.observability.scheduler_stage_metrics import (
+    SCHEDULER_STAGE_RECV_REQUESTS,
+    SchedulerStageMetricsRecorder,
+    scheduler_stage_method,
+)
+from decoupled_engine.srt.runtime_context import get_disagg, get_exec, get_parallel
 from decoupled_engine.srt.utils import (
     broadcast_pyobj,
     broadcast_pyobj_with_flag,
     point_to_point_pyobj,
 )
-from decoupled_engine.srt.utils.nvtx_utils import scheduler_nvtx_method
 
 if TYPE_CHECKING:
     from decoupled_engine.srt.configs.model_config import ModelConfig
-    from decoupled_engine.srt.distributed.parallel_state_wrapper import ParallelState
-    from decoupled_engine.srt.managers.rust_server import RustServer
+    from decoupled_engine.srt.rust_server.server import RustServer
     from decoupled_engine.srt.server_args import ServerArgs
     from decoupled_engine.test.scripted_runtime.scheduler_hook import ScriptedSchedulerHook
     from decoupled_engine.test.scripted_runtime.tokenizer_recv_proxy import (
         ScriptedTokenizerRecvProxy,
     )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True, slots=True, frozen=True)
@@ -56,20 +67,13 @@ class SchedulerRequestReceiver:
     recv_skipper: Any
     input_blocker: Any
     mm_receiver: Any
-    ps: ParallelState
-    tp_group: Any
-    tp_cpu_group: Any
-    attn_tp_group: Any
-    attn_tp_cpu_group: Any
-    attn_cp_group: Any
-    attn_cp_cpu_group: Any
-    world_group: Any
     server_args: ServerArgs
     model_config: ModelConfig
     max_recv_per_poll: int
     stream_output: Callable[..., None]
     get_last_batch: Callable[[], Any]
     scripted_scheduler_hook: Optional[ScriptedSchedulerHook] = None
+    scheduler_stage_metrics: Optional[SchedulerStageMetricsRecorder] = None
     # SGLANG_HICACHE_SKIP_IDLE_SYNC (plain TP only): the source rank's
     # per-step HiCache sync decision rides the request broadcast
     # (broadcast_pyobj_with_flag); every rank hands it to the sink (None on a
@@ -109,11 +113,15 @@ class SchedulerRequestReceiver:
             return False
         return num_recv_reqs >= self.max_recv_per_poll
 
-    @scheduler_nvtx_method("scheduler.recv_requests")
+    @scheduler_stage_method(SCHEDULER_STAGE_RECV_REQUESTS)
     def recv_requests(
-        self,
+        self, local_reqs: Optional[List[AbortReq]] = None
     ) -> List[Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput, Any]]:
-        """Receive results at tp_rank = 0 and broadcast it to all other TP ranks."""
+        """Receive results at tp_rank = 0 and broadcast it to all other TP ranks.
+
+        local_reqs are aborts the caller decided on this rank; they ride the
+        same broadcast as the pulled requests.
+        """
 
         if self.scripted_scheduler_hook is not None:
             self.scripted_scheduler_hook.step()
@@ -141,16 +149,16 @@ class SchedulerRequestReceiver:
 
         readout = self.broadcast_readout
         if readout is None:
-            recv_reqs = self._broadcast_reqs_across_ranks(recv_reqs)
+            recv_reqs = self._broadcast_reqs_across_ranks(recv_reqs, local_reqs)
         else:
             # Payload "empty": nothing to send, one size broadcast; "data":
             # requests or controls (the pickle and a second broadcast too).
-            has_data = bool(recv_reqs)
+            has_data = bool(recv_reqs) or bool(local_reqs)
             start = time.perf_counter()
-            recv_reqs = self._broadcast_reqs_across_ranks(recv_reqs)
+            recv_reqs = self._broadcast_reqs_across_ranks(recv_reqs, local_reqs)
             readout.observe(time.perf_counter() - start, has_data)
 
-        if self.ps.pp_rank == 0:
+        if get_parallel().pp_rank == 0:
             self.unwrap_pickle_wrapper(recv_reqs)
 
         recv_reqs = self._apply_mm_receiver(recv_reqs)
@@ -160,8 +168,8 @@ class SchedulerRequestReceiver:
         return recv_reqs
 
     def _pull_raw_reqs(self) -> Optional[List]:
-        if self.ps.pp_rank == 0:
-            if self.ps.attn_tp_rank == 0 and self.ps.attn_cp_rank == 0:
+        if get_parallel().pp_rank == 0:
+            if get_parallel().attn_tp_rank == 0 and get_parallel().attn_cp_rank == 0:
                 recv_reqs = []
                 if self.peer_kv_demote_source is not None:
                     demote = self.peer_kv_demote_source()
@@ -201,16 +209,18 @@ class SchedulerRequestReceiver:
             else:
                 recv_reqs = None
         else:
-            if self.ps.attn_tp_rank == 0 and self.ps.attn_cp_rank == 0:
+            if get_parallel().attn_tp_rank == 0 and get_parallel().attn_cp_rank == 0:
                 dp_offset = (
-                    self.ps.attn_dp_rank * self.ps.attn_cp_size * self.ps.attn_tp_size
+                    get_parallel().attn_dp_rank
+                    * get_parallel().attn_cp_size
+                    * get_parallel().attn_tp_size
                 )
                 recv_reqs = point_to_point_pyobj(
                     [],
-                    self.ps.pp_rank * self.ps.tp_size + dp_offset,
-                    self.world_group.cpu_group,
-                    (self.ps.pp_rank - 1) * self.ps.tp_size + dp_offset,
-                    self.ps.pp_rank * self.ps.tp_size + dp_offset,
+                    get_parallel().pp_rank * get_parallel().tp_size + dp_offset,
+                    get_parallel().world_group.cpu_group,
+                    (get_parallel().pp_rank - 1) * get_parallel().tp_size + dp_offset,
+                    get_parallel().pp_rank * get_parallel().tp_size + dp_offset,
                 )
             else:
                 recv_reqs = None
@@ -222,32 +232,27 @@ class SchedulerRequestReceiver:
         readout = self.broadcast_readout
         return {} if readout is None else {"size_sink": readout.add_bytes}
 
-    def _broadcast_reqs_across_ranks(self, recv_reqs: Optional[List]) -> List:
+    def _broadcast_reqs_across_ranks(
+        self, recv_reqs: Optional[List], local_reqs: Optional[List] = None
+    ) -> List:
+        """local_reqs ride the work channel, which is scoped to the ranks
+        sharing one waiting queue; the control channel fans out from global
+        rank 0 and would overwrite every DP group's aborts but the first.
+        """
+        local_reqs = local_reqs or []
         size_kw = self._broadcast_size_kw()
-        if get_parallel().enable_dp_attention:
-            if self.ps.attn_tp_rank == 0 and self.ps.attn_cp_rank == 0:
+        if get_parallel().attn_dp_enabled:
+            if get_parallel().attn_tp_rank == 0 and get_parallel().attn_cp_rank == 0:
                 work_reqs, control_reqs = self._split_work_and_control_reqs(recv_reqs)
+                work_reqs.extend(local_reqs)
             else:
                 work_reqs = None
                 control_reqs = None
 
-            if self.ps.attn_tp_size != 1:
-                work_reqs = broadcast_pyobj(
-                    work_reqs,
-                    self.attn_tp_group.rank,
-                    self.attn_tp_cpu_group,
-                    src=self.attn_tp_group.ranks[0],
-                    **size_kw,
-                )
-
-            if self.ps.attn_cp_size != 1:
-                work_reqs = broadcast_pyobj(
-                    work_reqs,
-                    self.attn_cp_group.rank,
-                    self.attn_cp_cpu_group,
-                    src=self.attn_cp_group.ranks[0],
-                    **size_kw,
-                )
+            # TODO: pass size_sink through attn_cp_tp_broadcast_pyobj
+            # (distributed/communication_op.py); broadcast_readout counts the
+            # seconds of its broadcasts below but not their bytes.
+            work_reqs = attn_cp_tp_broadcast_pyobj(work_reqs)
 
             # When dp_attention_local_control_broadcast is enabled, each DP
             # group leader already receives control messages from the DP
@@ -256,58 +261,50 @@ class SchedulerRequestReceiver:
             # all-ranks gloo sync.
             _local_ctrl = (
                 get_parallel().enable_dp_attention_local_control_broadcast
-                or is_ep_scale_joiner()
+                or get_exec().moe.is_ep_scale_joiner
             )
             if _local_ctrl:
-                if self.ps.attn_tp_size != 1:
-                    control_reqs = broadcast_pyobj(
-                        control_reqs,
-                        self.attn_tp_group.rank,
-                        self.attn_tp_cpu_group,
-                        src=self.attn_tp_group.ranks[0],
-                        **size_kw,
-                    )
-                if self.ps.attn_cp_size != 1:
-                    control_reqs = broadcast_pyobj(
-                        control_reqs,
-                        self.attn_cp_group.rank,
-                        self.attn_cp_cpu_group,
-                        src=self.attn_cp_group.ranks[0],
-                        **size_kw,
-                    )
-            elif self.ps.tp_size != 1:
+                control_reqs = attn_cp_tp_broadcast_pyobj(control_reqs)
+            elif get_parallel().tp_size != 1:
+                tp_group = get_parallel().tp_group
                 control_reqs = broadcast_pyobj(
                     control_reqs,
-                    self.tp_group.rank,
-                    self.tp_cpu_group,
-                    src=self.tp_group.ranks[0],
+                    tp_group.rank,
+                    tp_group.cpu_group,
+                    src=tp_group.ranks[0],
                     **size_kw,
                 )
             recv_reqs = work_reqs + control_reqs
-        elif self.step_sync_flag_sink is not None:
-            # Plain TP with SGLANG_HICACHE_SKIP_IDLE_SYNC (wired only without DP
-            # attention or PP, see Scheduler._hicache_step_sync_hooks).
-            src = self.tp_group.ranks[0] if self.ps.tp_size != 1 else None
-            is_src = self.ps.tp_size == 1 or self.tp_group.rank == src
-            flag = self.step_sync_flag_source() if is_src else True
-            if self.ps.tp_size != 1:
-                recv_reqs, flag = broadcast_pyobj_with_flag(
+        else:
+            if recv_reqs is not None:
+                recv_reqs = [*recv_reqs, *local_reqs]
+            tp_size = get_parallel().tp_size
+            if self.step_sync_flag_sink is not None:
+                # Plain TP with SGLANG_HICACHE_SKIP_IDLE_SYNC (wired only without DP
+                # attention or PP, see Scheduler._hicache_step_sync_hooks).
+                tp_group = get_parallel().tp_group if tp_size != 1 else None
+                src = tp_group.ranks[0] if tp_size != 1 else None
+                is_src = tp_size == 1 or tp_group.rank == src
+                flag = self.step_sync_flag_source() if is_src else True
+                if tp_size != 1:
+                    recv_reqs, flag = broadcast_pyobj_with_flag(
+                        recv_reqs,
+                        flag,
+                        tp_group.rank,
+                        tp_group.cpu_group,
+                        src=src,
+                        **size_kw,
+                    )
+                self.step_sync_flag_sink(flag)
+            elif tp_size != 1:
+                tp_group = get_parallel().tp_group
+                recv_reqs = broadcast_pyobj(
                     recv_reqs,
-                    flag,
-                    self.tp_group.rank,
-                    self.tp_cpu_group,
-                    src=src,
+                    tp_group.rank,
+                    tp_group.cpu_group,
+                    src=tp_group.ranks[0],
                     **size_kw,
                 )
-            self.step_sync_flag_sink(flag)
-        elif self.ps.tp_size != 1:
-            recv_reqs = broadcast_pyobj(
-                recv_reqs,
-                self.tp_group.rank,
-                self.tp_cpu_group,
-                src=self.tp_group.ranks[0],
-                **size_kw,
-            )
         return recv_reqs
 
     def unwrap_pickle_wrapper(self, recv_reqs: Optional[List]) -> None:
@@ -326,7 +323,7 @@ class SchedulerRequestReceiver:
     def _apply_mm_receiver(self, recv_reqs: List) -> List:
         # Process MM requests under EPD-disaggregation mode
         if (
-            self.ps.pp_rank == 0
+            get_parallel().pp_rank == 0
             and get_disagg().language_only
             and get_disagg().encoder_transfer_backend
             in ["zmq_to_scheduler", "mooncake"]
@@ -344,24 +341,67 @@ class SchedulerRequestReceiver:
         return recv_reqs
 
     def _finalize_shm_features(self, recv_reqs: Optional[List]) -> None:
-        # Unwrap shared memory features AFTER all broadcasts complete,
-        # so that ShmPointerMMData metadata (not full tensor data) is what
-        # gets serialized during broadcast_pyobj.
-        if recv_reqs:
-            if self.model_config.is_multimodal and has_shm_features(recv_reqs):
-                # The broadcast source returns with its original objects while
-                # peer ranks may still be unpickling ShmPointerMMData
-                # (-> shm_open).  Synchronize the same CPU groups that carried
-                # SHM-backed work requests before materialize() unlinks them.
-                if get_parallel().enable_dp_attention:
-                    if self.ps.attn_tp_size > 1:
-                        barrier(group=self.attn_tp_cpu_group)
-                    if self.ps.attn_cp_size > 1:
-                        barrier(group=self.attn_cp_cpu_group)
-                elif self.ps.tp_size > 1:
-                    barrier(group=self.tp_cpu_group)
-            for req in recv_reqs:
+        """Materialize SHM features or mark the request failed on every rank."""
+        if not recv_reqs or not self.model_config.is_multimodal:
+            return
+
+        tokenized_reqs = []
+        for req in recv_reqs:
+            if isinstance(req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput)):
+                tokenized_reqs.append(req)
+            elif isinstance(
+                req,
+                (BatchTokenizedGenerateReqInput, BatchTokenizedEmbeddingReqInput),
+            ):
+                tokenized_reqs.extend(req.batch)
+        if not tokenized_reqs or not has_shm_features(tokenized_reqs):
+            return
+
+        # 1. wait until every rank has opened the shared feature segments
+        parallel = get_parallel()
+        if parallel.attn_dp_enabled:
+            if parallel.attn_tp_size > 1:
+                barrier(group=parallel.attn_tp_group.cpu_group)
+            if parallel.attn_cp_size > 1:
+                barrier(group=parallel.attn_cp_group.cpu_group)
+        elif parallel.tp_size > 1:
+            barrier(group=parallel.tp_group.cpu_group)
+
+        # 2. materialize independently so one bad VLM request does not stop the loop
+        failed = torch.zeros(len(tokenized_reqs), dtype=torch.int32)
+        for index, req in enumerate(tokenized_reqs):
+            if not has_shm_features([req]):
+                continue
+            try:
                 unwrap_shm_features(req)
+            except Exception:
+                logger.exception(
+                    "Failed to materialize shared-memory multimodal features for rid=%s",
+                    req.rid,
+                )
+                discard_shm_features(req)
+                failed[index] = 1
+
+        # 3. all ranks reject the same requests before entering model collectives
+        if parallel.attn_dp_enabled:
+            if parallel.attn_tp_size > 1:
+                all_reduce(
+                    failed, op=ReduceOp.MAX, group=parallel.attn_tp_group.cpu_group
+                )
+            if parallel.attn_cp_size > 1:
+                all_reduce(
+                    failed, op=ReduceOp.MAX, group=parallel.attn_cp_group.cpu_group
+                )
+        elif parallel.tp_size > 1:
+            all_reduce(failed, op=ReduceOp.MAX, group=parallel.tp_group.cpu_group)
+
+        error = MMInputsProcessError(
+            "Failed to materialize shared-memory multimodal features on a scheduler rank."
+        )
+        for index, req in enumerate(tokenized_reqs):
+            if failed[index].item():
+                discard_shm_features(req)
+                req.mm_inputs = error
 
     def _split_work_and_control_reqs(self, recv_reqs: List):
         work_reqs = [

@@ -1,4 +1,4 @@
-# Adapted from SGLang python/sglang/__init__.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/__init__.py (commit 297e54fd10), modified for evolving-infra.
 """DecoupledEngine runtime API.
 
 Derived from SGLang's ``python/sglang`` (see engine/README.md). The SGLang

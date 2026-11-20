@@ -1209,10 +1209,16 @@ def make_recv_broadcast_readout(scheduler: Any) -> Optional[RecvBroadcastReadout
     decode, or with SGLANG_RECV_BROADCAST_READOUT=1 on any server (late D on
     or off). Else None: the request receiver times nothing."""
     collector = getattr(scheduler, "metrics_collector", None)
-    ps = getattr(scheduler, "ps", None)
-    if collector is None or ps is None:
+    if collector is None:
         return None
-    if ps.pp_rank != 0 or ps.attn_tp_rank != 0 or ps.attn_cp_rank != 0:
+    from decoupled_engine.srt.runtime_context import get_parallel
+
+    try:
+        ps = get_parallel()
+        if ps.pp_rank != 0 or ps.attn_tp_rank != 0 or ps.attn_cp_rank != 0:
+            return None
+    except (AttributeError, RuntimeError, ValueError):
+        # No parallel context published (the old ``scheduler.ps`` was absent).
         return None
     prealloc = getattr(scheduler, "disagg_decode_prealloc_queue", None)
     if (
@@ -1281,11 +1287,11 @@ def _input_len(req: Req) -> int:
 
 def _unlaunched_tokens(req: Req) -> int:
     """Prompt tokens of the chunked request not yet in any launched chunk.
-    ``extend_range`` is the last launched chunk (set in lockstep by the
-    PrefillAdder on every rank)."""
+    ``extend_end`` is the end of the last launched chunk (set in lockstep by
+    the PrefillAdder on every rank)."""
     total = len(req.origin_input_ids) + len(req.output_ids)
-    extend_range = getattr(req, "extend_range", None)
-    done = extend_range.end if extend_range is not None else len(req.prefix_indices)
+    extend_end = getattr(req, "extend_end", None)
+    done = extend_end if extend_end is not None else req.prefix_len
     return max(0, total - done)
 
 

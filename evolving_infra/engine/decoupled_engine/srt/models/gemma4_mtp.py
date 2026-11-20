@@ -21,7 +21,6 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel
 
-from decoupled_engine.srt.distributed import get_pp_group
 from decoupled_engine.srt.layers.linear import ReplicatedLinear
 from decoupled_engine.srt.layers.logits_processor import (
     LogitsMetadata,
@@ -32,6 +31,7 @@ from decoupled_engine.srt.layers.quantization.base_config import QuantizationCon
 from decoupled_engine.srt.mem_cache.memory_pool import KVCache
 from decoupled_engine.srt.model_executor.forward_batch_info import ForwardBatch
 from decoupled_engine.srt.models.gemma4_causal import Gemma4ForCausalLM, Gemma4TextModel
+from decoupled_engine.srt.runtime_context import get_parallel
 from decoupled_engine.srt.speculative.frozen_kv_mtp_info import FrozenKVMTPContext
 from decoupled_engine.srt.utils import add_prefix
 
@@ -73,7 +73,7 @@ class Gemma4AssistantForCausalLM(Gemma4ForCausalLM):
         self.assistant_config = config
         self.config = text_config
         self.quant_config = quant_config
-        self.pp_group = get_pp_group()
+        self.pp_group = get_parallel().pp_group
 
         self.vocab_size = text_config.vocab_size
         self.hidden_size = text_config.hidden_size

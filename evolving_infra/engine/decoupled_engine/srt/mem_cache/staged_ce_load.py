@@ -187,6 +187,11 @@ class StagedCELoader:
     def _layer_target(host_pool, transfer, local_layer_id):
         """(host layer, device layer) as load_to_device_per_layer would use."""
         if transfer.is_draft:
+            # v0.5.23 compacts the DSA indexer's host layers (live target
+            # layers, then one per draft); its load maps the draft layer.
+            draft_host_layer = getattr(host_pool, "_draft_host_layer", None)
+            if draft_host_layer is not None:
+                return draft_host_layer(local_layer_id), 0
             return local_layer_id, 0
         if not host_pool._is_device_layer_owned(transfer.device_pool, local_layer_id):
             return None

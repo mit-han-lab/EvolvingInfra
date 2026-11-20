@@ -183,9 +183,10 @@ class SymmetricLaunchThread(PrefillLaunchThread):
                 f"SGLANG_SYMMETRIC_LAUNCH_THREAD is not supported with {reason}",
             )
             return None
+        from decoupled_engine.srt.disaggregation.symmetric.scheduler_mixin import _parallel_or
         from decoupled_engine.srt.utils import DynamicGradMode
 
-        tp_rank = int(getattr(getattr(scheduler, "ps", None), "tp_rank", 0) or 0)
+        tp_rank = int(_parallel_or("tp_rank", 0) or 0)
         # The scheduler's device module (torch.cuda on GPU), as for_scheduler.
         module = getattr(scheduler, "device_module", None)
         device_index = None

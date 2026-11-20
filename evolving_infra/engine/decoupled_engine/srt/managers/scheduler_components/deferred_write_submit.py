@@ -38,6 +38,7 @@ from collections import Counter
 from typing import Any, Optional
 
 from decoupled_engine.srt.managers.scheduler_components.phase_timers import phase
+from decoupled_engine.srt.runtime_context import get_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,11 @@ class DeferredWriteSubmit:
         cc = write_controller_for_deferral(getattr(scheduler, "tree_cache", None))
         if cc is None:
             return cls()
-        tp_rank = getattr(getattr(scheduler, "ps", None), "tp_rank", 0)
+        try:
+            tp_rank = get_parallel().tp_rank
+        except (RuntimeError, ValueError):
+            # CPU stand-ins publish no runtime context: the old tolerant read.
+            tp_rank = getattr(getattr(scheduler, "ps", None), "tp_rank", 0)
         if tp_rank == 0:
             logger.info(
                 "%s loop=%s on (6h deferred write submit; io_backend=%s layout=%s)",

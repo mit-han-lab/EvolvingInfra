@@ -289,7 +289,11 @@ class GPUExportManager:
         # Commit and submit only after every rank owns the whole reservation.
         for n, components, op in reserved:
             core.commit_backup(n.id, op.host_indices, components)
-            self.cache._track_write_through_node(n.id, None)
+            # v0.5.23: the ack also publishes the nodes the component backups
+            # cover (as UnifiedRadixCache._execute_and_commit_kv_backup does).
+            self.cache._track_write_through_node(
+                n.id, None, self.cache._backup_publish_node_ids(n.id, components)
+            )
             tx.host_locks.append((n, core.inc_host_lock_ref(n.id).to_dec_params()))
             cc.write_queue.append(op)
         if reserved:

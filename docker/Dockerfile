@@ -3,7 +3,7 @@
 # Build from the repository root:  docker build -f docker/Dockerfile -t evolving-infra .
 # Why this base and what each layer does: docker/README.md.
 
-ARG BASE_IMAGE=docker.io/lmsysorg/sglang:v0.5.20-cu130
+ARG BASE_IMAGE=docker.io/lmsysorg/sglang:v0.5.23-cu130
 FROM ${BASE_IMAGE}
 
 ARG MOONCAKE_VERSION=v0.3.13

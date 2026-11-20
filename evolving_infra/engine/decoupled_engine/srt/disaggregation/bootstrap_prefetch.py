@@ -140,6 +140,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import torch
 
 from decoupled_engine.srt.managers.scheduler_components.phase_timers import timed_phase
+from decoupled_engine.srt.runtime_context import get_parallel
 from decoupled_engine.srt.utils import get_device_module
 
 if TYPE_CHECKING:
@@ -148,6 +149,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 device_module = get_device_module()
+
+
+def _attn_tp_rank(default):
+    """get_parallel().attn_tp_rank, or ``default`` without a published
+    parallel context (the old ``getattr(scheduler.ps, ...)`` fallback)."""
+    try:
+        return get_parallel().attn_tp_rank
+    except (AttributeError, RuntimeError, ValueError):
+        return default
+
 
 BOOTSTRAP_PREFETCH_MODES = ("off", "local", "remote", "both")
 
@@ -443,7 +454,7 @@ class BootstrapPrefetcher:
         self._windows: Dict[int, _Window] = {}
         self.window_stats: Dict[str, float] = Counter()
         self._last_summary = time.monotonic()
-        self._log = scheduler.ps.attn_tp_rank == 0
+        self._log = get_parallel().attn_tp_rank == 0
         # Consume in flight: consuming batches whose stall is not resolved
         # yet (window accounting on the logging rank only; timing only).
         self._consume_waits: List[_ConsumeWait] = []
@@ -578,7 +589,7 @@ class BootstrapPrefetcher:
                 "BWP v2: tp_rank=%s source=%s symmetric=%d private_plan=%d "
                 "admission_safe=%d fifo_guard=%d fifo_budget=%d gate_free=%d "
                 "growth_recheck=%d step_plan=%d",
-                getattr(getattr(scheduler, "ps", None), "attn_tp_rank", "?"),
+                _attn_tp_rank("?"),
                 self.source,
                 int(self.symmetric),
                 int(self.v2_private_plan),
@@ -618,11 +629,11 @@ class BootstrapPrefetcher:
             problems.append("a HiCache controller")
         elif getattr(self.cache, "buffer_pipeline", None) is not None:
             problems.append("cache host-memory mode (not buffer_only)")
-        if s.ps.pp_size != 1:
+        if get_parallel().pp_size != 1:
             problems.append("pp_size == 1")
-        if s.ps.attn_cp_size != 1:
+        if get_parallel().attn_cp_size != 1:
             problems.append("attn_cp_size == 1")
-        if getattr(s, "enable_dp_attention", False):
+        if getattr(s, "attn_dp_enabled", False):
             problems.append("no DP attention")
         if s.is_hybrid_swa or s.is_hybrid_ssm:
             problems.append("a non-SWA, non-mamba model")
@@ -831,7 +842,7 @@ class BootstrapPrefetcher:
         plus clipped max_new_tokens, plus one page)."""
         from decoupled_engine.srt.managers.schedule_policy import CLIP_MAX_NEW_TOKENS
 
-        uncached = len(req.full_untruncated_fill_ids) - len(req.prefix_indices)
+        uncached = len(req.full_untruncated_fill_ids) - req.prefix_len
         max_new = 0
         sp = getattr(req, "sampling_params", None)
         if sp is not None and getattr(sp, "max_new_tokens", None) is not None:
@@ -974,7 +985,7 @@ class BootstrapPrefetcher:
             full = getattr(req, "full_untruncated_fill_ids", None)
             if full is None:
                 full = req.origin_input_ids
-            tokens = max(1, len(full) - len(req.prefix_indices))
+            tokens = max(1, len(full) - req.prefix_len)
         else:
             tokens = max(1, entry.uncached_tokens + (0 if req is candidate else entry.host_tokens))
         sp = getattr(req, "sampling_params", None)
@@ -1118,7 +1129,7 @@ class BootstrapPrefetcher:
             full = getattr(req, "full_untruncated_fill_ids", None)
             if full is None:
                 full = req.origin_input_ids
-            rest = max(1, len(full) - len(req.prefix_indices))
+            rest = max(1, len(full) - req.prefix_len)
             load, extend = 0, rest  # not split: all of it as extend
         else:
             load = 0 if req is candidate else max(0, entry.host_tokens)
@@ -1220,7 +1231,7 @@ class BootstrapPrefetcher:
         never matched (or whose last node left the tree) counts its plan
         device prefix. Inputs: match results, lock counts and plan peeks,
         the same on every TP rank."""
-        from decoupled_engine.srt.mem_cache.unified_cache.components.tree_component import (
+        from decoupled_engine.srt.mem_cache.unified_cache.component_type import (
             ComponentType,
         )
 
@@ -1246,8 +1257,8 @@ class BootstrapPrefetcher:
         (a pin locks them, so they leave the evictable room too)."""
         path = self._device_path(req)
         if path is None:
-            return len(getattr(req, "prefix_indices", ()))
-        from decoupled_engine.srt.mem_cache.unified_cache.components.tree_component import (
+            return int(getattr(req, "prefix_len", 0) or 0)
+        from decoupled_engine.srt.mem_cache.unified_cache.component_type import (
             ComponentType,
         )
 
@@ -1440,7 +1451,7 @@ class BootstrapPrefetcher:
         core = getattr(self.cache, "tree_core", None)
         if core is None or not hasattr(core, "node_by_id"):
             return sum(p.cost for p in pins), list(pins)
-        from decoupled_engine.srt.mem_cache.unified_cache.components.tree_component import (
+        from decoupled_engine.srt.mem_cache.unified_cache.component_type import (
             ComponentType,
         )
 
@@ -1455,7 +1466,14 @@ class BootstrapPrefetcher:
                 paths.append(None)
                 continue
             params = pin.lock_params
-            skip = params.skip_lock_node_ids.get(full, ()) if params is not None else ()
+            # TODO: leave out the nodes the lock skipped. Lock receipts carry no
+            # skipped node ids, so skip is always empty and every node on the
+            # path counts as locked by this pin.
+            skip = (
+                (getattr(params, "skip_lock_node_ids", None) or {}).get(full, ())
+                if params is not None
+                else ()
+            )
             path = []
             while node is not None and node is not root:
                 if node.id not in skip:  # the lock skipped it (evicted then)
@@ -1798,21 +1816,17 @@ class BootstrapPrefetcher:
             new_last = below[k - 1][0]
             extra = core.collect_full_device_indices(new_last.id, last.id)
             adopted = len(extra)
-            # With M4's Q4 page bookkeeping both parts carry CPU page ids
-            # (cpu_page_book.py) that admission reads: keep them. Q4 off: a
-            # plain torch.cat (the page size is read only for tagged parts).
-            from decoupled_engine.srt.mem_cache.cpu_page_book import cat_tagged
-
-            req.prefix_indices = cat_tagged(
-                [req.prefix_indices, extra],
-                lambda: core.page_size,
-                "bwp adopt prefix",
-            )
+            # v0.5.23 keeps no prefix index tensor on the request: allocation
+            # reads the device prefix from the path to req.last_node
+            # (tree_cache.prefix_device_indices, Q4-tagged by
+            # collect_full_device_indices with M4's CPU page bookkeeping), so
+            # extending last_node and prefix_len adopts the rows.
+            req.prefix_len += adopted
             req.last_node = new_last.id
             req.host_hit_length = max(0, req.host_hit_length - adopted)
-            req.cache_protected_len = len(req.prefix_indices)
+            req.cache_protected_len = req.prefix_len
         # Rows the early send must not read yet (they may still be landing).
-        req.inflight_hit_length = len(req.prefix_indices) if above else adopted
+        req.inflight_hit_length = req.prefix_len if above else adopted
         req.bwp_consume_ops = list(ops.values())
         for op in req.bwp_consume_ops:
             self._lift_cap(op)  # someone waits for its rows now
@@ -2189,7 +2203,7 @@ class BootstrapPrefetcher:
             entry = self._plan_entry(req)
             if entry is None or entry.gated or entry.skip_reason is not None or entry.start_pass is None:
                 return False
-        return req.rid not in self.cache.ongoing_prefetch
+        return not self.cache.has_ongoing_prefetch(req.cache_request_handle)
 
     def _release_for_pressure(self) -> None:
         if getattr(self, "v2_admission_safe", False):
@@ -2297,7 +2311,7 @@ class BootstrapPrefetcher:
                 self._next_try[rid] = None
                 self.stats["skip_class"] += 1
                 continue
-            if rid in cache.ongoing_prefetch:
+            if cache.has_ongoing_prefetch(req.cache_request_handle):
                 # The pull (or storage lookup) has not landed yet.
                 continue
             examined += 1
@@ -2312,7 +2326,7 @@ class BootstrapPrefetcher:
             budget = self.max_tokens - self.pinned_cost
             # Upper bound of what the pin newly protects: the loaded host part
             # plus the matched device prefix (part of it may already be locked).
-            bound = host + len(req.prefix_indices)
+            bound = host + req.prefix_len
             if node_id in cache.ongoing_load_back or host > headroom or bound > budget:
                 if self.chunked and node_id not in cache.ongoing_load_back:
                     if self._chunk is None and self._chunk_eligible(queue, pos):
@@ -2483,7 +2497,10 @@ class BootstrapPrefetcher:
             own_state = state is not None and state.req is req
             if self._pin_of(req) is not None and not own_state:
                 continue
-            if rid in cache.ongoing_prefetch or entry.pull_tokens > 0:
+            if (
+                cache.has_ongoing_prefetch(req.cache_request_handle)
+                or entry.pull_tokens > 0
+            ):
                 self.stats["skip_pull"] += 1
                 continue
             if not self._selected(req):
@@ -2549,7 +2566,7 @@ class BootstrapPrefetcher:
                     self.stats["skip_busy"] += 1
                     continue
                 headroom = self._headroom(req)
-                bound = host + len(req.prefix_indices)
+                bound = host + req.prefix_len
                 budget = self.max_tokens - self.pinned_cost
                 op_id = self._op_counter + 1
                 room = self._room(req, host, True)
@@ -2609,7 +2626,7 @@ class BootstrapPrefetcher:
         _, chunk, run = self.cache.bwp_chunk_end(node_id, self._chunk_limit())
         st = self._chunk
         first = st is None or not st.pins
-        return chunk, run, chunk + (len(req.prefix_indices) if first else 0)
+        return chunk, run, chunk + (req.prefix_len if first else 0)
 
     def _chunk_start(self, req: Req, node_id, headroom: int, lb_kw, op_id) -> bool:
         """Start the chunk state on the oldest candidate and issue its first
@@ -2651,7 +2668,7 @@ class BootstrapPrefetcher:
         if st is None or st.done:
             return False
         req = st.req
-        if req.finished() or req.rid in self.cache.ongoing_prefetch:
+        if req.finished() or self.cache.has_ongoing_prefetch(req.cache_request_handle):
             return False
         req.init_next_round_input(self.cache, cow_mamba=False)
         node_id = req.best_match_node

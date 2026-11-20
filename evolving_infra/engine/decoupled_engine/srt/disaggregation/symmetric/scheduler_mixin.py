@@ -80,7 +80,12 @@ from decoupled_engine.srt.mem_cache.cpu_page_book import cpu_rows_of, tag_row_sl
 from decoupled_engine.srt.mem_cache.unified_cache.session_ref_tracker import (
     forget_kv_session_request,
 )
-from decoupled_engine.srt.runtime_context import get_disagg, get_schedule
+from decoupled_engine.srt.runtime_context import (
+    get_device,
+    get_disagg,
+    get_parallel,
+    get_schedule,
+)
 
 if TYPE_CHECKING:
     from decoupled_engine.srt.managers.io_struct import AbortReq, TokenizedGenerateReqInput
@@ -96,6 +101,16 @@ def _resolved(server_args, field):
     return resolution_result(server_args, field)
 
 
+def _parallel_or(name: str, default):
+    """get_parallel().<name>, or ``default`` when no parallel context is
+    published (scheduler stand-ins; the pre-v0.5.23 readers went through
+    getattr(getattr(sched, "ps", None), name, default))."""
+    try:
+        return getattr(get_parallel(), name)
+    except (AttributeError, RuntimeError, ValueError):
+        return default
+
+
 def _is_swa_window(tree_cache) -> bool:
     """DSv4 uniform lifecycle with window SWA residency."""
     return getattr(tree_cache, "dsv4_uniform_swa_residency", "full") == "window"
@@ -109,7 +124,7 @@ def _release_insert_chunked(sched: Scheduler) -> bool:
     chunked prefill; otherwise the flag stays inactive."""
     if not envs.SGLANG_SYMMETRIC_RELEASE_INSERT_CHUNKED.get():
         return False
-    from decoupled_engine.srt.mem_cache.unified_cache.components.tree_component import (
+    from decoupled_engine.srt.mem_cache.unified_cache.component_type import (
         ComponentType,
     )
     from decoupled_engine.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
@@ -120,7 +135,7 @@ def _release_insert_chunked(sched: Scheduler) -> bool:
         and tuple(tree.tree_components) == (ComponentType.FULL,)
         and chunk is not None
     )
-    if sched.ps.tp_rank == 0:
+    if get_parallel().tp_rank == 0:
         if active:
             bigram = bool(tree.tree_core.is_eagle)
             logger.info(
@@ -194,7 +209,7 @@ def _log_publish_budget(sched: Scheduler) -> None:
     symmetric_pre_schedule calls this before the first publish_computed call
     of a pass, so a window holds whole passes: a pre-schedule call and the
     after-result calls that continue its pass."""
-    rank = getattr(getattr(sched, "ps", None), "tp_rank", None)
+    rank = _parallel_or("tp_rank", None)
     if rank is None:
         rank = getattr(sched, "tp_rank", 0)
     if rank != 0:
@@ -270,13 +285,12 @@ def _host_return_validation_error(sched: Scheduler, req: Req) -> Optional[str]:
     """
     if getattr(req.import_mark, "host_return", None) is None:
         return None
-    parallel = getattr(sched, "ps", None)
     if (
-        getattr(parallel, "pp_size", None) != 1
-        or getattr(parallel, "attn_cp_size", None) != 1
-        or getattr(parallel, "attn_dcp_size", None) != 1
-        or getattr(sched, "enable_dp_attention", False)
-        or getattr(parallel, "attn_tp_size", None) != getattr(parallel, "tp_size", None)
+        _parallel_or("pp_size", None) != 1
+        or _parallel_or("attn_cp_size", None) != 1
+        or _parallel_or("attn_dcp_size", None) != 1
+        or getattr(sched, "attn_dp_enabled", False)
+        or _parallel_or("attn_tp_size", None) != _parallel_or("tp_size", None)
     ):
         return "host_return requires plain attention TP, PP=CP=1 and no DP attention"
     cache = sched.tree_cache
@@ -470,39 +484,41 @@ class SchedulerSymmetricMixin:
             buffer_size,
             hidden_size=disagg_hidden_size,
             hidden_states_dtype=disagg_hidden_states_dtype,
+            max_sampling_mask_tokens=self.server_args.sampling_mask_max_tokens,
             custom_mem_pool=self.token_to_kv_pool_allocator.get_kvcache().maybe_get_custom_mem_pool(),
             output_dsa_topk_indices_dim=output_dsa_topk_indices_dim,
         )
         page_size = self.token_to_kv_pool_allocator.page_size
         kv_args = build_kv_args(self, draft_token_to_kv_pool)
+        parallel = get_parallel()
         ctx = PlaneBuildContext(
             server_args=self.server_args,
             kv_args=kv_args,
-            tp_rank=self.ps.tp_rank,
-            tp_size=self.ps.tp_size,
-            pp_rank=self.ps.pp_rank,
-            dp_rank=self.ps.dp_rank or 0,
-            gpu_id=self.ps.gpu_id,
+            tp_rank=parallel.tp_rank,
+            tp_size=parallel.tp_size,
+            pp_rank=parallel.pp_rank,
+            dp_rank=parallel.dp_rank or 0,
+            gpu_id=get_device().gpu_id,
             page_size=page_size,
             metadata_buffers=self.disagg_metadata_buffers,
             token_to_kv_pool=self.token_to_kv_pool_allocator.get_kvcache(),
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             req_to_token_pool=self.req_to_token_pool,
-            worker_id=make_worker_id(self.server_args, self.ps.dp_rank),
-            attn_tp_size=self.ps.attn_tp_size,
+            worker_id=make_worker_id(self.server_args, parallel.dp_rank),
+            attn_tp_size=parallel.attn_tp_size,
         )
         owner_plane, reader_plane = build_planes(ctx)
         # One gloo group for READY/DONE agreement across this scheduler's TP
         # ranks (same group choice as DecodeKVCacheOffloadManager).
         from decoupled_engine.srt.disaggregation.symmetric.consensus import RankConsensus
 
-        if self.enable_dp_attention:
+        if self.attn_dp_enabled:
             consensus_group, consensus_size = (
                 self.attn_tp_cpu_group,
-                self.ps.attn_tp_size,
+                parallel.attn_tp_size,
             )
         else:
-            consensus_group, consensus_size = self.tp_cpu_group, self.ps.tp_size
+            consensus_group, consensus_size = self.tp_cpu_group, parallel.tp_size
         rank_consensus = RankConsensus(consensus_group, consensus_size)
         self.import_queue = ImportQueue(
             reader_plane,
@@ -632,7 +648,7 @@ class SchedulerSymmetricMixin:
         if budget_rule is not None:
             # The first SYMMETRIC_PUBLISH_BUDGET window starts now.
             self._sym_publish_budget_log_t = time.monotonic()
-            if self.ps.tp_rank == 0:
+            if get_parallel().tp_rank == 0:
                 logger.info(
                     "SYMMETRIC_PUBLISH_BUDGET rule=%s "
                     "catchup_tokens_per_pass=%d compute_before_allocation=%s: %s",
@@ -654,7 +670,7 @@ class SchedulerSymmetricMixin:
 
         self._symmetric_copy_draft_seed = symmetric_async_draft_seed(self)
         self._symmetric_seed_on_host = metadata_on_host(self.disagg_metadata_buffers)
-        if self._symmetric_copy_draft_seed and self.ps.tp_rank == 0:
+        if self._symmetric_copy_draft_seed and get_parallel().tp_rank == 0:
             logger.info(
                 "6a-sym: EAGLE export seed with the async result D2H "
                 "(aux slots on host: %s)",
@@ -702,7 +718,7 @@ class SchedulerSymmetricMixin:
         self._sym_late_cfg = cfg
         self._late_d_need_enabled = self.export_table.compute_before_allocation
         self._late_d_chunk_tokens = chunked or 8192
-        is_leader = self.ps.tp_rank == 0
+        is_leader = get_parallel().tp_rank == 0
         port = SymReaderPort(self.import_queue, is_leader=is_leader)
         late = LateDDecode(port, cfg, metrics=make_late_d_metrics(self, port))
         self.import_queue.enable_late_d(late, port, aux_reserve=cfg.export_aux_reserve)
@@ -850,7 +866,7 @@ class SchedulerSymmetricMixin:
         to its reader, release a storage prefetch started at the hold."""
         self.export_table.abort_export(req, err_type)
         if self.enable_hicache_storage:
-            self.tree_cache.release_aborted_request(req.rid)
+            self.tree_cache.release_aborted_request(req.cache_request_handle)
         prepare_abort(
             req, message, status_code=HTTPStatus.SERVICE_UNAVAILABLE, err_type=err_type
         )
@@ -884,7 +900,7 @@ class SchedulerSymmetricMixin:
         # address to this rank's channel (planes.plane_bind_addrs convention).
         from decoupled_engine.srt.disaggregation.symmetric.planes import rank_addr
 
-        tp_rank = self.ps.tp_rank
+        tp_rank = get_parallel().tp_rank
         if export_mark is not None and export_mark.candidates:
             # Late D stage 2: every candidate reader, before any bind.
             for cand in export_mark.candidates:
@@ -1097,13 +1113,13 @@ class SchedulerSymmetricMixin:
         if (
             chunked_req is not None
             and chunked_req.export_mark is not None
-            and chunked_req.extend_range is not None
+            and chunked_req.extend_end is not None
         ):
             # Overlap: the chunk result is processed after the next chunk has
-            # advanced extend_range, so remember the end of the chunk that is
+            # advanced extend_end, so remember the end of the chunk that is
             # in flight now (same trick as prefill.py:process_prefill_chunk).
             chunked_req.tmp_end_idx = min(
-                chunked_req.extend_range.end, len(chunked_req.origin_input_ids)
+                chunked_req.extend_end, len(chunked_req.origin_input_ids)
             )
 
         # READY imports still need an execution slot, just like native PD's
@@ -1196,16 +1212,16 @@ class SchedulerSymmetricMixin:
             end = (
                 len(req.origin_input_ids)
                 if last
-                else (req.tmp_end_idx if self.enable_overlap else req.extend_range.end)
+                else (req.tmp_end_idx if self.enable_overlap else req.extend_end)
             )
             if end is not None and end >= 0:
                 if last:
-                    entry.total_tokens = min(end, req.extend_range.end)
+                    entry.total_tokens = min(end, req.extend_end)
                     req.time_stats.set_completion_time()
                 self.export_table.record_compute_result(req, end, last=last)
             return True
         if not last:
-            end_idx = req.tmp_end_idx if self.enable_overlap else req.extend_range.end
+            end_idx = req.tmp_end_idx if self.enable_overlap else req.extend_end
             if end_idx is None or end_idx < 0:
                 return True
             self.export_table.publish_progress(req, end_idx)
@@ -1268,9 +1284,10 @@ class SchedulerSymmetricMixin:
         generation moves and the reader's FINAL check fails (`owner_evicted`,
         recompute fallback; ~0.06 % of imports at concurrency 256 once the
         finish-time insert was removed). An exporting request therefore keeps
-        its own pages until the lease is released: only extend
-        `prefix_indices` so the next chunk continues from the right offset
-        (chunk_cache.cache_unfinished_req semantics). The full prompt is
+        its own pages until the lease is released: only advance
+        `prefix_len` so the next chunk continues from the right offset (the
+        allocation reads the prefix off the held row, as upstream's no-insert
+        PD stash). The full prompt is
         inserted once at release (_symmetric_free_exported -> release_kv_cache).
         Without that insert nothing else frees the out-of-window SWA, so the
         SWA-tail trim below takes the place of the tree's.
@@ -1283,7 +1300,7 @@ class SchedulerSymmetricMixin:
         before its FINAL (RELEASED_BEFORE_EXPORT) but spilled already keeps
         this no-insert stash: its ledger is adopted by its finish insert, like
         an export's at release."""
-        if req.extend_range is None or self.export_table is None:
+        if req.extend_end is None or self.export_table is None:
             return False
         exporting = req.export_mark is not None and req.transfer_id in self.export_table
         former_export = (
@@ -1293,27 +1310,22 @@ class SchedulerSymmetricMixin:
         )
         if not (exporting or former_export):
             return False
-        kv_indices = self.req_to_token_pool.req_to_token[
-            req.req_pool_idx, : req.extend_range.end
-        ]
-        # M4 Q4: the prefix carries its CPU page ids (no-op when Q4 is off).
-        req.prefix_indices = tag_row_slice(
-            kv_indices.to(dtype=torch.int64, copy=True),
-            cpu_rows_of(self.req_to_token_pool),
-            req.req_pool_idx,
-            0,
-        )
+        # The chunk just stashed is [chunk_start, chunk_end); the next one
+        # continues from its end. M4 Q4: the allocation tags the prefix read
+        # off the held row with its CPU page ids (allocation._prefix_kv_indices).
+        chunk_start, chunk_end = req.prefix_len, req.extend_end
+        req.prefix_len = chunk_end
         if exporting and getattr(self, "_symmetric_release_insert_chunked", False):
             # A standard P inserts the fill up to here now; the release insert
             # ends a node here instead (SGLANG_SYMMETRIC_RELEASE_INSERT_CHUNKED).
             ends = getattr(req, "release_insert_chunk_ends", None)
             if ends is None:
                 ends = req.release_insert_chunk_ends = []
-            if not ends or ends[-1] != req.extend_range.end:
-                ends.append(req.extend_range.end)
-        # Under overlap the chunk in extend_range may still be running and reads
-        # SWA from extend_range.start - window on.
-        self.export_table.trim_swa(req, req.extend_range.start)
+            if not ends or ends[-1] != chunk_end:
+                ends.append(chunk_end)
+        # Under overlap the chunk just stashed may still be running and reads
+        # SWA from its start - window on.
+        self.export_table.trim_swa(req, chunk_start)
         if _is_swa_window(self.tree_cache):
             e_prev = getattr(req, "swa_export_stash_end", 0) or 0
             if _defer_spill_after_launch(self):
@@ -1323,7 +1335,7 @@ class SchedulerSymmetricMixin:
                 self._deferred_export_spills.append((req, e_prev))
             else:
                 _export_spill(self, req, e_prev)
-            req.swa_export_stash_end = req.extend_range.end
+            req.swa_export_stash_end = chunk_end
         return True
 
     @timed_phase("sym.export.deferred_spills")
@@ -1396,7 +1408,7 @@ class SchedulerSymmetricMixin:
             self.schedule_stream,
             self_test=self_test,
         )
-        tp_rank = getattr(getattr(self, "ps", None), "tp_rank", 0)
+        tp_rank = _parallel_or("tp_rank", 0)
         reader = ExportPageReader(
             device_module=self.device_module,
             req_to_token_pool=self.req_to_token_pool,
@@ -1464,7 +1476,9 @@ class SchedulerSymmetricMixin:
                     # Release a prefetch started at the hold; the
                     # binder must not count the room as launched.
                     if self.enable_hicache_storage:
-                        self.tree_cache.release_aborted_request(req.rid)
+                        self.tree_cache.release_aborted_request(
+                            req.cache_request_handle
+                        )
                     prepare_abort(req, "aborted by client")
                 self.ipc_channels.send_to_tokenizer.send_output(
                     _make_abort_req(req), req
@@ -1514,11 +1528,12 @@ class SchedulerSymmetricMixin:
 
         table, queue = self.export_table, self.import_queue
         owner_base, reader_base = plane_bind_addrs(self.server_args, 0)
-        owner_addr, reader_addr = plane_bind_addrs(self.server_args, self.ps.tp_rank)
+        parallel = get_parallel()
+        owner_addr, reader_addr = plane_bind_addrs(self.server_args, parallel.tp_rank)
         info = {
             "mode": "symmetric",
-            "tp_rank": self.ps.tp_rank,
-            "tp_size": self.ps.tp_size,
+            "tp_rank": parallel.tp_rank,
+            "tp_size": parallel.tp_size,
             "page_size": self.token_to_kv_pool_allocator.page_size,
             # What a router/driver should advertise (rank-0 endpoints).
             "owner_addr": owner_base,
@@ -1721,7 +1736,7 @@ class SchedulerSymmetricMixin:
             response_finished = req.finished_output
             prepare_abort(req, reason, status_code=HTTPStatus.SERVICE_UNAVAILABLE)
             if self.enable_hicache_storage:
-                self.tree_cache.release_aborted_request(req.rid)
+                self.tree_cache.release_aborted_request(req.cache_request_handle)
             if not response_finished:
                 self.output_streamer.stream_output([req], req.return_logprob)
         self.waiting_queue = [r for r in self.waiting_queue if r is not req]
@@ -1736,7 +1751,7 @@ class SchedulerSymmetricMixin:
         if reason == COMPUTE_ABORT:
             self._symmetric_stop_computed(req, reason)
             if req.is_holding_kv:
-                release_kv_cache(req, self.tree_cache, is_insert=False)
+                release_kv_cache(req, self.tree_cache, checkpoint=False)
             return
         if reason == LATE_READER_GONE:
             # Rule X: the reader of a held late P-leg gave up; 503, no
@@ -1748,7 +1763,7 @@ class SchedulerSymmetricMixin:
                 req.transfer_id,
             )
             if self.enable_hicache_storage:
-                self.tree_cache.release_aborted_request(req.rid)
+                self.tree_cache.release_aborted_request(req.cache_request_handle)
             prepare_abort(
                 req,
                 "Late D: the reader gave up before the P-leg was bound",
@@ -1802,7 +1817,7 @@ class SchedulerSymmetricMixin:
             # Inserts the (finished) request's prefix into the radix tree and
             # frees the rest, exactly like a Local finish.
             if isinstance(req.finished_reason, FINISH_ABORT):
-                release_kv_cache(req, self.tree_cache, is_insert=False)
+                release_kv_cache(req, self.tree_cache, checkpoint=False)
             else:
                 if (
                     req.swa_branching_seqlen is not None
@@ -1812,7 +1827,7 @@ class SchedulerSymmetricMixin:
                     # the branching point; the finish insert stops there instead.
                     self.export_table.reopen_swa_branch_window(req)
                     maybe_cache_unfinished_req(req, self.tree_cache)
-                release_kv_cache(req, self.tree_cache)
+                release_kv_cache(req, self.tree_cache, checkpoint=True)
 
     def _symmetric_import_fallback(self: Scheduler, req: Req, reason: str) -> None:
         """Import failed / timed out: recompute locally."""
@@ -1938,9 +1953,10 @@ class SchedulerSymmetricMixin:
         with phase("prebuilt_build"):
             for req in reqs:
                 # No local prefix reuse yet (see ImportQueue._prealloc TODO):
-                # keep the preallocated row as the extend range.
+                # keep the preallocated row as the extend range
+                # [prefix_len, kv_committed_len).
                 req.init_next_round_input(None)
-                req.set_extend_range(len(req.prefix_indices), req.kv_committed_len)
+                req.extend_end = req.kv_committed_len
             set_time_batch(reqs, "set_forward_entry_time")
 
             new_batch = ScheduleBatch.init_new(

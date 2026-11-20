@@ -908,21 +908,21 @@ class ImportQueue:
             return False
         if getattr(tc, "disable", False):
             return False
-        is_chunk = getattr(tc, "is_chunk_cache", None)
-        if callable(is_chunk) and is_chunk():
+        # v0.5.23: ChunkCache reports supports_prefix_sharing() False (EI used
+        # is_chunk_cache(), which upstream removed).
+        sharing = getattr(tc, "supports_prefix_sharing", None)
+        if callable(sharing) and not sharing():
             return False
         return hasattr(tc, "match_prefix") and hasattr(tc, "inc_lock_ref")
 
     @timed_phase("sym.import.prealloc.match")
     def _match_local_prefix(self, req: Req) -> int:
         """Match the D-leg prompt against the local radix tree (no lock).
-        Sets `req.prefix_indices` / `req.last_node` like the prefill path and
+        Sets `req.prefix_len` / `req.last_node` like the prefill path and
         returns the page-aligned device prefix length to reuse; 0 when reuse
         is off or nothing matches. Always leaves at least one page to import
         so the reader has a non-empty extend range and the owner's FINAL
         (aux, state rows) still applies to the tail."""
-        import torch
-
         if not self._tree_supports_reuse():
             return 0
         from decoupled_engine.srt.managers.schedule_policy import match_prefix_for_req
@@ -969,7 +969,7 @@ class ImportQueue:
                 # Host availability is observed here but is not promised,
                 # locked, or restored by this device-only import path.
                 req._decode_prefix_match_observation = (
-                    len(match_result.device_indices),
+                    match_result.device_prefix_len,
                     match_result.host_hit_length,
                 )
         except Exception as e:  # never let reuse break admission
@@ -978,21 +978,22 @@ class ImportQueue:
                 req.rid,
                 e,
             )
-            req.prefix_indices = torch.empty((0,), dtype=torch.int64)
+            req.prefix_len = 0
             req.last_node = None
             if self._ordinary_l2_restore_enabled():
                 req.host_hit_length = 0
                 req.best_match_node = None
             return 0
-        n = len(req.prefix_indices)
+        n = req.prefix_len
         n = (n // self.page_size) * self.page_size
         max_reuse = ((prompt_len - 1) // self.page_size) * self.page_size
         if reuse_limit is not None:
             max_reuse = min(max_reuse, reuse_limit)
         n = max(0, min(n, max_reuse))
-        if n < len(req.prefix_indices):
-            # M4 Q4: keeps the match result's CPU page ids (plain slice when off).
-            req.prefix_indices = slice_tagged(req.prefix_indices, 0, n, self.page_size)
+        if n < req.prefix_len:
+            # The prefix is read off the path to req.last_node up to prefix_len
+            # (tree_cache.prefix_device_indices; M4 Q4 tags it there).
+            req.prefix_len = n
         return n
 
     def _allocatable_tokens(self) -> int:
@@ -1225,9 +1226,10 @@ class ImportQueue:
         swa_tail_len = self._swa_tail_len(fill_len)
         # Reader-side prefix reuse: re-match (the tree may have changed since
         # _can_admit) and lock the matched node like PrefillAdder does; the
-        # finish path (`cache_finished_req` -> dec lock on `req.last_node`)
-        # releases exactly this lock, as it does for decode-side reuse in
-        # upstream PD (`DecodePreallocQueue._match_prefix_and_lock`).
+        # finish path (`release_kv_cache` -> `unlock(req.lock)`, or the
+        # checkpoint's relock) releases exactly this lock, as it does for
+        # decode-side reuse in upstream PD
+        # (`DecodePreallocQueue._match_prefix_and_lock`).
         # SWA-tail mode on the upstream decode shape (content-only reuse)
         # reuses the FULL component only, capped at the SWA tail start so the
         # tail the allocator must own is always imported. Window residency
@@ -1287,7 +1289,11 @@ class ImportQueue:
                 self.tree_cache.evict_for_alloc(
                     EvictParams(num_tokens=required - allocator.available_size())
                 )
-        prefix_indices = req.prefix_indices if prefix_len > 0 else None
+        # The reused prefix's slots, read off the locked path to req.last_node
+        # (valid until the row write below; M4 Q4 tagged).
+        prefix_indices = (
+            self.tree_cache.prefix_device_indices(req) if prefix_len > 0 else None
+        )
         with phase("sym.import.prealloc.alloc"):
             kv_loc = alloc_for_decode_prealloc(
                 allocator,
@@ -1340,8 +1346,6 @@ class ImportQueue:
                     kv_loc,
                 )
         req.full_untruncated_fill_ids = req.origin_input_ids + req.output_ids
-        if prefix_len == 0:
-            req.prefix_indices = torch.empty((0,), dtype=torch.int64)
         # The reused prefix belongs to the tree: not this request's to free.
         req.cache_protected_len = prefix_len
         req.import_prefix_len = prefix_len
@@ -1374,7 +1378,8 @@ class ImportQueue:
             # skipped; the finish insert adopts the backfilled ledger and
             # truncates at a remaining gap.
             req.decode_radix_cache_skip_unfinished_insert = True
-        req.set_extend_range(prefix_len, fill_len)
+        req.prefix_len = prefix_len
+        req.extend_end = fill_len
         self.stats_imported_tokens += delta_len
         if prefix_len > 0:
             self.stats_prefix_reuse_requests += 1
@@ -1475,7 +1480,7 @@ class ImportQueue:
         elif host_len <= 0:
             reason = "no_host_extension"
         elif (
-            device_len != len(req.prefix_indices)
+            device_len != req.prefix_len
             or host_len % self.page_size
             or device_len + host_len > limit
             or getattr(req, "swa_host_hit_length", 0)
@@ -1533,12 +1538,13 @@ class ImportQueue:
                 )
             )
             if result is not None:
+                # v0.5.23: (loaded FULL tokens, new last node), not indices.
                 loaded, node = result
         except Exception as error:
             # Peers must still enter the staging vote before all fail closed.
             # A thrown allocation error is not proof that no pins were installed.
             stage_error = error
-        loaded_len = len(loaded) if loaded is not None else 0
+        loaded_len = int(loaded) if loaded is not None else 0
         # init_load_back does not issue DMA. It can fail locally despite the
         # preflight; check its actual result and pending state on every rank.
         pending = self._load_back_pending(req.best_match_node)
@@ -1565,14 +1571,9 @@ class ImportQueue:
         # All ranks issue the same packed target/draft KV + indexer operation.
         # loading_check owns DMA locks until its synchronized completion ack.
         tree.ready_to_load_host_cache()
-        req.prefix_indices = cat_tagged(
-            [
-                req.prefix_indices,
-                copy_tag(loaded.to(dtype=req.prefix_indices.dtype), loaded),
-            ],
-            self.page_size,
-            "ordinary symmetric host load-back",
-        )
+        # The loaded span extends the device prefix on the path to `node`
+        # (read back by tree_cache.prefix_device_indices).
+        req.prefix_len = device_len + loaded_len
         req.last_node = node
         req._symmetric_l2_restore_tokens = loaded_len
         req._symmetric_l2_restore_reason = "queued"
@@ -1584,12 +1585,10 @@ class ImportQueue:
         _match_prefix_and_lock`): FULL component only, at most `limit` tokens
         (the SWA tail start). A host-tier hit is loaded back to the device
         (`DecodeHiCacheTransferMixin._try_hicache_queue_load_back`). Sets
-        `req.prefix_indices` / `req.last_node`; returns (page-aligned reused
+        `req.prefix_len` / `req.last_node`; returns (page-aligned reused
         length, tokens being loaded back)."""
-        import torch
-
         from decoupled_engine.srt.managers.schedule_policy import match_prefix_for_req
-        from decoupled_engine.srt.mem_cache.unified_cache.components import ComponentType
+        from decoupled_engine.srt.mem_cache.unified_cache.component_type import ComponentType
 
         limit = page_floor(max(limit, 0), self.page_size)
         try:
@@ -1607,22 +1606,22 @@ class ImportQueue:
                 req.rid,
                 e,
             )
-            req.prefix_indices = torch.empty((0,), dtype=torch.int64)
+            req.prefix_len = 0
             req.last_node = None
             return 0, 0
         host_loaded = self._load_back_host_hit(req) if req.host_hit_length > 0 else 0
-        n = min(page_floor(len(req.prefix_indices), self.page_size), limit)
-        if n < len(req.prefix_indices):
-            req.prefix_indices = slice_tagged(req.prefix_indices, 0, n, self.page_size)
+        n = min(page_floor(req.prefix_len, self.page_size), limit)
+        if n < req.prefix_len:
+            req.prefix_len = n
         return n, host_loaded
 
     def _load_back_host_hit(self, req: Req) -> int:
         """Start the H2D load of the host-only part of a content-only match and
-        extend `req.prefix_indices` / `req.last_node` over it. The loaded nodes
+        extend `req.prefix_len` / `req.last_node` over it. The loaded nodes
         stay pinned (`load_back_pending_id`) until the ack; pop_ready holds the
         import until then. Returns the tokens being loaded (0 = READ them)."""
         from decoupled_engine.srt.mem_cache.base_prefix_cache import InitLoadBackParams
-        from decoupled_engine.srt.mem_cache.unified_cache.components import ComponentType
+        from decoupled_engine.srt.mem_cache.unified_cache.component_type import ComponentType
 
         tree = self.tree_cache
         controller = tree.cache_controller
@@ -1641,7 +1640,7 @@ class ImportQueue:
         if agreed[0] != _consensus.READY:
             self.stats_host_load_back_skipped += 1
             return 0
-        loaded, node = tree.init_load_back(
+        result = tree.init_load_back(
             InitLoadBackParams(
                 best_match_node=req.best_match_node,
                 host_hit_length=req.host_hit_length,
@@ -1650,20 +1649,16 @@ class ImportQueue:
                 active_components=(ComponentType.FULL,),
             )
         )
-        if len(loaded) == 0:
+        # v0.5.23: (loaded FULL tokens, new last node), not indices.
+        loaded = int(result[0]) if result is not None else 0
+        if loaded == 0:
             return 0
         tree.ready_to_load_host_cache()
-        # M4 Q4: the loaded slots carry their CPU page ids (plain cat when off).
-        req.prefix_indices = cat_tagged(
-            [
-                req.prefix_indices,
-                copy_tag(loaded.to(dtype=req.prefix_indices.dtype), loaded),
-            ],
-            self.page_size,
-            "import host load-back",
-        )
-        req.last_node = node
-        return len(loaded)
+        # The loaded span extends the device prefix on the path to `node`
+        # (tree_cache.prefix_device_indices; M4 Q4 tags it there).
+        req.prefix_len += loaded
+        req.last_node = result[1]
+        return loaded
 
     def _load_back_pending(self, node_handle) -> bool:
         """Whether a node on the root path of `node_handle` still has an H2D
@@ -1680,50 +1675,45 @@ class ImportQueue:
     @timed_phase("sym.import.prealloc.lock")
     def _lock_prefix(self, req: Req, *, content_only: bool) -> None:
         """Lock the matched node like PrefillAdder; a content-only match locks
-        FULL only, and the finish path then releases it without SWA
-        (`swa_prefix_lock_released`), as upstream content_only decode does.
+        FULL only, and the finish path then releases it without SWA, as
+        upstream content_only decode does (`_match_prefix_and_lock`).
         A window-residency match is FULL-only too (the
         prefix's SWA may be host-only), and is locked and released the same
-        way."""
+        way.
+
+        v0.5.23: the lock is the request's TreeLock (`req.lock`): its receipt
+        records the skipped SWA, and release_kv_cache / the checkpoint relock
+        release it with `unlock(req.lock)`."""
         full_only = content_only or self.swa_window
         if full_only:
-            from decoupled_engine.srt.mem_cache.unified_cache.components import ComponentType
+            from decoupled_engine.srt.mem_cache.unified_cache.component_type import (
+                ComponentType,
+            )
 
-            lock = self.tree_cache.inc_lock_ref(
+            req.lock = self.tree_cache.lock(
                 req.last_node, skip_lock_components=(ComponentType.SWA,)
             )
         else:
-            lock = self.tree_cache.inc_lock_ref(req.last_node)
-        req.swa_uuid_for_lock = getattr(lock, "swa_uuid_for_lock", None)
-        req.skip_lock_node_ids = getattr(lock, "skip_lock_node_ids", {}) or {}
-        req.skip_lock_components = getattr(lock, "skip_lock_components", ()) or ()
-        req.swa_prefix_lock_released = full_only
+            req.lock = self.tree_cache.lock(req.last_node)
+        req.skip_lock_components = (
+            tuple(req.lock.receipt.skipped_lock_components)
+            if req.lock is not None
+            else ()
+        )
 
     def _release_prefix_lock(self, req: Req) -> None:
-        """Undo the inc_lock_ref taken in _prealloc (mirrors upstream
+        """Undo the lock taken in _prealloc (mirrors upstream
         DecodePreallocQueue._release_matched_prefix_lock)."""
         try:
-            from decoupled_engine.srt.mem_cache.base_prefix_cache import DecLockRefParams
-
-            params = DecLockRefParams(
-                swa_uuid_for_lock=getattr(req, "swa_uuid_for_lock", None),
-                skip_lock_node_ids=getattr(req, "skip_lock_node_ids", {}) or {},
-                skip_lock_components=getattr(req, "skip_lock_components", ()) or (),
-            )
-            if req.swa_prefix_lock_released:
-                self.tree_cache.dec_lock_ref(req.last_node, params, skip_swa=True)
-            else:
-                self.tree_cache.dec_lock_ref(req.last_node, params)
-        except TypeError:
-            self.tree_cache.dec_lock_ref(req.last_node)
+            # The receipt replays the acquire (skipped components included).
+            self.tree_cache.unlock(req.lock)
         except Exception as e:  # never let lock bookkeeping kill the scheduler
             logger.warning(
                 "symmetric-pd import rid=%s: releasing prefix lock failed (%r)", req.rid, e
             )
+        req.lock = None
         req.last_node = None
-        req.swa_uuid_for_lock = None
         req.skip_lock_components = ()
-        req.swa_prefix_lock_released = False
 
     def _local_state_indices(self, req: Req, total_tokens: int) -> Dict[str, List[int]]:
         """Reader-local per-state-type slots FINAL's `state_indices` are READ
@@ -2073,11 +2063,9 @@ class ImportQueue:
         if req.is_holding_kv:
             # Nothing valid was written; never insert into the radix tree.
             # (Window residency: this also releases a ledger/backfill.)
-            release_kv_cache(req, self.tree_cache, is_insert=False)
-        import torch
-
-        req.prefix_indices = torch.empty((0,), dtype=torch.int64)
-        req.extend_range = None
+            release_kv_cache(req, self.tree_cache, checkpoint=False)
+        req.prefix_len = 0
+        req.extend_end = None
         req.kv_committed_len = 0
         req.output_ids = array("q")
         req.already_computed = 0
@@ -2087,7 +2075,6 @@ class ImportQueue:
         req.decode_radix_cache_frozen_prompt_len = None
         req.decode_radix_cache_frozen_swa_floor = None
         req.decode_radix_cache_skip_unfinished_insert = False
-        req.swa_prefix_lock_released = False
         # Window reader (_prealloc): also undo the FULL-only lock components.
         # The cache-policy flags and the backfill source need no reset:
         # _apply_ready sets them only on imports every rank agreed READY,

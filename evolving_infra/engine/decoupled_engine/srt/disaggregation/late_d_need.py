@@ -148,9 +148,9 @@ def evictable_prefix_tokens(req):
 
 def remaining_need(req):
     full = len(getattr(req, "origin_input_ids", ()))
-    prefix = len(getattr(req, "prefix_indices", ()))
-    # Before load adoption host_hit is still outside prefix_indices. It is
-    # included in full - device prefix. After adoption it is in prefix_indices.
+    prefix = int(getattr(req, "prefix_len", 0) or 0)
+    # Before load adoption host_hit is still outside prefix_len. It is
+    # included in full - device prefix. After adoption it is in prefix_len.
     return max(0, full - prefix)
 
 
@@ -216,7 +216,7 @@ class NeedAdmissionMixin:
             self._late_d_note_refused(req, "BLOCK", blocked=True)
             return True
         pool = int(self.max_total_num_tokens)
-        prefix = len(req.prefix_indices)
+        prefix = req.prefix_len
         need = remaining_need(req)
         evictable = evictable_prefix_tokens(req)
         cap = envs.SGLANG_LATE_D_PARK_CAP.get()
@@ -286,8 +286,14 @@ class NeedAdmissionMixin:
         return clock() if callable(clock) else time.monotonic()
 
     def _late_d_need_rank0(self):
-        ps = getattr(self, "ps", None)
-        return getattr(ps, "tp_rank", getattr(self, "tp_rank", 0)) == 0
+        from decoupled_engine.srt.runtime_context import get_parallel
+
+        try:
+            rank = get_parallel().tp_rank
+        except (AttributeError, RuntimeError, ValueError):
+            # No parallel context published (stand-ins): the old fallback.
+            rank = getattr(self, "tp_rank", 0)
+        return rank == 0
 
     def _late_d_note_refused(self, req, cls, blocked=False):
         if getattr(req, "late_d_refused_at", None) is None:
@@ -340,7 +346,7 @@ class NeedAdmissionMixin:
                         "LATE_D_NEED aged rid=%s wait_s=%.3f class=%s need=%d prefix=%d unbound=%d",
                         head.rid, self._late_d_wait_s(head),
                         getattr(head, "late_d_refused_class", "BLOCK"),
-                        remaining_need(head), len(head.prefix_indices),
+                        remaining_need(head), head.prefix_len,
                         self._late_d_need_unbound)
         self._late_d_aged_head = head
         if (head is not None and getattr(head, "late_d_aged", AGED_NONE) == AGED_RELEASED

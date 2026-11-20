@@ -1,4 +1,4 @@
-# Adapted from SGLang python/sglang/srt/mem_cache/index_key_cache.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/mem_cache/index_key_cache.py (commit 297e54fd10), modified for evolving-infra.
 from __future__ import annotations
 
 import math
@@ -7,9 +7,16 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from decoupled_engine.kernels.ops.attention.dsa import index_buf_accessor
+from decoupled_engine.kernels.ops.kvcache import dsa_index_k_cache
+from decoupled_engine.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
 from decoupled_engine.srt.environ import envs
+from decoupled_engine.srt.layers.attention.dsa.utils import (
+    INDEXER_K_CACHE_PRESHUFFLE_TILE,
+    aiter_can_use_preshuffle_paged_mqa,
+)
 from decoupled_engine.srt.mem_cache.host_copy_bytes import chunked_copy_nbytes
+
+_use_aiter_preshuffle = aiter_can_use_preshuffle_paged_mqa()
 
 if TYPE_CHECKING:
     from decoupled_engine.srt.mem_cache.memory_pool import DSATokenToKVPool
@@ -19,42 +26,51 @@ class IndexKeyCache:
     def __init__(self, pool: DSATokenToKVPool, index_buf_size: int):
         self.pool = pool
         num_pages = (index_buf_size + pool.page_size + 1) // pool.page_size
-        with (
-            torch.cuda.use_mem_pool(pool.custom_mem_pool)
-            if pool.custom_mem_pool
-            else nullcontext()
-        ):
-            from decoupled_engine.srt.mem_cache.ce_2d_load import (
-                layer_strided_buffers,
-                shared_dedup_requested,
-            )
-
-            if shared_dedup_requested() and type(self) is IndexKeyCache:
-                # Shared host dedup: live layers share one strided allocation.
-                self.buffer = layer_strided_buffers(
-                    pool.layer_num,
-                    self._buffer_shape(num_pages),
-                    dtype=pool.index_k_with_scale_buffer_dtype,
-                    device=pool.device,
-                    rows_of=lambda i: self._layer_num_pages(i, num_pages),
+        with pool.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
+            with (
+                torch.cuda.use_mem_pool(pool.custom_mem_pool)
+                if pool.custom_mem_pool
+                else nullcontext()
+            ):
+                from decoupled_engine.srt.mem_cache.ce_2d_load import (
+                    layer_strided_buffers,
+                    shared_dedup_requested,
                 )
-            else:
-                self.buffer = [
-                    torch.zeros(
-                        self._buffer_shape(self._layer_num_pages(i, num_pages)),
+
+                if shared_dedup_requested() and type(self) is IndexKeyCache:
+                    # Shared host dedup: live layers share one strided allocation.
+                    self.buffer = layer_strided_buffers(
+                        pool.layer_num,
+                        self._buffer_shape(num_pages),
                         dtype=pool.index_k_with_scale_buffer_dtype,
                         device=pool.device,
+                        rows_of=lambda i: self._layer_num_pages(i, num_pages),
                     )
-                    for i in range(pool.layer_num)
-                ]
+                else:
+                    self.buffer = [
+                        torch.zeros(
+                            self._buffer_shape(self._layer_num_pages(i, num_pages)),
+                            dtype=pool.index_k_with_scale_buffer_dtype,
+                            device=pool.device,
+                        )
+                        for i in range(pool.layer_num)
+                    ]
 
     def _buffer_shape(self, num_pages: int) -> tuple[int, int]:
         pool = self.pool
         return (
             num_pages,
             pool.page_size
+            // pool.index_kpool
             * (pool.index_head_dim + pool.index_head_dim // pool.quant_block_size * 4),
         )
+
+    def _kernel_view(self, buffer: torch.Tensor) -> torch.Tensor:
+        pool = self.pool
+        kernel_pages_per_row = (
+            pool.page_size // pool.index_kpool // pool.index_page_size
+        )
+        return buffer.view(-1, buffer.shape[1] // kernel_pages_per_row)
 
     def _layer_num_pages(self, layer_idx: int, num_pages: int) -> int:
         # Layers that reuse the previous layer's top-k never write index-K, so
@@ -67,36 +83,45 @@ class IndexKeyCache:
     def move(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor) -> None:
         if tgt_loc.numel() == 0:
             return
+        assert self.pool.index_kpool == 1, (
+            "Moving pooled index keys requires regrouping tokens"
+        )
+        page_size = self.pool.index_page_size
         tgt_loc_flat = tgt_loc.view(-1).long()
         src_loc_flat = src_loc.view(-1).long()
+        tgt_page, tgt_offset = tgt_loc_flat // page_size, tgt_loc_flat % page_size
+        src_page, src_offset = src_loc_flat // page_size, src_loc_flat % page_size
+        key_bytes = page_size * self.pool.index_head_dim
         for index_k in self.buffer:
             if index_k.shape[0] == 0:
                 continue
-            index_k[tgt_loc_flat] = index_k[src_loc_flat]
+            index_k = self._kernel_view(index_k)
+            # Each physical page stores all key bytes followed by all scale bytes.
+            # Locations identify tokens; copying whole pages overwrites neighbors.
+            keys = index_k[:, :key_bytes]
+            if _use_aiter_preshuffle:
+                tile = INDEXER_K_CACHE_PRESHUFFLE_TILE
+                keys = keys.view(
+                    index_k.shape[0], page_size // tile, -1, tile, tile
+                ).permute(0, 1, 3, 2, 4)
+                keys[tgt_page, tgt_offset // tile, tgt_offset % tile] = keys[
+                    src_page, src_offset // tile, src_offset % tile
+                ]
+            else:
+                keys = keys.view(index_k.shape[0], page_size, -1)
+                keys[tgt_page, tgt_offset] = keys[src_page, src_offset]
+            scales = index_k[:, key_bytes:].view(index_k.shape[0], page_size, -1)
+            scales[tgt_page, tgt_offset] = scales[src_page, src_offset]
 
     def get_local_buffer(self, layer_id: int) -> torch.Tensor:
         if self.pool.layer_transfer_counter is not None:
             self.pool.layer_transfer_counter.wait_until(
                 layer_id - self.pool.start_layer
             )
-        return self.buffer[layer_id - self.pool.start_layer]
+        return self._kernel_view(self.buffer[layer_id - self.pool.start_layer])
 
     def get_buffer(self, layer_id: int) -> torch.Tensor:
         return self.get_local_buffer(layer_id)
-
-    def get_k_continuous(self, layer_id: int, seq_len: int, page_indices: torch.Tensor):
-        buf = self.get_buffer(layer_id)
-        return index_buf_accessor.GetK.execute(
-            self.pool, buf, seq_len=seq_len, page_indices=page_indices
-        )
-
-    def get_k_scale_continuous(
-        self, layer_id: int, seq_len: int, page_indices: torch.Tensor
-    ):
-        buf = self.get_buffer(layer_id)
-        return index_buf_accessor.GetS.execute(
-            self.pool, buf, seq_len=seq_len, page_indices=page_indices
-        )
 
     def get_k_and_scale(
         self,
@@ -107,7 +132,7 @@ class IndexKeyCache:
         max_seq_len: int,
     ):
         buf = self.get_buffer(layer_id)
-        return index_buf_accessor.GetKAndS.execute(
+        return dsa_index_k_cache.GetKAndS.execute(
             self.pool,
             buf,
             page_indices=page_indices,
@@ -123,8 +148,8 @@ class IndexKeyCache:
         index_k: torch.Tensor,
         index_k_scale: torch.Tensor,
     ) -> None:
-        buf = self.buffer[layer_id - self.pool.start_layer]
-        index_buf_accessor.SetKAndS.execute(
+        buf = self._kernel_view(self.buffer[layer_id - self.pool.start_layer])
+        dsa_index_k_cache.SetKAndS.execute(
             pool=self.pool,
             buf=buf,
             loc=loc,

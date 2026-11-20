@@ -134,8 +134,10 @@ def plan(cfg: Any, environ: Mapping[str, str]) -> Tuple[Dict[str, str], Dict[str
         default("SGLANG_RETRACT_BACKUP_MAX_GB", "20")
         if getattr(cfg, "enable_peer_kv_servicer", False):
             default("SGLANG_PEER_KV_PUSH_FAST", "1")
-        plain_tp = getattr(cfg, "pp_size", 1) == 1 and not getattr(
-            cfg, "enable_dp_attention", False
+        plain_tp = (
+            getattr(cfg, "pp_size", 1) == 1
+            and not getattr(cfg, "enable_dp_attention", False)
+            and (getattr(cfg, "attn_dp_size", 1) or 1) == 1
         )
         if cfg.enable_hierarchical_cache and plain_tp:
             default("SGLANG_HICACHE_PIPELINED_SYNC", "1")
@@ -245,6 +247,7 @@ def plan_features(
         and getattr(cfg, "dp_size", 1) == 1
         and getattr(cfg, "attn_cp_size", 1) == 1
         and not getattr(cfg, "enable_dp_attention", False)
+        and (getattr(cfg, "attn_dp_size", 1) or 1) == 1
     )
     if not cfg.enable_hierarchical_cache:
         fields["enable_hierarchical_cache"] = True
@@ -289,6 +292,8 @@ def plan_features(
         if dedup_on and ratio_unset:
             servicer = fields.get("enable_peer_kv_servicer", getattr(cfg, "enable_peer_kv_servicer", False))
             fields["hicache_ratio"] = 4.445 if servicer else 4.0
+            # The paper's ratio is a fixed setting: keep host-pool auto-sizing off for it.
+            fields["hicache_host_memory_fraction"] = None
         if (
             model.get("full_only")
             and not getattr(cfg, "enable_kv_session_retention", False)

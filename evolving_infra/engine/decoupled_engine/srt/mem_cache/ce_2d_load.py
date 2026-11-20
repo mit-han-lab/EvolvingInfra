@@ -250,7 +250,14 @@ def _pool_layout(host_pool, device_pool, layer_ids, is_draft):
     else:
         return None
     for layer_id in layer_ids:
-        host_layer = layer_id if is_draft else host_pool._host_layer_index(layer_id)
+        if not is_draft:
+            host_layer = host_pool._host_layer_index(layer_id)
+        elif isinstance(host_pool, DSAIndexerPoolHost):
+            # v0.5.23 compacts the indexer's host layers (live target layers,
+            # then one per draft): map the draft as load_to_device_per_layer.
+            host_layer = host_pool._draft_host_layer(layer_id)
+        else:
+            host_layer = layer_id
         dev = dev_layers[0 if is_draft else layer_id]
         if dev.numel() == 0:
             continue  # skip-topk placeholder: the per-layer path copies nothing
@@ -1031,8 +1038,12 @@ def peer_plan(
         return None
     layers, dev_page_bytes = [], None
     for layer_id in layer_ids:
+        # peer_ptrs is keyed by the source's device layer id (layer_buffers);
+        # v0.5.23 compacts the DSA indexer's host layers, so key it by layer_id.
         host_layer = (
-            layer_id if transfer.is_draft else host_pool._host_layer_index(layer_id)
+            layer_id
+            if transfer.is_draft or kind == "idx"
+            else host_pool._host_layer_index(layer_id)
         )
         dev = dev_layers[0 if transfer.is_draft else layer_id]
         if dev.numel() == 0:

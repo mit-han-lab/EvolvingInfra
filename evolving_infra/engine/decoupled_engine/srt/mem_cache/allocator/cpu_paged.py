@@ -296,6 +296,23 @@ class CpuPagedTokenToKVPoolAllocator(PagedTokenToKVPoolAllocator):
         if self.debug_mode:
             self._debug_check_no_duplicate_pages()
 
+    def free_page_ids(self, page_ids: torch.Tensor):
+        """v0.5.23 base frees by page id through the device page generations
+        (None on Q4) and staged pages; Q4 releases through its own clock."""
+        if page_ids.numel() == 0:
+            return
+        pages = page_ids.to("cpu", dtype=torch.int64)
+        if self.free_group is not None:
+            self._group_pages.append(pages)
+        else:
+            self._release(pages)
+        if self.debug_mode:
+            self._debug_check_no_duplicate_pages()
+
+    def get_all_free_pages(self):
+        """v0.5.23 base reads staged_pages; Q4 keeps clean, released and dirty."""
+        return self.free_page_ids_all()
+
     def free_segment(self, free_index: torch.Tensor, *, start_pos: int):
         self.free(free_index)
 
@@ -349,6 +366,9 @@ class CpuPagedTokenToKVPoolAllocator(PagedTokenToKVPoolAllocator):
         self.release_pages = _EMPTY
         self.free_group = None
         self.free_page_reps_group = []
+        self.free_page_ids_group = []  # v0.5.23 paged base name (unused here: frees go by tags)
+        self.staged_pages: List[torch.Tensor] = []  # v0.5.23 base state; Q4 never stages
+        self.num_staged_pages = 0
         self._group_pages: List[torch.Tensor] = []
         self._dirty: List[DirtySegment] = []
         self._dirty_count = 0
@@ -582,7 +602,9 @@ def convert_to_cpu_paged(
         raise AssertionError(
             f"Q4 needs a plain PagedTokenToKVPoolAllocator, got {type(allocator).__name__}"
         )
-    num_free = len(allocator.free_pages) + len(allocator.release_pages)
+    # v0.5.23 paged base: freed pages wait in staged_pages (release_pages is
+    # the base allocator's None placeholder).
+    num_free = len(allocator.free_pages) + allocator.num_staged_pages
     if num_free != allocator.num_pages or allocator.free_group is not None:
         raise RuntimeError(
             f"Q4 page bookkeeping must start on an idle pool: {num_free} of "

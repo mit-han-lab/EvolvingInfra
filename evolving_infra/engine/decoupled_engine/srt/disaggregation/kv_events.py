@@ -1,4 +1,4 @@
-# Adapted from SGLang python/sglang/srt/disaggregation/kv_events.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/disaggregation/kv_events.py (commit 297e54fd10), modified for evolving-infra.
 """
 Copyright 2025 SGLang Team
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +20,9 @@ KV caching events
 
 import atexit
 import enum
+import hashlib
 import logging
+import os
 import queue
 import threading
 import time
@@ -28,17 +30,15 @@ from abc import ABC, abstractmethod
 from collections import deque
 from itertools import count
 from queue import Queue
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union
 
 import msgspec
 import zmq
 from pydantic import BaseModel
 
 from decoupled_engine.srt.environ import envs
+from decoupled_engine.srt.runtime_context import get_parallel
 from decoupled_engine.srt.utils.network import NetworkAddress
-
-if TYPE_CHECKING:
-    from decoupled_engine.srt.distributed.parallel_state_wrapper import ParallelState
 
 logger = logging.getLogger(__name__)
 
@@ -65,17 +65,18 @@ def select_kv_publisher_dp_rank(
     return dp_rank or 0
 
 
-def is_kv_publisher_rank(kv_events_config: Optional[str], ps: "ParallelState") -> bool:
+def is_kv_publisher_rank(kv_events_config: Optional[str]) -> bool:
     """Whether this scheduler owns a KV-event publisher slot: one per
     independent KV cache (pp/attn-TP/attn-CP rank 0). Shared by
     `SchedulerKvEventsPublisher` and `SchedulerLoadPublisher`, which must
     gate identically or their /server_info-derived ports disagree.
     """
+    parallel = get_parallel()
     return bool(
         kv_events_config
-        and ps.pp_rank == 0
-        and ps.attn_tp_rank == 0
-        and ps.attn_cp_rank == 0
+        and parallel.pp_rank == 0
+        and parallel.attn_tp_rank == 0
+        and parallel.attn_cp_rank == 0
     )
 
 
@@ -243,11 +244,20 @@ class EventBatch(
 
 class KVCacheEvent(
     msgspec.Struct,
-    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
     gc=False,  # type: ignore[call-arg]
     tag=True,
 ):
-    """Base class for all KV cache-related events"""
+    """Base class for all KV cache-related events.
+
+    Events are tagged msgpack maps: ``type`` carries the class name and every
+    other key is a field name. Optional fields left at ``None`` are omitted, so
+    adding an optional field never changes the shape an older consumer sees.
+    This is the same encoding vLLM uses for its ``KVCacheEvent``, so a consumer
+    such as Dynamo decodes both engines with one code path.
+
+    ``EventBatch`` stays a positional array ``[ts, events, attn_dp_rank]``.
+    """
 
 
 class StorageMedium(str, enum.Enum):
@@ -259,27 +269,13 @@ class StorageMedium(str, enum.Enum):
     EXTERNAL = "EXTERNAL"  # L4: shared / remote pool (e.g. Mooncake)
 
 
-class BlockStoredMetadata(msgspec.Struct, omit_defaults=True, gc=False):
-    """Typed request metadata attached to a stored KV block."""
+class OffloadedState(msgspec.Struct):
+    """Decode-side offload progress for one request, keyed by Req in the manager."""
 
-    cache_salt: str
-
-
-class OffloadedState:
-    """
-    OffloadedState represents the state of a KV cache block offloaded to the hicache.
-
-    - prefill_len (int): The length of the prefill part of the KV cache block.
-    - inc_len (int): The length of the incremental part of the KV cache block.
-    - last_hash (Optional[str]): The hash of the last token in the KV cache block.
-    """
-
-    def __init__(
-        self, prefill_len: int, inc_len: int = 0, last_hash: Optional[str] = None
-    ):
-        self.prefill_len = prefill_len
-        self.inc_len = inc_len
-        self.last_hash = last_hash
+    # Decode-incremental length already submitted for D2H offload.
+    inc_len: int = 0
+    # Tail of the page hash chain, extended as each offloaded chunk is backed up.
+    last_hash: Optional[str] = None
 
 
 class BlockStored(KVCacheEvent):
@@ -289,16 +285,16 @@ class BlockStored(KVCacheEvent):
     block_size: int
     lora_id: Optional[int]
     medium: Optional[str] = None
-
-
-class BlockStoredWithMetadata(BlockStored, tag="BlockStored", kw_only=True):
-    """BlockStored wire extension used only when typed metadata is present.
-
-    A separate struct keeps unsalted events at their legacy array length; an
-    optional field on BlockStored would still serialize a trailing null.
-    """
-
-    metadata: BlockStoredMetadata
+    # Salt of the request that stored these blocks. Block hashes are already
+    # namespaced by it; consumers index the emitted hashes rather than
+    # recompute them.
+    cache_salt: Optional[str] = None
+    # Session that triggered this store. Attribution only: the blocks may be
+    # shared with other sessions, and the hash does not depend on it.
+    session_id: Optional[str] = None
+    # Public adapter name for router lookup. Published hashes are opaque IDs
+    # scoped to the internal cache namespace, including the adapter load.
+    lora_name: Optional[str] = None
 
 
 class BlockRemoved(KVCacheEvent):
@@ -310,12 +306,161 @@ class AllBlocksCleared(KVCacheEvent):
     pass
 
 
+# The dynamo format publishes namespaced hashes as block hashes. If you change
+# this tag, all of these hashes change. unified_tree_core.rs has a Rust copy.
+_NAMESPACE_SEED_TAG = b"sglang-kv-event-namespace-v1"
+
+
+def kv_event_namespace_seed(
+    *, extra_key: Optional[str], cache_salt: Optional[str]
+) -> Optional[bytes]:
+    """Return the seed for namespaced_block_hash, or None for no namespace."""
+    if extra_key is None and cache_salt is None:
+        return None
+    digest = hashlib.sha256(_NAMESPACE_SEED_TAG)
+    # The presence byte and the length prefix make ("a", "bc") and ("ab", "c") differ.
+    for part in (extra_key, cache_salt):
+        if part is None:
+            digest.update(b"\x00")
+            continue
+        encoded = part.encode("utf-8")
+        digest.update(b"\x01" + len(encoded).to_bytes(8, "little") + encoded)
+    return digest.digest()
+
+
+def namespaced_block_hash(block_hash: int, *, namespace_seed: Optional[bytes]) -> int:
+    """Return the namespaced hash of a published block hash.
+
+    If namespace_seed is None, the result is ``block_hash``. If not, the result is
+    the first 8 bytes of SHA-256(seed, block_hash as 8 big-endian bytes), as int64.
+    """
+    if namespace_seed is None:
+        return block_hash
+    digest = hashlib.sha256(
+        namespace_seed + block_hash.to_bytes(8, "big", signed=True)
+    ).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
 class KVEventBatch(EventBatch):
-    # BlockStoredWithMetadata deliberately stays out of this tagged union.
-    # Existing typed consumers decode its shared "BlockStored" tag as the base
-    # type and ignore the trailing metadata; adding both types would give
-    # msgspec duplicate tags and make the union invalid.
     events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
+
+
+# ---- EI wire format (SGLANG_KV_EVENTS_WIRE_FORMAT) ----
+#
+# EI's consumers (the Rust router's kv_events/wire.rs, the Morphosis router
+# and the KV indexer) decode only EI's legacy positional layout: each event
+# is an array ``[tag, fields...]``, BlockStored is ``[block_hashes,
+# parent_block_hash, token_ids, block_size, lora_id, medium]``, and a cache
+# salt rides only on BlockStoredWithMetadata (tag "BlockStored", trailing
+# ``metadata``). The publisher converts upstream's event structs (above) to
+# these at encode time: "ei_array" (the default) sends this layout and
+# "upstream_map" sends upstream's tagged maps. The legacy structs keep EI's
+# msgspec tags; only their Python names are private.
+KV_EVENTS_WIRE_EI_ARRAY = "ei_array"
+KV_EVENTS_WIRE_UPSTREAM_MAP = "upstream_map"
+
+
+class _LegacyKVCacheEvent(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    gc=False,  # type: ignore[call-arg]
+    tag=True,
+):
+    """Base class of EI's legacy (positional) KV cache events."""
+
+
+class _LegacyBlockStoredMetadata(msgspec.Struct, omit_defaults=True, gc=False):
+    """Typed request metadata attached to a stored KV block."""
+
+    cache_salt: str
+
+
+class _LegacyBlockStored(_LegacyKVCacheEvent, tag="BlockStored"):
+    block_hashes: list[int]
+    parent_block_hash: Optional[int]
+    token_ids: list[int]
+    block_size: int
+    lora_id: Optional[int]
+    medium: Optional[str] = None
+
+
+class _LegacyBlockStoredWithMetadata(
+    _LegacyBlockStored, tag="BlockStored", kw_only=True
+):
+    """BlockStored wire extension used only when typed metadata is present.
+
+    A separate struct keeps unsalted events at their legacy array length; an
+    optional field on BlockStored would still serialize a trailing null.
+    """
+
+    metadata: _LegacyBlockStoredMetadata
+
+
+class _LegacyBlockRemoved(_LegacyKVCacheEvent, tag="BlockRemoved"):
+    block_hashes: list[int]
+    medium: Optional[str] = None
+
+
+class _LegacyAllBlocksCleared(_LegacyKVCacheEvent, tag="AllBlocksCleared"):
+    pass
+
+
+def kv_events_wire_format() -> str:
+    """SGLANG_KV_EVENTS_WIRE_FORMAT: "ei_array" (default) or "upstream_map"."""
+    fmt = (envs.SGLANG_KV_EVENTS_WIRE_FORMAT.get() or KV_EVENTS_WIRE_EI_ARRAY).strip()
+    fmt = fmt.lower()
+    if fmt not in (KV_EVENTS_WIRE_EI_ARRAY, KV_EVENTS_WIRE_UPSTREAM_MAP):
+        raise ValueError(
+            f"SGLANG_KV_EVENTS_WIRE_FORMAT={fmt!r}: expected "
+            f"{KV_EVENTS_WIRE_EI_ARRAY!r} or {KV_EVENTS_WIRE_UPSTREAM_MAP!r}"
+        )
+    return fmt
+
+
+def to_legacy_event(event: Any) -> Any:
+    """``event`` as EI's legacy wire struct. A salted BlockStored becomes
+    BlockStoredWithMetadata; session_id and lora_name are not sent. Events of
+    other types pass through unchanged."""
+    if isinstance(event, BlockStored):
+        fields = dict(
+            block_hashes=event.block_hashes,
+            parent_block_hash=event.parent_block_hash,
+            token_ids=event.token_ids,
+            block_size=event.block_size,
+            lora_id=event.lora_id,
+            medium=event.medium,
+        )
+        if event.cache_salt is not None:
+            return _LegacyBlockStoredWithMetadata(
+                **fields,
+                metadata=_LegacyBlockStoredMetadata(cache_salt=event.cache_salt),
+            )
+        return _LegacyBlockStored(**fields)
+    if isinstance(event, BlockRemoved):
+        return _LegacyBlockRemoved(block_hashes=event.block_hashes, medium=event.medium)
+    if isinstance(event, AllBlocksCleared):
+        return _LegacyAllBlocksCleared()
+    return event
+
+
+def to_wire_batch(batch: EventBatch, wire_format: str) -> EventBatch:
+    """The batch whose encoding goes on the wire: ``batch`` itself for
+    "upstream_map", else a positional EventBatch of EI's legacy events (the
+    batch itself is ``[ts, events, attn_dp_rank]`` in both formats)."""
+    if wire_format != KV_EVENTS_WIRE_EI_ARRAY:
+        return batch
+    return EventBatch(
+        ts=batch.ts,
+        events=[to_legacy_event(event) for event in batch.events],
+        attn_dp_rank=batch.attn_dp_rank,
+    )
+
+
+# Event types the batched-publication caps can cut at block boundaries, in
+# both wire formats.
+_STORED_EVENT_TYPES = (BlockStored, _LegacyBlockStored)
+_REMOVED_EVENT_TYPES = (BlockRemoved, _LegacyBlockRemoved)
 
 
 # ---- Message caps of batched publication (SGLANG_KV_EVENTS_BATCH_PUBLISH) ----
@@ -367,11 +512,13 @@ def split_event_by_blocks(
     that fit, and events that cannot be cut (one block, or token ids that are
     not block_size per block) come back whole."""
     size = len(encode(event))
-    if size <= budget or not isinstance(event, (BlockStored, BlockRemoved)):
+    if size <= budget or not isinstance(
+        event, _STORED_EVENT_TYPES + _REMOVED_EVENT_TYPES
+    ):
         return [(event, size)]
     hashes = event.block_hashes
     n_blocks = len(hashes)
-    stored = isinstance(event, BlockStored)
+    stored = isinstance(event, _STORED_EVENT_TYPES)
     block_size = event.block_size if stored else 0
     if n_blocks < 2 or (stored and len(event.token_ids) != n_blocks * block_size):
         return [(event, size)]
@@ -533,6 +680,10 @@ class EventPublisher(ABC):
     def shutdown(self) -> None:
         """Shutdown the publisher."""
 
+    def describe_local_source(self, block_size: int) -> Optional[dict[str, Any]]:
+        """Describe a source accessible to a separate local process, if any."""
+        return None
+
 
 class NullEventPublisher(EventPublisher):
     """No-op implementation (default when disabled)."""
@@ -553,7 +704,7 @@ class ZmqEventPublisher(EventPublisher):
     ----------
     endpoint:
         PUB address. Use ``tcp://*:5557`` to bind or ``tcp://host:5557`` to
-        connect.
+        connect, unless overridden by ``bind``.
     replay_endpoint:
         Optional ROUTER address for replay requests. When given, subscribers can
         request missed batches by sending the starting sequence number as an
@@ -566,6 +717,9 @@ class ZmqEventPublisher(EventPublisher):
         Maximum number of events to buffer in memory.
     topic:
         Topic to publish events to.
+    bind:
+        Whether to bind the PUB socket. When unset, preserve the endpoint-based
+        heuristic: bind wildcard, IPC and inproc addresses; connect otherwise.
     """
 
     SHUTDOWN_TIMEOUT: float = 1.0
@@ -580,6 +734,7 @@ class ZmqEventPublisher(EventPublisher):
         hwm: int = 100_000,
         max_queue_size: int = 100_000,
         topic: str = "",
+        bind: Optional[bool] = None,
     ) -> None:
         # Storage
         self._event_queue = Queue[Optional[EventBatch]](maxsize=max_queue_size)
@@ -588,9 +743,12 @@ class ZmqEventPublisher(EventPublisher):
         # ZMQ sockets
         self._ctx = zmq.Context.instance()
         self._pub: Optional[zmq.Socket] = None
+        self._local_pub_endpoint: Optional[str] = None
+        self._local_replay_endpoint: Optional[str] = None
         self._replay: Optional[zmq.Socket] = None
         self._dp_rank = attn_dp_rank
         self._endpoint = self.offset_endpoint_port(endpoint, self._dp_rank)
+        self._bind = bind
         self._replay_endpoint = self.offset_endpoint_port(
             replay_endpoint, self._dp_rank
         )
@@ -610,6 +768,9 @@ class ZmqEventPublisher(EventPublisher):
         self._capped_path = bool(
             self._cap_bytes or self._cap_events or self._wire_stats is not None
         )
+        # SGLANG_KV_EVENTS_WIRE_FORMAT: what goes on the wire (and into the
+        # replay buffer, which stores the bytes sent).
+        self._wire_format = kv_events_wire_format()
 
         # Thread
         self._running = True
@@ -628,6 +789,43 @@ class ZmqEventPublisher(EventPublisher):
         if events.attn_dp_rank is None:
             events.attn_dp_rank = self._dp_rank
         self._event_queue.put(events)
+
+    def describe_local_source(self, block_size: int) -> Optional[dict[str, Any]]:
+        """Report the bound socket, not a port reconstructed from global DP size.
+
+        Connect-style publishers and inproc sockets have no subscribable local
+        endpoint. They keep working as before, but are not advertised to external
+        processes. Wildcard binds are reachable on loopback from this node.
+        """
+
+        def local_endpoint(endpoint: Optional[str]) -> Optional[str]:
+            if endpoint is None:
+                return None
+            if endpoint.startswith("ipc://"):
+                return endpoint
+            if parse_advertisable_tcp(endpoint) is None:
+                return None
+            address = NetworkAddress.parse(endpoint[len("tcp://") :])
+            host = address.host
+            if host in ("*", "0.0.0.0"):
+                host = "127.0.0.1"
+            elif host == "::":
+                host = "::1"
+            return NetworkAddress(host, address.port).to_tcp()
+
+        endpoint = local_endpoint(self._local_pub_endpoint)
+        if endpoint is None:
+            return None
+        source = {
+            "dp_rank": self._dp_rank,
+            "endpoint": endpoint,
+            "topic": self._topic_bytes.decode("utf-8"),
+            "block_size": block_size,
+        }
+        replay_endpoint = local_endpoint(self._local_replay_endpoint)
+        if replay_endpoint is not None:
+            source["replay_endpoint"] = replay_endpoint
+        return source
 
     def shutdown(self) -> None:
         """Stop the publisher thread and clean up resources."""
@@ -667,23 +865,27 @@ class ZmqEventPublisher(EventPublisher):
         if self._pub is None:
             self._pub = self._ctx.socket(zmq.PUB)
             self._pub.set_hwm(self._hwm)
-            # Heuristic: bind if wildcard / * present, else connect.
+            # Default heuristic: bind if wildcard / * present, else connect.
             # bind stable, connect volatile convention.
             # ``0.0.0.0`` is the IPv4 bind-all wildcard alongside ``*``
             # and ``::``; ``/server_info`` advertises it as a wildcard,
             # so the publisher must bind it for the advertised endpoint
             # to actually be listening.
-            if (
-                "*" in self._endpoint
-                or "::" in self._endpoint
-                or "0.0.0.0" in self._endpoint
-                or self._endpoint.startswith("ipc://")
-                or self._endpoint.startswith("inproc://")
-            ):
+            should_bind = self._bind
+            if should_bind is None:
+                should_bind = (
+                    "*" in self._endpoint
+                    or "::" in self._endpoint
+                    or "0.0.0.0" in self._endpoint
+                    or self._endpoint.startswith("ipc://")
+                    or self._endpoint.startswith("inproc://")
+                )
+            if should_bind:
                 logger.debug(
                     f"ZmqEventPublisher socket publisher_endpoint bind to {self._endpoint}"
                 )
                 self._pub.bind(self._endpoint)
+                self._local_pub_endpoint = self._bound_endpoint(self._pub)
             else:
                 self._pub.connect(self._endpoint)
 
@@ -697,6 +899,19 @@ class ZmqEventPublisher(EventPublisher):
                 f"ZmqEventPublisher socket replay_endpoint bind to {self._replay_endpoint}"
             )
             self._replay.bind(self._replay_endpoint)
+            self._local_replay_endpoint = self._bound_endpoint(self._replay)
+
+    @staticmethod
+    def _bound_endpoint(socket: zmq.Socket) -> str:
+        endpoint = socket.getsockopt_string(zmq.LAST_ENDPOINT)
+        if endpoint.startswith("ipc://"):
+            path = endpoint[len("ipc://") :]
+            # Capture the publisher's working directory at bind time so a
+            # separate process can use the address. Abstract IPC names are
+            # independent of the filesystem and must remain unchanged.
+            if not path.startswith("@"):
+                endpoint = f"ipc://{os.path.abspath(path)}"
+        return endpoint
 
     def _publisher_thread(self) -> None:
         """Background thread that processes the event queue."""
@@ -727,7 +942,7 @@ class ZmqEventPublisher(EventPublisher):
 
                 seq = next(self._seq_gen)
 
-                payload = self._pack.encode(event)
+                payload = self._pack.encode(to_wire_batch(event, self._wire_format))
                 seq_bytes = seq.to_bytes(8, "big")
                 self._pub.send_multipart((self._topic_bytes, seq_bytes, payload))
 
@@ -744,8 +959,12 @@ class ZmqEventPublisher(EventPublisher):
         it fits), each with its own sequence number and replay entry, and
         count them (SGLANG_KV_EVENTS_PUBLISH_STATS)."""
         t0 = time.perf_counter()
+        # Caps and splits measure the bytes actually sent: the wire batch.
         payloads, n_split = cap_event_batch(
-            event, self._cap_bytes, self._cap_events, self._pack.encode
+            to_wire_batch(event, self._wire_format),
+            self._cap_bytes,
+            self._cap_events,
+            self._pack.encode,
         )
         for payload in payloads:
             seq = next(self._seq_gen)
@@ -774,18 +993,26 @@ class ZmqEventPublisher(EventPublisher):
             return
         client_id, _, start_seq_bytes = frame
         start_seq = int.from_bytes(start_seq_bytes, "big")
+        # The EI wire keeps the replay framing EI's consumers read (the router's
+        # KV-event bridge): (seq, payload) after the delimiter, no topic frame.
+        legacy = self._wire_format == KV_EVENTS_WIRE_EI_ARRAY
 
         for seq, buf in self._buffer:
             if seq >= start_seq:
-                # [identity, empty_delim, seq_bytes, payload]
-                # (identity, empty_delim) are stripped off by the router
-                # receiving payload is (seq_bytes, payload)
+                if legacy:
+                    self._replay.send_multipart(
+                        (client_id, b"", seq.to_bytes(8, "big"), buf)
+                    )
+                    continue
+                # Subscribers receive the same topic, sequence, and payload as live events.
                 self._replay.send_multipart(
-                    (client_id, b"", seq.to_bytes(8, "big"), buf)
+                    (client_id, b"", self._topic_bytes, seq.to_bytes(8, "big"), buf)
                 )
         # Send end of sequence marker
-        # receiving payload is (-1, b""")
-        self._replay.send_multipart((client_id, b"", self.END_SEQ, b""))
+        if legacy:
+            self._replay.send_multipart((client_id, b"", self.END_SEQ, b""))
+        else:
+            self._replay.send_multipart((client_id, b"", b"", self.END_SEQ, b""))
 
     @staticmethod
     def offset_endpoint_port(
@@ -832,6 +1059,11 @@ class KVEventsConfig(BaseModel):
     """The zmq endpoint to use for publishing kv events.
     """
 
+    bind: Optional[bool] = None
+    """Bind (true) or connect (false) the PUB socket. When unset, infer from
+    the endpoint as before. Use true to bind a concrete address such as loopback.
+    """
+
     replay_endpoint: Optional[str] = None
     """The zmq endpoint to use for replaying kv events.
     """
@@ -855,10 +1087,22 @@ class KVEventsConfig(BaseModel):
     this topic to receive events.
     """
 
+    format: Literal["default", "dynamo"] = "default"
+    """The event format. "default" is the SGLang format. "dynamo" is the format
+    the Dynamo KV router reads: block hashes also depend on extra_key and
+    cache_salt (see ``namespaced_block_hash``), and BlockStored has lora_name.
+    """
+
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVEventsConfig":
         """Parse the CLI value for the event publisher config."""
         return KVEventsConfig.model_validate_json(cli_value)
+
+
+def uses_dynamo_format(kv_events_config: Optional[str]) -> bool:
+    if not kv_events_config:
+        return False
+    return KVEventsConfig.from_cli(kv_events_config).format == "dynamo"
 
 
 class EventPublisherFactory:
@@ -880,6 +1124,8 @@ class EventPublisherFactory:
             return NullEventPublisher()
         config = KVEventsConfig.from_cli(config)
         config_dict = config.model_dump()
+        # The cache event recorder uses the format. The publisher does not accept it.
+        config_dict.pop("format")
 
         kind = config_dict.pop("publisher", "null")
         try:

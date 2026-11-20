@@ -1,14 +1,14 @@
-# Adapted from SGLang python/sglang/srt/mem_cache/unified_cache/components/__init__.py (commit 9a489f8d2f), modified for evolving-infra.
-from decoupled_engine.srt.mem_cache.unified_cache.components.full_component import FullComponent
-from decoupled_engine.srt.mem_cache.unified_cache.components.mamba_component import MambaComponent
-from decoupled_engine.srt.mem_cache.unified_cache.components.swa_component import SWAComponent
-from decoupled_engine.srt.mem_cache.unified_cache.components.tree_component import (
+# Adapted from SGLang python/sglang/srt/mem_cache/unified_cache/components/__init__.py (commit 297e54fd10), modified for evolving-infra.
+from decoupled_engine.srt.mem_cache.unified_cache.components.base import (
     _NUM_COMPONENT_TYPES,
     BASE_COMPONENT_TYPE,
     CacheTransferPhase,
     ComponentData,
     ComponentType,
     EvictLayer,
+    ExternalLinkerLoadPhase,
+    InternalStateBackup,
+    LinkerTransferPhase,
     LRURefreshPhase,
     PrepareLoadBackResult,
     PreparePrefetchResult,
@@ -17,11 +17,17 @@ from decoupled_engine.srt.mem_cache.unified_cache.components.tree_component impo
     next_component_uuid,
     peek_time_counter,
 )
+from decoupled_engine.srt.mem_cache.unified_cache.components.full import FullComponent
+from decoupled_engine.srt.mem_cache.unified_cache.components.mamba import MambaComponent
+from decoupled_engine.srt.mem_cache.unified_cache.components.swa import SWAComponent
 
 __all__ = [
     "BASE_COMPONENT_TYPE",
     "ComponentData",
     "ComponentType",
+    "ExternalLinkerLoadPhase",
+    "InternalStateBackup",
+    "LinkerTransferPhase",
     "EvictLayer",
     "FullComponent",
     "CacheTransferPhase",

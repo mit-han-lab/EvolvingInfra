@@ -66,24 +66,31 @@ def build_kv_args(scheduler: Scheduler, draft_token_to_kv_pool) -> KVArgs:
     from decoupled_engine.srt.disaggregation.prefill import _transfer_start_layer
     from decoupled_engine.srt.disaggregation.utils import (
         build_kv_layer_ids,
+        get_kv_transfer_buf_infos,
+        get_pd_kv_layout,
         is_mla_backend,
         setup_state_kv_args,
     )
-    from decoupled_engine.srt.runtime_context import get_disagg
+    from decoupled_engine.srt.runtime_context import get_device, get_disagg, get_parallel
 
     token_to_kv_pool = scheduler.token_to_kv_pool_allocator.get_kvcache()
+    parallel = get_parallel()
     kv_args = KVArgs()
-    kv_args.engine_rank = scheduler.ps.tp_rank
-    kv_args.pp_rank = scheduler.ps.pp_rank
-    kv_args.system_dp_rank = scheduler.ps.dp_rank
+    kv_args.engine_rank = parallel.tp_rank
+    kv_args.pp_rank = parallel.pp_rank
+    kv_args.system_dp_rank = parallel.dp_rank
+    # No Rust /route registry on symmetric workers in practice; mirror prefill.
+    rust_server = getattr(scheduler, "rust_server", None)
+    kv_args.rust_http_port = rust_server.http_port if rust_server is not None else None
     kv_args.kv_cache_dtype_str = scheduler.tp_worker.model_runner.kv_cache_dtype_str
+    # v0.5.23: the KV byte layout both sides must share (DSv4 only; None else).
+    kv_args.kv_layout = get_pd_kv_layout(token_to_kv_pool)
     kv_args.prefill_start_layer = _transfer_start_layer(
         pool=token_to_kv_pool,
         hf_text_config=scheduler.model_config.hf_text_config,
     )
-    kv_args.mla_compression_ratios = None
-    kv_data_ptrs, kv_data_lens, kv_item_lens = (
-        token_to_kv_pool.get_contiguous_buf_infos()
+    kv_data_ptrs, kv_data_lens, kv_item_lens = get_kv_transfer_buf_infos(
+        token_to_kv_pool
     )
     # Layer-sharded pools carry end_layer; others do not (same read as prefill.py).
     kv_args.prefill_end_layer = getattr(token_to_kv_pool, "end_layer", None)
@@ -101,6 +108,7 @@ def build_kv_args(scheduler: Scheduler, draft_token_to_kv_pool) -> KVArgs:
     kv_args.kv_data_ptrs = kv_data_ptrs
     kv_args.kv_data_lens = kv_data_lens
     kv_args.kv_item_lens = kv_item_lens
+    kv_args.num_draft_entries = num_draft_entries
     kv_args.kv_layer_ids = build_kv_layer_ids(
         token_to_kv_pool=token_to_kv_pool,
         draft_token_to_kv_pool=draft_token_to_kv_pool,
@@ -115,7 +123,9 @@ def build_kv_args(scheduler: Scheduler, draft_token_to_kv_pool) -> KVArgs:
         scheduler.disagg_metadata_buffers.get_buf_infos()
     )
     kv_args.ib_device = get_disagg().disaggregation_ib_device
-    kv_args.gpu_id = scheduler.ps.gpu_id
+    kv_args.gpu_id = get_device().gpu_id
+    # v0.5.23: also sets kv_args.mla_compression_ratios (the DSv4 per-ratio
+    # bucket list, None otherwise), which EI set here before.
     setup_state_kv_args(
         kv_args,
         token_to_kv_pool,
@@ -123,11 +133,6 @@ def build_kv_args(scheduler: Scheduler, draft_token_to_kv_pool) -> KVArgs:
         scheduler.model_config.num_hidden_layers,
         req_to_token_pool=scheduler.req_to_token_pool,
     )
-    from decoupled_engine.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
-
-    if isinstance(token_to_kv_pool, DeepSeekV4TokenToKVPool):
-        # DSv4's KVCache is organized by compression-ratio bucket, not by layer.
-        kv_args.mla_compression_ratios = list(token_to_kv_pool.compression_ratios)
     return kv_args
 
 

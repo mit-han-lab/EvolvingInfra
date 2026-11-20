@@ -1,7 +1,10 @@
-# Adapted from SGLang python/sglang/srt/mem_cache/kv_cache_builder.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/mem_cache/kv_cache_builder.py (commit 297e54fd10), modified for evolving-infra.
 from __future__ import annotations
 
 import logging
+
+from decoupled_engine.srt.layers.dp_attention import get_dp_tp_group
+from decoupled_engine.srt.runtime_context import get_exec
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,7 @@ from typing import TYPE_CHECKING
 
 from decoupled_engine.srt.arg_groups.overrides import resolving_view
 from decoupled_engine.srt.configs.hybrid_arch import (
+    glm5_next_config,
     hybrid_gdn_config,
     hybrid_lightning_config,
     kimi_linear_config,
@@ -36,8 +40,15 @@ from decoupled_engine.srt.configs.model_config import ModelImpl, is_deepseek_dsa
 from decoupled_engine.srt.environ import envs
 from decoupled_engine.srt.hardware_backend.mlx.runtime import use_mlx
 from decoupled_engine.srt.managers.mm_schedule import init_mm_embedding_cache
+from decoupled_engine.srt.mem_cache.allocator.swa import is_swa_req_ring
+from decoupled_engine.srt.mem_cache.base_swa_memory_pool import BaseSWAKVPool
 from decoupled_engine.srt.mem_cache.cache_init_params import CacheInitParams
-from decoupled_engine.srt.mem_cache.memory_pool import MHATokenToKVPool
+from decoupled_engine.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
+from decoupled_engine.srt.mem_cache.events import KvEventLoraNames
+from decoupled_engine.srt.mem_cache.hicache_auto_size import auto_size_hicache
+from decoupled_engine.srt.mem_cache.memory_pool import HybridLinearKVPool, MHATokenToKVPool
+from decoupled_engine.srt.mem_cache.pool_host.base import _WRITE_BACK_STAGING_PAGE_CHUNK
+from decoupled_engine.srt.mem_cache.pool_host.mha import prepare_mha_write_back_staging
 from decoupled_engine.srt.mem_cache.registry import TreeCacheBuildContext, create_tree_cache
 from decoupled_engine.srt.mem_cache.swa_memory_pool import SWAKVPool
 from decoupled_engine.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
@@ -50,42 +61,67 @@ from decoupled_engine.srt.runtime_context import (
     get_parallel,
     get_schedule,
 )
-from decoupled_engine.srt.utils import is_hip
+from decoupled_engine.srt.speculative.base_spec_worker import HiCacheDraftMode
+from decoupled_engine.srt.utils import ceil_align, is_hip, is_npu
 
 if TYPE_CHECKING:
-
-    from torch.distributed import ProcessGroup
-
     from decoupled_engine.srt.configs.model_config import ModelConfig
-    from decoupled_engine.srt.distributed.parallel_state import GroupCoordinator
-    from decoupled_engine.srt.distributed.parallel_state_wrapper import ParallelState
     from decoupled_engine.srt.managers.tp_worker import BaseTpWorker
     from decoupled_engine.srt.server_args import ServerArgs
     from decoupled_engine.srt.speculative.base_spec_worker import HiCacheDraftPlan
     from decoupled_engine.srt.speculative.spec_info import SpeculativeAlgorithm
 
 
-def get_draft_kv_pool(
-    *,
-    draft_worker: BaseTpWorker,
-    spec_algorithm: SpeculativeAlgorithm,
-    server_args: ServerArgs,
-):
-    """Return the draft token-to-KV pool for the current draft worker,
-    or None when no draft KV pool is available."""
-    if draft_worker is None or spec_algorithm.is_ngram():
-        return None
+def prepare_hicache_staging(
+    *, tp_worker: BaseTpWorker, draft_plan: Optional[HiCacheDraftPlan] = None
+) -> None:
+    """Materialize MHA transfer buffers before the final KV budget is measured."""
+    if is_npu():
+        return
+    memory = get_memory()
+    page_size = get_schedule().page_size
+    if memory.hicache_mem_layout != "page_first" or not (
+        memory.enable_hierarchical_cache
+        or get_disagg().disaggregation_decode_retraction_backup == "host_pool"
+    ):
+        return
 
-    # V2 draft workers exist only on their hosting PP stage; other ranks own no
-    # nested draft worker or draft KV pool.
-    if draft_worker.draft_worker is None:
-        return None
+    def prepare(pool, packed_drafts=(), *, sidecar=False):
+        if isinstance(pool, SWAKVPool):
+            prepare(pool.full_kv_pool)
+            prepare(pool.swa_kv_pool, tuple(p.swa_kv_pool for p in packed_drafts))
+        elif isinstance(pool, HybridLinearKVPool):
+            prepare(pool.full_kv_pool, packed_drafts, sidecar=sidecar)
+        elif isinstance(pool, MHATokenToKVPool):
+            # Ratio-based host pools can only shrink with post-capture KV sizing.
+            # Sidecars instead inherit their target host pool's capacity.
+            page_capacity = _WRITE_BACK_STAGING_PAGE_CHUNK
+            if memory.hicache_size <= 0 and not sidecar:
+                page_capacity = int(pool.size * memory.hicache_ratio) // page_size + 1
+            staging = prepare_mha_write_back_staging(
+                pool.get_device_pool_infos()[0].buffer_info,
+                layer_num=pool.layer_num + len(packed_drafts),
+                page_size=page_size,
+                page_capacity=page_capacity,
+                staging=pool.hicache_write_back_staging,
+            )
+            pool.hicache_write_back_staging = staging
+            if staging is not None:
+                logger.info(
+                    "HiCache staging prepared before KV sizing: %.1f MiB, %d layers",
+                    sum(buffer.nbytes for buffer in staging) / (1 << 20),
+                    pool.layer_num + len(packed_drafts),
+                )
 
-    if resolving_view(server_args).enable_multi_layer_eagle:
-        draft_runner = draft_worker.draft_worker.draft_runner_list[0]
-    else:
-        draft_runner = draft_worker.draft_worker.draft_runner
-    return draft_runner.token_to_kv_pool
+    runner = tp_worker.model_runner
+    prepare(runner.token_to_kv_pool, runner.mtp_draft_device_pools)
+    if draft_plan is not None and draft_plan.mode == HiCacheDraftMode.SIDECAR:
+        for pool in draft_plan.device_pools:
+            # SWA sidecars follow only the draft's SWA component.
+            prepare(
+                pool.swa_kv_pool if isinstance(pool, BaseSWAKVPool) else pool,
+                sidecar=True,
+            )
 
 
 def maybe_register_hicache_draft(
@@ -93,8 +129,20 @@ def maybe_register_hicache_draft(
     tree_cache,
     draft_plan: HiCacheDraftPlan,
 ) -> None:
-    from decoupled_engine.srt.speculative.base_spec_worker import HiCacheDraftMode
+    if draft_plan.mode == HiCacheDraftMode.FUSED:
+        from decoupled_engine.srt.mem_cache.hybrid_cache.hybrid_pool_assembler import (
+            validate_fused_hicache_draft,
+        )
 
+        validate_fused_hicache_draft(
+            draft_device_pools=draft_plan.device_pools, tree_cache=tree_cache
+        )
+        logger.info(
+            "HiCache fused draft KV uses the target FULL page envelopes "
+            "(%d draft layers); no draft host sidecar is allocated.",
+            draft_plan.device_pools[0].layer_num,
+        )
+        return
     if draft_plan.mode != HiCacheDraftMode.SIDECAR:
         return
 
@@ -116,9 +164,14 @@ def maybe_register_hicache_draft(
 
 
 # Host slots a backup-only retraction pool gets, as a fraction of the device
-# pool. Sized well under 1.0 because a retraction burst touches a fraction of
-# the device tokens; overflow aborts the request rather than pre-reserving.
+# pool, with a floor large enough for one maximum-length request.
 BACKUP_ONLY_HICACHE_RATIO = 0.2
+
+
+def decode_retraction_max_tokens(req_to_token_pool, kv_cache) -> int:
+    return ceil_align(
+        min(req_to_token_pool.max_context_len - 1, kv_cache.size), kv_cache.page_size
+    )
 
 
 def uses_ssm_state(model_config) -> bool:
@@ -129,6 +182,7 @@ def uses_ssm_state(model_config) -> bool:
         or mamba2_config(model_config) is not None
         or (spec.uses_mamba_radix_cache if spec is not None else False)
         or kimi_linear_config(model_config) is not None
+        or glm5_next_config(model_config) is not None
         or hybrid_lightning_config(model_config) is not None
     )
 
@@ -193,7 +247,7 @@ def _validate_decode_radix_cache_compatibility(
                 "currently supports only the CUDA non-unified physical KV path."
             )
 
-        from decoupled_engine.kernels.ops.attention.dsv4.unified_kv_kernels.env_gate import (
+        from decoupled_engine.srt.layers.attention.dsv4.unified_kv_gate import (
             is_unified_kv_triton,
         )
 
@@ -397,6 +451,7 @@ def resolve_decode_retraction_backup(*, tp_worker: BaseTpWorker) -> str:
     fields = {}
 
     backend = disagg.disaggregation_decode_retraction_backup
+    unified_hybrid_swa = memory.enable_unified_memory and tp_worker.is_hybrid_swa
     if backend is None:
         kv_cache = tp_worker.get_memory_pool()[1].get_kvcache()
         full_tokens_per_layer = (
@@ -404,13 +459,22 @@ def resolve_decode_retraction_backup(*, tp_worker: BaseTpWorker) -> str:
             if tp_worker.is_hybrid_swa
             else None
         )
-        # Host-pool retraction transfers full and sliding-window components
-        # only, so a model with recurrent state stays on cpu_tensor.
-        supports_host_pool = not uses_ssm_state(
-            tp_worker.model_runner.model_config
-        ) and (
-            isinstance(kv_cache, MHATokenToKVPool)
-            or (isinstance(kv_cache, SWAKVPool) and full_tokens_per_layer > 0)
+        draft_pools = tp_worker.model_runner.mtp_draft_device_pools
+        unified_draft_host_pool_supported = (
+            not memory.enable_unified_memory
+            or not draft_pools
+            or tp_worker.model_runner.spec_algorithm.is_dspark()
+        )
+        # Host-pool retraction has no recurrent-state sidecar, so a model with
+        # recurrent state stays on cpu_tensor.
+        supports_host_pool = (
+            unified_draft_host_pool_supported
+            and not unified_hybrid_swa
+            and not uses_ssm_state(tp_worker.model_runner.model_config)
+            and (
+                isinstance(kv_cache, MHATokenToKVPool)
+                or (isinstance(kv_cache, SWAKVPool) and full_tokens_per_layer > 0)
+            )
         )
         schedule = get_schedule()
         priority_preemption = (
@@ -435,21 +499,34 @@ def resolve_decode_retraction_backup(*, tp_worker: BaseTpWorker) -> str:
 
     if memory.hicache_ratio is None:
         # Only a decode server reaches resolution with the ratio unset. A
-        # backup-only pool can be small: retractions that overflow it abort their
-        # request instead of crashing the scheduler. Sharing the pool with
-        # HiCache keeps the standard default.
+        # backup-only pool fits at least one runnable request. Sharing the pool
+        # with prefix caching keeps the standard HiCache default.
         if backend == "host_pool" and not memory.enable_hierarchical_cache:
-            fields["hicache_ratio"] = BACKUP_ONLY_HICACHE_RATIO
+            ratio = BACKUP_ONLY_HICACHE_RATIO
+            if memory.hicache_size == 0:
+                req_pool, allocator = tp_worker.get_memory_pool()
+                kv_pool = allocator.get_kvcache()
+                min_tokens = decode_retraction_max_tokens(req_pool, kv_pool)
+                if disagg.disaggregation_decode_host_receive_threshold < 1:
+                    # One request can receive while another is retracted.
+                    min_tokens *= 2
+                ratio = max(ratio, min_tokens / kv_pool.size)
+            fields["hicache_ratio"] = ratio
         else:
             fields["hicache_ratio"] = 2.0
 
     if backend == "cpu_tensor" and disagg.disaggregation_mode == "decode":
         # Pools that cannot honor the cpu_tensor contract (DSV4 unified_kv /
         # hisparse / NPU layouts, online-C128 MTP banks) must reject at boot,
-        # not at the first retraction mid-serving.
-        kv_cache = tp_worker.get_memory_pool()[1].get_kvcache()
+        # not at the first retraction mid-serving. A pool that upstream
+        # recomputes on the prefill instead (DeepSeek-V4,
+        # common.dsv4_needs_rebootstrap) never takes a cpu_tensor backup.
+        from decoupled_engine.srt.mem_cache.common import dsv4_needs_rebootstrap
+
+        allocator = tp_worker.get_memory_pool()[1]
+        kv_cache = allocator.get_kvcache()
         guard = getattr(kv_cache, "_retraction_backup_guard", None)
-        if guard is not None:
+        if guard is not None and not dsv4_needs_rebootstrap(allocator):
             guard()
 
     source = "kv_cache_builder.decode_retraction"
@@ -482,13 +559,45 @@ def _enable_skip_d_role_kv_events(
     logger.warning("SGLANG_SYMMETRIC_SKIP_D_ROLE_KV_EVENTS has no effect: %s", reason)
 
 
-def _sidecar_draft_device_pools(draft_plan) -> tuple:
-    """Device pools of a SIDECAR HiCache draft plan (EAGLE3), else ()."""
-    from decoupled_engine.srt.speculative.base_spec_worker import HiCacheDraftMode
+def validate_decode_radix_cache(
+    *,
+    model_config: ModelConfig,
+    token_to_kv_pool: object,
+    is_hybrid_swa: bool,
+    enable_hierarchical_cache: bool,
+) -> None:
+    """Reject decode-side radix cache on KV layouts its prefix reuse cannot serve.
 
-    if getattr(draft_plan, "mode", None) != HiCacheDraftMode.SIDECAR:
-        return ()
-    return tuple(getattr(draft_plan, "device_pools", ()) or ())
+    SWA models go through the unified tree, whose component pools preserve the
+    full-attention prefix while the SWA window is transferred fresh. Hybrid
+    SSM/KDA uses UnifiedRadixCache's Mamba component (match + lock + CoW), the
+    same path as colocated serving.
+    """
+    if not is_hybrid_swa:
+        return
+    if enable_hierarchical_cache:
+        raise ValueError(
+            "--disaggregation-decode-enable-radix-cache with sliding "
+            "window attention (SWA) models currently supports only "
+            "device-resident cache and is incompatible with "
+            "--enable-hierarchical-cache."
+        )
+    # DeepSeek-V4 qualifies only on the unified KV layout (bf16 or fp8 rows): its
+    # SWA ring and c128 state are request-scoped and always transferred whole, so
+    # the tree shares only the compressed full-attention pages.
+    if getattr(model_config, "is_deepseek_v4_arch", False) and not getattr(
+        token_to_kv_pool, "_unified_kv", False
+    ):
+        raise ValueError(
+            "--disaggregation-decode-enable-radix-cache with DeepSeek-V4 "
+            "requires the unified KV layout "
+            "(SGLANG_HACK_FLASHMLA_BACKEND=unified_kv_triton)."
+        )
+    if getattr(model_config, "is_hybrid_swa_compress", False):
+        raise ValueError(
+            "--disaggregation-decode-enable-radix-cache does not support "
+            "SWA-compress models (e.g. Gemma4 / MiMo-V2) yet."
+        )
 
 
 def build_kv_cache(
@@ -498,17 +607,15 @@ def build_kv_cache(
     tp_worker: BaseTpWorker,
     page_size: int,
     spec_algorithm: SpeculativeAlgorithm,
-    attn_tp_cpu_group: ProcessGroup,
-    tp_cpu_group: ProcessGroup,
-    attn_cp_cpu_group: ProcessGroup,
     enable_metrics: bool,
     enable_kv_cache_events: bool,
-    ps: ParallelState,
-    tp_group: GroupCoordinator,
-    pp_group: GroupCoordinator,
     enable_hierarchical_cache: bool,
     hicache_draft_plan: Optional[HiCacheDraftPlan] = None,
+    dynamo_kv_event_format: bool = False,
+    kv_event_lora_names: Optional[KvEventLoraNames] = None,
+    draft_swa_window: int = 0,
 ) -> KVCacheBuildResult:
+    parallel = get_parallel()
     sliding_window_size: Optional[int] = None
     full_tokens_per_layer: Optional[int] = None
     swa_tokens_per_layer: Optional[int] = None
@@ -517,7 +624,11 @@ def build_kv_cache(
     )
 
     # Hybrid memory pool
-    is_hybrid_swa = tp_worker.is_hybrid_swa
+    token_to_kv_pool = tp_worker.model_runner.token_to_kv_pool
+    is_hybrid_swa = tp_worker.is_hybrid_swa and (
+        not isinstance(token_to_kv_pool, DeepSeekV4TokenToKVPool)
+        or token_to_kv_pool.needs_paged_swa_allocator
+    )
     is_hybrid_ssm = uses_ssm_state(tp_worker.model_runner.model_config)
     is_dsa = is_deepseek_dsa(model_config.hf_config)
 
@@ -527,9 +638,22 @@ def build_kv_cache(
         full_tokens_per_layer, swa_tokens_per_layer = (
             tp_worker.get_tokens_per_layer_info()
         )
+    assert draft_swa_window == 0 or sliding_window_size is not None, (
+        "a fused draft reads an swa sub-pool this target does not build"
+    )
 
     req_to_token_pool, token_to_kv_pool_allocator = tp_worker.get_memory_pool()
     mtp_draft_device_pools = tp_worker.model_runner.mtp_draft_device_pools
+    # SWA the tree does not own must not gate prefix matching: a per-request ring,
+    # or paged SWA beside the target's encoder-replay request window, which then
+    # only the draft uses.
+    swa_gates_prefix_match = not (
+        is_swa_req_ring(token_to_kv_pool_allocator)
+        or (
+            isinstance(token_to_kv_pool, DeepSeekV4TokenToKVPool)
+            and token_to_kv_pool.request_window is not None
+        )
+    )
 
     retraction_backup = resolve_decode_retraction_backup(tp_worker=tp_worker)
 
@@ -546,15 +670,27 @@ def build_kv_cache(
         get_disagg().disaggregation_decode_enable_radix_cache
         and get_disagg().disaggregation_mode == "decode"
     ):
-        _validate_decode_radix_cache_compatibility(
-            mode=get_disagg().disaggregation_decode_radix_cache_mode,
-            device=resolving_view(server_args).device,
-            model_config=model_config,
-            spec_algorithm=spec_algorithm,
-            is_hybrid_swa=is_hybrid_swa,
-            is_hybrid_ssm=is_hybrid_ssm,
-            enable_hierarchical_cache=enable_hierarchical_cache,
-        )
+        decode_radix_cache_mode = get_disagg().disaggregation_decode_radix_cache_mode
+        if decode_radix_cache_mode in ("content_only", "window_host"):
+            # EI DSv4 content-only / window-residency decode radix: EI's scope
+            # checks. full_state keeps upstream's validation (which now also
+            # allows EAGLE, #40857, and hybrid SSM).
+            _validate_decode_radix_cache_compatibility(
+                mode=decode_radix_cache_mode,
+                device=resolving_view(server_args).device,
+                model_config=model_config,
+                spec_algorithm=spec_algorithm,
+                is_hybrid_swa=is_hybrid_swa,
+                is_hybrid_ssm=is_hybrid_ssm,
+                enable_hierarchical_cache=enable_hierarchical_cache,
+            )
+        else:
+            validate_decode_radix_cache(
+                model_config=model_config,
+                token_to_kv_pool=token_to_kv_pool,
+                is_hybrid_swa=is_hybrid_swa,
+                enable_hierarchical_cache=enable_hierarchical_cache,
+            )
         if is_hybrid_swa:
             logger.warning(
                 "EXPERIMENTAL: decode radix cache on a hybrid-SWA model; "
@@ -578,57 +714,79 @@ def build_kv_cache(
             else token_to_kv_pool_allocator.page_size
         ),
         is_eagle=spec_algorithm.is_eagle(),
-        tp_cache_group=(
-            attn_tp_cpu_group if get_parallel().enable_dp_attention else tp_cpu_group
-        ),
-        attn_cp_cache_group=attn_cp_cpu_group,
-        attn_tp_cache_group=attn_tp_cpu_group,
-        pp_cache_group=pp_group.cpu_group,
+        tp_cache_group=get_dp_tp_group().cpu_group,
+        attn_cp_cache_group=parallel.attn_cp_group.cpu_group,
+        attn_tp_cache_group=parallel.attn_tp_group.cpu_group,
+        pp_cache_group=parallel.pp_group.cpu_group,
         eviction_policy=get_memory().radix_eviction_policy,
+        eviction_policy_config=get_memory().radix_eviction_policy_config,
         enable_metrics=enable_metrics,
         enable_kv_cache_events=enable_kv_cache_events,
+        dynamo_kv_event_format=dynamo_kv_event_format,
+        kv_event_lora_names=kv_event_lora_names,
         enable_session_radix_cache=get_memory().enable_session_radix_cache,
         enable_kv_session_retention=get_memory().enable_kv_session_retention,
-        enable_mamba_extra_buffer=server_args.enable_mamba_extra_buffer(),
-        enable_mamba_extra_buffer_lazy=server_args.enable_mamba_extra_buffer_lazy(),
-        pp_rank=ps.pp_rank,
-        pp_size=ps.pp_size,
+        enable_mamba_extra_buffer=get_exec().mamba.enable_mamba_extra_buffer,
+        enable_mamba_extra_buffer_lazy=get_exec().mamba.enable_mamba_extra_buffer_lazy,
+        decoder_swa_bounded_replay=get_exec().features.enable_decoder_swa_bounded_replay,
+        pp_rank=parallel.pp_rank,
+        pp_size=parallel.pp_size,
+        attn_cp_rank=parallel.attn_cp_rank,
+        attn_cp_size=parallel.attn_cp_size,
         chunked_prefill_size=effective_chunked_prefill_size,
         sliding_window_size=sliding_window_size,
+        swa_gates_prefix_match=swa_gates_prefix_match,
+        draft_swa_window=draft_swa_window,
         mtp_draft_device_pools=mtp_draft_device_pools,
-        hicache_sidecar_draft_device_pools=_sidecar_draft_device_pools(
-            hicache_draft_plan
+        mtp_draft_mamba_pools=tp_worker.model_runner.mtp_draft_mamba_pools,
+        # Also read by EI's MLA host dedup C2g fan-out through the
+        # CacheInitParams.hicache_sidecar_draft_device_pools alias.
+        sidecar_draft_device_pools=(
+            hicache_draft_plan.device_pools
+            if hicache_draft_plan is not None
+            and hicache_draft_plan.mode == HiCacheDraftMode.SIDECAR
+            else ()
         ),
     )
-
-    tree_cache = create_tree_cache(
-        TreeCacheBuildContext(
-            server_args=server_args,
-            params=params,
-            is_hybrid_swa=is_hybrid_swa,
-            full_tokens_per_layer=full_tokens_per_layer,
-            is_hybrid_ssm=is_hybrid_ssm,
-            is_dsa=is_dsa,
-            enable_hierarchical_cache=enable_hierarchical_cache,
-            disable_radix_cache=disable_radix_cache,
-            effective_chunked_prefill_size=effective_chunked_prefill_size,
-            tp_worker=tp_worker,
-            model_config=model_config,
-            tp_size=ps.tp_size,
-            tp_rank=ps.tp_rank,
-            tp_group=tp_group,
+    if params.swa_retain_window != sliding_window_size:
+        logger.info(
+            "SWA eviction keeps %d tokens back: the fused draft reads past the "
+            "%d-token window.",
+            params.swa_retain_window,
+            sliding_window_size,
         )
+
+    tree_context = TreeCacheBuildContext(
+        server_args=server_args,
+        params=params,
+        is_hybrid_swa=is_hybrid_swa,
+        full_tokens_per_layer=full_tokens_per_layer,
+        is_hybrid_ssm=is_hybrid_ssm,
+        is_dsa=is_dsa,
+        enable_hierarchical_cache=enable_hierarchical_cache,
+        disable_radix_cache=disable_radix_cache,
+        tp_worker=tp_worker,
+        model_config=model_config,
+        tp_size=parallel.tp_size,
+        tp_rank=parallel.tp_rank,
+        tp_group=parallel.tp_group,
     )
+    with auto_size_hicache(
+        params,
+        hicache_draft_plan,
+        enabled=enable_hierarchical_cache or retraction_backup == "host_pool",
+    ):
+        tree_cache = create_tree_cache(tree_context)
 
-    # Native EAGLE3 validates that its separate draft sidecar participates in
-    # every restore. Attach it before validating the completed cache layout.
-    if (
-        enable_hierarchical_cache or retraction_backup == "host_pool"
-    ) and hicache_draft_plan is not None:
-        maybe_register_hicache_draft(
-            tree_cache=tree_cache,
-            draft_plan=hicache_draft_plan,
-        )
+        # Native EAGLE3 validates that its separate draft sidecar participates in
+        # every restore. Attach it before validating the completed cache layout.
+        if (
+            enable_hierarchical_cache or retraction_backup == "host_pool"
+        ) and hicache_draft_plan is not None:
+            maybe_register_hicache_draft(
+                tree_cache=tree_cache,
+                draft_plan=hicache_draft_plan,
+            )
 
     if (
         get_disagg().disaggregation_mode == "symmetric"
@@ -680,7 +838,9 @@ def build_kv_cache(
         get_disagg().disaggregation_mode == "symmetric"
         and envs.SGLANG_SYMMETRIC_SKIP_D_ROLE_KV_EVENTS.get()
     ):
-        _enable_skip_d_role_kv_events(tree_cache, ps.tp_rank, enable_kv_cache_events)
+        _enable_skip_d_role_kv_events(
+            tree_cache, parallel.tp_rank, enable_kv_cache_events
+        )
 
     if (
         get_disagg().disaggregation_decode_enable_radix_cache

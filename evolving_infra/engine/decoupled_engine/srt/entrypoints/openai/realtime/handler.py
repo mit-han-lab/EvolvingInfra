@@ -17,6 +17,7 @@ from decoupled_engine.srt.entrypoints.openai.transcription_adapters.base import 
     TranscriptionAdapter,
 )
 from decoupled_engine.srt.managers.tokenizer_manager import TokenizerManager
+from decoupled_engine.srt.runtime_context import get_serving
 from decoupled_engine.srt.server_args import ServerArgs
 from decoupled_engine.srt.utils import random_uuid
 
@@ -85,7 +86,7 @@ async def handle_realtime_transcription(
             websocket,
             "too_many_sessions",
             f"Maximum concurrent sessions reached "
-            f"({server_args.asr_max_concurrent_sessions}).",
+            f"({get_serving().asr_max_concurrent_sessions}).",
             error_type="rate_limit_exceeded",
         )
         return

@@ -13,6 +13,7 @@ import time
 import torch
 
 from decoupled_engine.srt.environ import envs
+from decoupled_engine.srt.runtime_context import get_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +40,8 @@ class NextBatchHostPrefetch:
             and not scheduler.is_hybrid_swa
             and not scheduler.is_hybrid_ssm
             and not scheduler.enable_lora
-            and scheduler.ps.pp_size == 1
-            and scheduler.ps.attn_cp_size == 1
+            and get_parallel().pp_size == 1
+            and get_parallel().attn_cp_size == 1
             and scheduler.chunked_prefill_size
             and self.max_tokens > 0
         ):
@@ -99,7 +100,7 @@ class NextBatchHostPrefetch:
             req = s.chunked_req
             budget -= min(
                 budget,
-                len(req.full_untruncated_fill_ids) - req.extend_range.end,
+                len(req.full_untruncated_fill_ids) - req.extend_end,
             )
         # max_prefill_bs is a delayer statistic (normally zero), not an
         # admission limit. Request-pool capacity includes in-flight PD rows.
@@ -114,16 +115,22 @@ class NextBatchHostPrefetch:
             if req.finished() or req.pending_bootstrap or req.beam_group is not None:
                 continue
             if s.enable_hicache_storage:
-                if not self.cache.check_prefetch_progress(req.rid):
+                if not self.cache.check_prefetch_progress(req.cache_request_handle):
                     continue
-                storage_hit = self.cache.pop_prefetch_loaded_tokens(req.rid)
+                # As the admission loop does (scheduler.py): the span keeps the
+                # L3 start for the L2/L3 cache attribution.
+                storage_hit, storage_start = self.cache.pop_prefetch_loaded_span(
+                    req.cache_request_handle
+                )
                 if storage_hit:
                     req.storage_hit_length = storage_hit
+                    req.storage_hit_start = storage_start
+                    req.host_hit_is_storage = False
             req.init_next_round_input(self.cache)
             host_hit = req.host_hit_length
             uncached = max(
                 1,
-                len(req.full_untruncated_fill_ids) - len(req.prefix_indices) - host_hit,
+                len(req.full_untruncated_fill_ids) - req.prefix_len - host_hit,
             )
             budget -= min(
                 budget, ((uncached + s.page_size - 1) // s.page_size) * s.page_size

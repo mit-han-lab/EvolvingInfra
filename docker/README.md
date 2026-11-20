@@ -43,7 +43,7 @@ and `rustup` for the router. These are the steps of
 # Engine, into the Python that `python3` runs. Where upstream SGLang is installed (as in the base
 # image), remove it first: pip uninstall -y sglang sgl-router sglang-router
 PIP_CONSTRAINT= pip install -e evolving_infra/engine
-pip install mooncake-transfer-engine-cuda13==0.3.13      # KV transfer; the base image's wheel and version
+pip install mooncake-transfer-engine-cuda13==0.3.13.post1  # KV transfer; the base image's wheel and version
 pip install --no-deps "flashinfer-cubin==$(pip show flashinfer_python | awk '/^Version/{print $2}')" \
   --index-url https://flashinfer.ai/whl                  # FlashInfer's prebuilt kernels
 # Where flashinfer-jit-cache is installed, its version must match FlashInfer's
@@ -74,12 +74,11 @@ The image also rebuilds Mooncake with a patch that only gVisor needs ([Mooncake 
 
 ## Base image
 
-The image starts from `docker.io/lmsysorg/sglang:v0.5.20-cu130`, the base the benchmarks run on. That base
-already has the hard parts at matching versions: CUDA 13 and its toolkit, PyTorch, `sglang-kernel`,
-FlashInfer, DeepGEMM, TileLang, the Mooncake wheel (`mooncake-transfer-engine-cuda13==0.3.13`),
-NCCL / RDMA user space and a Rust toolchain.
-Starting from it keeps the build identical to what was measured. Override the base with
-`--build-arg BASE_IMAGE=...`.
+The image starts from `docker.io/lmsysorg/sglang:v0.5.23-cu130`, the SGLang release the engine is based
+on. That base already has the hard parts at matching versions: CUDA 13 and its toolkit, PyTorch,
+`sglang-kernel`, FlashInfer, DeepGEMM, TileLang, the Mooncake wheel
+(`mooncake-transfer-engine-cuda13==0.3.13.post1`), NCCL / RDMA user space and a Rust toolchain.
+Override the base with `--build-arg BASE_IMAGE=...`.
 
 ## Layers
 

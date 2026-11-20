@@ -1,9 +1,12 @@
-# Adapted from SGLang python/sglang/srt/entrypoints/openai/usage_processor.py (commit 9a489f8d2f), modified for evolving-infra.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, final
 
-from decoupled_engine.srt.entrypoints.openai.protocol import PromptTokensDetails, UsageInfo
+from decoupled_engine.srt.entrypoints.openai.protocol import (
+    CompletionTokensDetails,
+    PromptTokensDetails,
+    UsageInfo,
+)
 
 
 @final
@@ -121,4 +124,9 @@ class UsageProcessor:
             total_tokens=prompt_tokens + completion_tokens,
             prompt_tokens_details=details,
             reasoning_tokens=reasoning_tokens,
+            completion_tokens_details=(
+                CompletionTokensDetails(reasoning_tokens=reasoning_tokens)
+                if reasoning_tokens
+                else None
+            ),
         )

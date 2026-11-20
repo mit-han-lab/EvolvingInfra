@@ -1,4 +1,4 @@
-# Adapted from SGLang python/sglang/srt/managers/scheduler_components/load_inquirer.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/managers/scheduler_components/load_inquirer.py (commit 297e54fd10), modified for evolving-infra.
 from __future__ import annotations
 
 import logging
@@ -18,15 +18,15 @@ from decoupled_engine.srt.managers.load_snapshot import (
     SpeculativeMetrics,
     SymmetricLoadMetrics,
 )
-from decoupled_engine.srt.runtime_context import get_lora
+from decoupled_engine.srt.runtime_context import get_lora, get_parallel
 
 if TYPE_CHECKING:
-    from decoupled_engine.srt.distributed.parallel_state_wrapper import ParallelState
     from decoupled_engine.srt.managers.scheduler_components.pool_stats_observer import (
         SchedulerPoolStatsObserver,
     )
     from decoupled_engine.srt.managers.tp_worker import BaseTpWorker
     from decoupled_engine.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
+    from decoupled_engine.srt.mem_cache.base_prefix_cache import CacheRequestHandle
     from decoupled_engine.srt.server_args import ServerArgs
     from decoupled_engine.srt.speculative.spec_info import SpeculativeAlgorithm
 
@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 @dataclass(kw_only=True, slots=True, frozen=True)
 class SchedulerLoadInquirer:
     disaggregation_mode: DisaggregationMode
-    ps: ParallelState
     server_args: ServerArgs
     max_total_num_tokens: int
     max_running_requests: int
@@ -60,6 +59,9 @@ class SchedulerLoadInquirer:
     get_total_prefill_uncached_tokens: Callable
     get_total_prefill_busy_us: Callable
     get_decode_moment_totals: Callable
+    get_waiting_storage_span: (
+        Callable[[CacheRequestHandle], tuple[int, int] | None] | None
+    ) = None
     get_prefill_work: Callable | None = None
     get_prefill_routing: Callable | None = None
     get_retraction_totals: Callable | None = None
@@ -76,15 +78,15 @@ class SchedulerLoadInquirer:
         Args:
             chunk_deduct: extra tokens to subtract from the chunked request's
                 remaining count. At batch-scheduling time the current chunk
-                has been planned but ``prefix_indices`` does not yet include it,
+                has been planned but ``prefix_len`` does not yet include it,
                 so callers pass ``extend_input_len`` here. At load-reporting
-                time ``prefix_indices`` is already up-to-date, so the default
+                time ``prefix_len`` is already up-to-date, so the default
                 0 is correct.
         """
         num_pending_tokens = sum(req.seqlen for req in self.get_waiting_queue())
         if self.get_chunked_req() is not None:
             req = self.get_chunked_req()
-            num_pending_tokens += req.seqlen - len(req.prefix_indices) - chunk_deduct
+            num_pending_tokens += req.seqlen - req.prefix_len - chunk_deduct
         return num_pending_tokens
 
     def get_num_waiting_uncached_tokens(self) -> int:
@@ -96,12 +98,22 @@ class SchedulerLoadInquirer:
         num_tokens = 0
         for req in self.get_waiting_queue():
             if waiting_queue_prefix_matched:
-                num_tokens += max(0, req.seqlen - req.num_matched_prefix_tokens)
+                matched = req.num_matched_prefix_tokens
+                uncached = max(0, req.seqlen - matched)
+                if self.get_waiting_storage_span is not None:
+                    span = self.get_waiting_storage_span(req.cache_request_handle)
+                    if span is not None:
+                        storage_tokens = max(
+                            0, min(span[1], req.seqlen) - max(span[0], matched)
+                        )
+                        uncached -= storage_tokens
             else:
-                num_tokens += int(req.seqlen * cache_miss_rate)
+                # The historical hit rate already includes admitted storage hits.
+                uncached = int(req.seqlen * cache_miss_rate)
+            num_tokens += uncached
         cr = self.get_chunked_req()
         if cr is not None:
-            num_tokens += max(0, cr.seqlen - len(cr.prefix_indices))
+            num_tokens += max(0, cr.seqlen - cr.prefix_len)
         return num_tokens + _held_uncached_tokens(self, cache_miss_rate)
 
     def get_loads(self) -> LoadSnapshot:
@@ -183,6 +195,7 @@ class SchedulerLoadInquirer:
         prefill_bootstrap = prefill_inflight = 0
         decode_prealloc = decode_transfer = decode_retracted = 0
         decode_prealloc_ready = 0
+        num_prealloc_ready_tokens = 0
         retractions = retract_aborts = retract_cap_aborts = 0
         late_d = None
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -196,11 +209,13 @@ class SchedulerLoadInquirer:
             decode_retracted = len(
                 self.get_disagg_decode_prealloc_queue().retracted_queue
             )
-            decode_prealloc_ready = sum(
-                1
+            ready_reqs = [
+                decode_req.req
                 for decode_req in self.get_disagg_decode_prealloc_queue().queue
                 if decode_req.waiting_for_input
-            )
+            ]
+            decode_prealloc_ready = len(ready_reqs)
+            num_prealloc_ready_tokens = sum(req.seqlen for req in ready_reqs)
             if self.get_retraction_totals is not None:
                 totals = self.get_retraction_totals()
                 retractions, retract_aborts, retract_cap_aborts = totals
@@ -252,7 +267,9 @@ class SchedulerLoadInquirer:
             late_d = _sym_selection_late_d(self, late_d, num_total_tokens)
 
         return LoadSnapshot(
-            dp_rank=int(self.ps.dp_rank) if self.ps.dp_rank is not None else 0,
+            dp_rank=int(get_parallel().dp_rank)
+            if get_parallel().dp_rank is not None
+            else 0,
             timestamp=time.time(),
             num_running_reqs=num_running_reqs,
             num_waiting_reqs=num_waiting_reqs,
@@ -260,6 +277,7 @@ class SchedulerLoadInquirer:
             num_used_tokens=num_used_tokens,
             num_total_tokens=num_total_tokens,
             num_active_tokens=num_active_tokens,
+            num_prealloc_ready_tokens=num_prealloc_ready_tokens,
             max_total_num_tokens=self.max_total_num_tokens,
             max_running_requests=self.max_running_requests,
             token_usage=round(kv_token_usage, 4),

@@ -1,4 +1,4 @@
-# Adapted from SGLang python/sglang/srt/entrypoints/grpc_bridge.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/entrypoints/grpc_bridge.py (commit 297e54fd10), modified for evolving-infra.
 """Python-side bridge between the Rust gRPC server and TokenizerManager.
 
 The RuntimeHandle exposes synchronous methods that Rust can call via PyO3
@@ -13,14 +13,14 @@ import logging
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from fastapi.encoders import jsonable_encoder
 from pydantic import ValidationError
 
 from decoupled_engine.srt.arg_groups.overrides import resolving_view
 from decoupled_engine.srt.configs.embedding_model_spec import resolved_embedding_plan
-from decoupled_engine.srt.runtime_context import (
-    get_lora,
-    get_serving,
-)
+from decoupled_engine.srt.runtime_context import get_lora, get_serving
+from decoupled_engine.srt.sampling.watermarking.core import redact_watermark_secrets
+from decoupled_engine.srt.utils.common import build_server_info
 from decoupled_engine.srt.utils.msgspec_utils import msgspec_to_builtins
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,21 @@ class _GrpcRequest:
         return bool(self._is_disconnected_fn())
 
 
+def _media_input_features(mm_processor) -> List[str]:
+    if mm_processor is None or mm_processor.mm_tokens is None:
+        return []
+    tokens = mm_processor.mm_tokens
+    return [
+        feature
+        for feature, token in (
+            ("image_inputs", tokens.image_token),
+            ("video_inputs", tokens.video_token),
+            ("audio_inputs", tokens.audio_token),
+        )
+        if token
+    ]
+
+
 class RuntimeHandle:
     """Thin Python handle that the Rust gRPC server calls into.
 
@@ -83,6 +98,9 @@ class RuntimeHandle:
 
         self.tokenizer_manager.auto_create_handle_loop()
         self._event_loop = self.tokenizer_manager.event_loop
+
+    def set_engine_state_changed_callback(self, callback) -> None:
+        self.tokenizer_manager.set_engine_state_changed_callback(callback)
 
     @property
     def _tm_loop(self):
@@ -235,9 +253,7 @@ class RuntimeHandle:
             return self._openai_serving_classes
 
         from decoupled_engine.srt.entrypoints.openai.serving_chat import OpenAIServingChat
-        from decoupled_engine.srt.entrypoints.openai.serving_classify import (
-            OpenAIServingClassify,
-        )
+        from decoupled_engine.srt.entrypoints.openai.serving_classify import OpenAIServingClassify
         from decoupled_engine.srt.entrypoints.openai.serving_completions import (
             OpenAIServingCompletion,
         )
@@ -411,6 +427,9 @@ class RuntimeHandle:
             "load_format": self.tokenizer_manager.config_value("load_format"),
             "reasoning_parser": self.tokenizer_manager.config_value("reasoning_parser"),
             "tool_call_parser": self.tokenizer_manager.config_value("tool_call_parser"),
+            "disaggregation_mode": self.tokenizer_manager.config_value(
+                "disaggregation_mode"
+            ),
             "model_type": getattr(model_config.hf_config, "model_type", None),
             "architectures": getattr(model_config.hf_config, "architectures", None),
         }
@@ -426,23 +445,32 @@ class RuntimeHandle:
     def get_server_info(self) -> str:
         from decoupled_engine.srt.disaggregation.late_d import describe_late_d
 
-        result: Dict[str, Any] = self.tokenizer_manager.server_args.resolved_dict()
-        result.update(self.scheduler_info)
-        result["kv_events"] = (
-            self.tokenizer_manager.server_args.describe_kv_events_publisher()
+        return json.dumps(
+            msgspec_to_builtins(
+                {
+                    **redact_watermark_secrets(
+                        build_server_info(
+                            self.tokenizer_manager.server_args, self.scheduler_info
+                        )
+                    ),
+                    # Older servers and processors without a modality's placeholder
+                    # drop that media silently, so clients check this list first.
+                    "grpc_features": _media_input_features(
+                        self.tokenizer_manager.mm_processor
+                    ),
+                    # Late D: mode, KV IP and (prefill) router link port; None when off.
+                    "late_d": describe_late_d(self.tokenizer_manager.server_args),
+                }
+            ),
+            default=str,
         )
-        result["late_d"] = describe_late_d(self.tokenizer_manager.server_args)
-        return json.dumps(msgspec_to_builtins(result), default=str)
 
     def health_check(self) -> bool:
-        from decoupled_engine.srt.managers.tokenizer_manager import ServerStatus
+        return self.tokenizer_manager.is_healthy()
 
-        if self.tokenizer_manager.gracefully_exit:
-            return False
-        return self.tokenizer_manager.server_status not in (
-            ServerStatus.Starting,
-            ServerStatus.UnHealthy,
-        )
+    def is_pause(self) -> bool:
+        """Return the tokenizer manager's authoritative generation pause state."""
+        return self.tokenizer_manager.is_pause
 
     def tokenize(self, text: str, add_special_tokens: bool = True) -> str:
         tokenizer = self.tokenizer_manager.tokenizer
@@ -548,9 +576,11 @@ class RuntimeHandle:
             obj = UpdateWeightFromDiskReqInput(
                 model_path=model_path, load_format=load_format
             )
-            success, message, num_paused = (
-                await self.tokenizer_manager.update_weights_from_disk(obj, request=None)
-            )
+            (
+                success,
+                message,
+                num_paused,
+            ) = await self.tokenizer_manager.update_weights_from_disk(obj, request=None)
             return {
                 "success": success,
                 "message": message,
@@ -789,7 +819,8 @@ class RuntimeHandle:
                 elif hasattr(result, "body"):
                     resp_bytes = result.body
                 elif isinstance(result, (dict, list)):
-                    resp_bytes = json.dumps(result).encode("utf-8")
+                    # As FastAPI encodes it over HTTP; rerank returns a list of models.
+                    resp_bytes = json.dumps(jsonable_encoder(result)).encode("utf-8")
                 else:
                     resp_bytes = str(result).encode("utf-8")
                 status_code = int(

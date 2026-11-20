@@ -29,7 +29,7 @@ them in one `Symmetric features:` line at startup.
 
 | Feature | Flags it sets | Default |
 |---|---|---|
-| Host KV tier | `--enable-hierarchical-cache`, `--hicache-write-policy write_through` | Host tier 4× the GPU cache with host dedup (4.445× with the peer KV servicer, which keeps 10 % for pulls); `--hicache-ratio` sets it |
+| Host KV tier | `--enable-hierarchical-cache`, `--hicache-write-policy write_through` | Host tier 4× the GPU cache with host dedup (4.445× with the peer KV servicer, which keeps 10 % for pulls), with host-pool auto-sizing (`--hicache-host-memory-fraction`) off; `--hicache-ratio` sets it |
 | Host dedup | `--enable-dsa-hicache-host-dedup` (GLM-5.2), `--enable-mla-hicache-host-dedup` (Kimi-K2.6), `--enable-dsv4-hicache-host-dedup` (DeepSeek-V4) | The model's attention kind, on single-node TP. Each node stores a host page once instead of once per GPU |
 | Peer KV pulls | `--enable-peer-kv-servicer`, `--hicache-storage-backend dynamic` with the peer KV backend | On when `--disaggregation-ib-device` is set. The servicer listens on `--peer-kv-servicer-port` (default 18100) and the next ports, one per GPU; give each engine on a node its own range |
 | Late decode choice | `--disaggregation-late-d choose`, `--disaggregation-late-d-lead-mode need`, `--disaggregation-late-d-allocation-trigger first_chunk` | The router-link port is a free port, reported in `/server_info` |
@@ -51,6 +51,7 @@ The engine keeps SGLang's `SGLANG_*` variables. Set these yourself:
 |---|---|
 | `SGLANG_HOST_IP` | Address Mooncake and the KV events advertise. Set it when the default route is not reachable from the other workers. |
 | `WITH_NVIDIA_PEERMEM=0` | Register GPU memory with RDMA through dma-buf. Set it on hosts without the `nvidia_peermem` module, such as GB300 nodes and gVisor sandboxes. |
+| `SGLANG_KV_EVENTS_WIRE_FORMAT` | Encoding of the published KV events. `ei_array` (default): positional msgpack arrays, the format the router's KV directory (`sgl-kv-indexer`) decodes, and replay replies framed `[empty, sequence, payload]` as the router's KV-event bridge reads them. `upstream_map`: SGLang's tagged maps and its replay framing with the topic frame, for consumers that expect upstream SGLang's format. |
 
 The features turn on the variables they use, and the engine logs them in one
 `Symmetric defaults:` line. Set a variable to `0` to keep it off.

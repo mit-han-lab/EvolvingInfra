@@ -1,15 +1,11 @@
-# Adapted from SGLang python/sglang/srt/speculative/eagle_disaggregation.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/speculative/eagle_disaggregation.py (commit 297e54fd10), modified for evolving-infra.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 import torch
 
-from decoupled_engine.srt.disaggregation.prebuilt_h2d import (
-    list_to_device,
-    prebuilt_nonblocking_h2d,
-    stack_to_device,
-)
+from decoupled_engine.srt.disaggregation.utils import get_dsa_seed_metadata_dim
 from decoupled_engine.srt.layers.attention.dsa.utils import (
     should_remap_pd_dsa_seed_to_local_slots,
 )
@@ -18,10 +14,39 @@ from decoupled_engine.srt.managers.scheduler_components.phase_timers import phas
 from decoupled_engine.srt.model_executor.forward_batch_info import CaptureHiddenMode
 from decoupled_engine.srt.runtime_context import get_spec
 from decoupled_engine.srt.speculative.eagle_info import EagleDraftInput
+from decoupled_engine.srt.utils.common import async_h2d_stack
 
 if TYPE_CHECKING:
     from decoupled_engine.srt.managers.overlap_utils import FutureMap
     from decoupled_engine.srt.managers.schedule_batch import ScheduleBatch
+
+
+def _requires_dsa_seed_for_cuda_graph(hf_config, topk: int) -> bool:
+    return topk == 1 and get_dsa_seed_metadata_dim(hf_config) > 0
+
+
+def pd_first_draft_proposal(topk_index: torch.Tensor, vocab_size: int) -> torch.Tensor:
+    """Proposal distribution for a PD decode's first verify of a request.
+
+    Rejection sampling verifies each draft token X against the distribution q
+    it was drawn from. PD prefill hands decode the drafted tokens but not q,
+    so decode proposes each received X with probability one. The verify stays
+    exact: it accepts X with probability p(X) and otherwise resamples from p
+    with X removed, so the committed token is distributed as p, the verify's
+    target distribution. A greedy request's p is one-hot, so it accepts X
+    exactly when X is the target argmax, as it would with q. A sampled one
+    accepts X with probability p(X) instead of min(1, p(X) / q(X)).
+
+    ``topk_index`` is (b, n) under top-k 1: n is 1 for single-layer EAGLE and
+    the number of draft steps for multi-layer EAGLE. Returns (b, n, vocab).
+    """
+    probs = torch.zeros(
+        (*topk_index.shape, vocab_size),
+        dtype=torch.float32,
+        device=topk_index.device,
+    )
+    probs.scatter_(-1, topk_index.unsqueeze(-1), 1.0)
+    return probs
 
 
 def build_eagle_disagg_draft_input(
@@ -39,68 +64,36 @@ def build_eagle_disagg_draft_input(
     # Admission path phases (SGLANG_SCHED_PHASE_TIMERS): host data to the GPU
     # on the schedule stream right after it waited for the forward stream. A
     # copy from pageable memory or an .item() there blocks the CPU until the
-    # forward in flight is done. SGLANG_PREBUILT_NONBLOCKING_H2D: the same
-    # tensors from pinned host memory with non-blocking copies
-    # (disaggregation/prebuilt_h2d.py). Each helper returns None for inputs it
-    # does not cover (then the original blocking copy below runs).
-    nonblocking = prebuilt_nonblocking_h2d()
+    # forward in flight is done.
+    # EI: upstream #44598 (async_h2d_stack) now always stages these tensors in
+    # pinned host memory and copies them non-blocking, which is what
+    # SGLANG_PREBUILT_NONBLOCKING_H2D did here, so the flag no longer gates
+    # this function.
     with phase("prebuilt_h2d_topk"):
-        topk_p = topk_index = None
-        if nonblocking:
-            topk_p = _topk_to_device(
-                [req.output_topk_p for req in batch.reqs],
-                num_states,
-                torch.float32,
-                batch.device,
-            )
-            topk_index = _topk_to_device(
-                [req.output_topk_index for req in batch.reqs],
-                num_states,
-                torch.int64,
-                batch.device,
-            )
-        if topk_p is None:
-            topk_p = torch.stack(
-                [
-                    torch.as_tensor(
-                        req.output_topk_p[:num_states],
-                        device=batch.device,
-                        dtype=torch.float32,
-                    )
-                    for req in batch.reqs
-                ],
-                dim=0,
-            )
-        if topk_index is None:
-            topk_index = torch.stack(
-                [
-                    torch.as_tensor(
-                        req.output_topk_index[:num_states],
-                        device=batch.device,
-                        dtype=torch.int64,
-                    )
-                    for req in batch.reqs
-                ],
-                dim=0,
-            )
-
-    with phase("prebuilt_h2d_hidden"):
-        hidden_list = [req.hidden_states_tensor for req in batch.reqs]
-        hidden_states = (
-            stack_to_device(hidden_list, batch.device) if nonblocking else None
+        topk_p = async_h2d_stack(
+            [
+                torch.as_tensor(req.output_topk_p[:num_states], dtype=torch.float32)
+                for req in batch.reqs
+            ],
+            device=batch.device,
         )
-        if hidden_states is None:
-            hidden_states = torch.stack(hidden_list, dim=0).to(batch.device)
+        topk_index = async_h2d_stack(
+            [
+                torch.as_tensor(req.output_topk_index[:num_states], dtype=torch.int64)
+                for req in batch.reqs
+            ],
+            device=batch.device,
+        )
+    with phase("prebuilt_h2d_hidden"):
+        hidden_states = async_h2d_stack(
+            [req.hidden_states_tensor for req in batch.reqs], device=batch.device
+        )
 
     dsa_topk_indices = None
     dsa_indices_list = [req.output_dsa_topk_indices for req in batch.reqs]
     if dsa_indices_list and all(t is not None for t in dsa_indices_list):
         with phase("prebuilt_h2d_dsa"):
-            dsa_topk_indices = (
-                stack_to_device(dsa_indices_list, batch.device) if nonblocking else None
-            )
-            if dsa_topk_indices is None:
-                dsa_topk_indices = torch.stack(dsa_indices_list, dim=0).to(batch.device)
+            dsa_topk_indices = async_h2d_stack(dsa_indices_list, device=batch.device)
         if should_remap_pd_dsa_seed_to_local_slots():
             # PD sends request-relative positions; fused TopK consumes
             # decode-local physical slots. Remap once before the draft loop/graph.
@@ -128,18 +121,35 @@ def build_eagle_disagg_draft_input(
         with phase("prebuilt_item"):
             # The one real sync left on this path (data-dependent: the remap
             # above reads req_to_token on the GPU). It runs after the radix
-            # insert in process_prebuilt, so with the flag on the forward in
-            # flight usually finished during the insert.
+            # insert in process_prebuilt, so with the non-blocking copies the
+            # forward in flight usually finished during the insert.
             no_valid_row = torch.any(torch.all(dsa_topk_indices < 0, dim=1)).item()
         if no_valid_row:
             dsa_topk_indices = None
 
+    requires_dsa_seed_for_cuda_graph = _requires_dsa_seed_for_cuda_graph(
+        batch.model_config.hf_config,
+        spec.speculative_eagle_topk,
+    )
+
+    draft_probs = None
+    if spec.speculative_use_rejection_sampling:
+        # Single-layer verifies one (b, vocab) proposal; multi-layer verifies
+        # the received (b, num_steps, vocab) chain directly.
+        draft_probs = pd_first_draft_proposal(topk_index, batch.model_config.vocab_size)
+        if not spec.enable_multi_layer_eagle:
+            draft_probs = draft_probs[:, 0]
+
     spec_info = EagleDraftInput(
         topk_p=topk_p,
         topk_index=topk_index,
+        draft_probs=draft_probs,
         hidden_states=hidden_states,
         bonus_tokens=last_tokens_tensor,
         dsa_topk_indices=dsa_topk_indices,
+        cuda_graph_compatible=not (
+            requires_dsa_seed_for_cuda_graph and dsa_topk_indices is None
+        ),
     )
     spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
 
@@ -155,15 +165,3 @@ def build_eagle_disagg_draft_input(
             )
 
     return spec_info
-
-
-def _topk_to_device(rows, num_states: int, dtype: torch.dtype, device):
-    """The stacked ``torch.as_tensor(row[:num_states], dtype=dtype)`` rows on
-    ``device`` without a host wait; None if the rows are neither all host
-    tensors nor all lists/tuples (the caller keeps its original path)."""
-    cut = [row[:num_states] for row in rows]
-    if all(isinstance(row, (list, tuple)) for row in cut):
-        if len({len(row) for row in cut}) != 1:
-            return None
-        return list_to_device(cut, dtype, device)
-    return stack_to_device(cut, device, dtype=dtype)

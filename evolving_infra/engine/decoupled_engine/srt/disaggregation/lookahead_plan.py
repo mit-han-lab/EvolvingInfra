@@ -307,9 +307,20 @@ def gate_free_view(plan) -> GateFreeView:
     return GateFreeView(starts, order, {rid: i for i, rid in enumerate(order)})
 
 
+def _attn_tp_rank() -> int:
+    """get_parallel().attn_tp_rank, or 0 without a published parallel context
+    (stand-ins; the old ``getattr(scheduler.ps, "attn_tp_rank", 0)``)."""
+    from decoupled_engine.srt.runtime_context import get_parallel
+
+    try:
+        return get_parallel().attn_tp_rank
+    except (AttributeError, RuntimeError, ValueError):
+        return 0
+
+
 def partial_candidate(req) -> PlanCandidate:
     """Remaining work AFTER the batch already launched in this loop pass."""
-    end = max(len(req.prefix_indices), int(getattr(getattr(req, "extend_range", None), "end", 0)))
+    end = max(req.prefix_len, int(getattr(req, "extend_end", None) or 0))
     need = max(0, len(req.full_untruncated_fill_ids) - end)
     return PlanCandidate(req.rid, need, bound=not getattr(req, "pending_bootstrap", False))
 
@@ -344,7 +355,9 @@ class SchedulerLookahead:
         uncached = max(1, len(req.origin_input_ids) - peek.device_tokens - peek.host_tokens)
         hint = getattr(req, "kv_pull_hint", None)
         pull = max(0, int(hint.get("expected_hit_tokens", 0)) - peek.device_tokens - peek.host_tokens) if isinstance(hint, dict) else 0
-        pending_pull = (req.rid in getattr(self.scheduler.tree_cache, "ongoing_prefetch", {})
+        # ongoing_prefetch is keyed by CacheRequestHandle (v0.5.23), not rid.
+        pending_pull = (getattr(req, "cache_request_handle", None)
+                        in getattr(self.scheduler.tree_cache, "ongoing_prefetch", {})
                         or bool(getattr(req, "jit_pull_pending", False)))
         # An expected pull is a forecast input, not a cache hit at admission.
         # Its rows move from compute demand to host demand after the ETA.
@@ -396,7 +409,7 @@ class SchedulerLookahead:
         self._peeks = {rid: v for rid, v in self._peeks.items() if rid in live}
         elapsed = time.perf_counter() - start
         self.cpu_seconds += elapsed
-        if self.log and getattr(s.ps, "attn_tp_rank", 0) == 0:
+        if self.log and _attn_tp_rank() == 0:
             for e in plan.entries.values():
                 if e.rid not in self._logged_entries:
                     self._logged_entries.add(e.rid)

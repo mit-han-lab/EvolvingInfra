@@ -23,7 +23,6 @@ from decoupled_engine.srt.layers.quantization.base_config import (
 )
 from decoupled_engine.srt.layers.quantization.compressed_tensors.utils import should_ignore_layer
 from decoupled_engine.srt.layers.quantization.unquant import UnquantizedLinearMethod
-from decoupled_engine.srt.runtime_context import get_parallel
 from decoupled_engine.srt.utils import (
     cpu_has_amx_support,
     is_cpu,
@@ -155,7 +154,6 @@ class W8A8Int8Config(QuantizationConfig):
 
 
 class W8A8Int8LinearMethod(LinearMethodBase):
-
     def __init__(self, quantization_config: W8A8Int8Config):
         self.quantization_config = quantization_config
 
@@ -259,8 +257,6 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         **extra_weight_attrs,
     ):
         from decoupled_engine.srt.layers.moe.fused_moe_triton import FusedMoeWeightScaleSupported
-
-        tp_size = get_parallel().tp_size
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(

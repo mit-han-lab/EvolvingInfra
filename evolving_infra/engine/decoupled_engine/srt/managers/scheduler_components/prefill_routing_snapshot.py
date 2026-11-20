@@ -371,8 +371,8 @@ class PrefillRoutingTracker:
                 scheduler_forward_ct=_int(getattr(scheduler, "forward_ct", None)),
                 remaining_total_tokens=number(adder.rem_total_tokens),
                 remaining_current_tokens=number(adder.cur_rem_tokens),
-                total_token_offset=number(adder.rem_total_token_offset),
-                current_token_offset=number(adder.cur_rem_token_offset),
+                total_token_offset=number(adder.memory_budget.total_offset),
+                current_token_offset=number(adder.memory_budget.current_offset),
                 remaining_input_tokens=number(adder.rem_input_tokens),
                 remaining_chunk_tokens=number(adder.rem_chunk_tokens),
                 page_size=_int(adder.page_size),
@@ -638,6 +638,8 @@ class PrefillRoutingTracker:
         pulls = getattr(
             getattr(scheduler, "tree_cache", None), "ongoing_prefetch", None
         )
+        # ongoing_prefetch is keyed by the request's CacheRequestHandle.
+        handle = getattr(req, "cache_request_handle", None)
         state = RoutingState(
             intent_start_ok=_bool(getattr(req, "late_d_start_ok", None)),
             bound=not pending if pending is not None else None,
@@ -647,7 +649,7 @@ class PrefillRoutingTracker:
             parked=parked,
             pull_pending=_bool(getattr(req, "jit_pull_pending", None)),
             pull_inflight=(
-                rid in pulls if isinstance(pulls, dict) and rid is not None else None
+                handle in pulls if isinstance(pulls, dict) and rid is not None else None
             ),
             restore_inflight=id(req) in restore_ids if restore_known else None,
         )
@@ -695,7 +697,7 @@ class PrefillRoutingTracker:
             if row.pull_phase_age_s is not None:
                 row.pull_phase_age_source = "jit_issue"
             else:
-                info = pulls.get(rid)
+                info = pulls.get(handle)
                 op = getattr(info, "operation", None)
                 row.pull_phase_age_s = _age(getattr(op, "start_time", None), now)
                 if row.pull_phase_age_s is not None:

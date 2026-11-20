@@ -1,4 +1,4 @@
-# Adapted from SGLang python/sglang/srt/managers/load_snapshot.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/managers/load_snapshot.py (commit 297e54fd10), modified for evolving-infra.
 """Load snapshot: publish scheduler load metrics for DP balancing and /v1/loads.
 
 Architecture
@@ -58,7 +58,11 @@ from decoupled_engine.srt.managers.scheduler_components.prefill_routing_snapshot
     public_snapshot,
 )
 from decoupled_engine.srt.runtime_context import get_parallel, get_serving
-from decoupled_engine.srt.utils.network import is_zmq_endpoint_ipv6
+from decoupled_engine.srt.utils.network import (
+    is_zmq_endpoint_ipv6,
+    restrict_zmq_peers,
+    zmq_connect,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +80,7 @@ def should_use_zmq() -> bool:
     ``SGLANG_LOAD_SNAPSHOT_USE_ZMQ`` forces zmq mode for testing.
     """
     return (
-        get_parallel().enable_dp_attention and get_parallel().nnodes > 1
+        get_parallel().attn_dp_enabled and get_parallel().nnodes > 1
     ) or envs.SGLANG_LOAD_SNAPSHOT_USE_ZMQ.get()
 
 
@@ -125,10 +129,10 @@ def zmq_reader_owner(caller: str) -> bool:
         return False
     if caller == "DataParallelController":
         return (
-            get_parallel().dp_size > 1
+            get_parallel().num_dp_ranks > 1
             and get_parallel().load_balance_method.lower() in _LOAD_AWARE_METHODS
         )
-    if get_parallel().dp_size > 1 and (
+    if get_parallel().num_dp_ranks > 1 and (
         get_parallel().load_balance_method.lower() in _LOAD_AWARE_METHODS
     ):
         return False
@@ -301,6 +305,7 @@ class LoadSnapshot(msgspec.Struct, omit_defaults=True):
     # num_total_tokens minus tokens still awaiting a KV transfer (equal to it
     # outside disaggregated decode).
     num_active_tokens: int = 0
+    num_prealloc_ready_tokens: int = 0
     max_total_num_tokens: int = 0
     max_running_requests: int = 0
     token_usage: float = 0.0
@@ -530,7 +535,7 @@ class ZmqLoadSnapshotWriter:
             self._socket.setsockopt(_zmq.IPV6, 1)
         self._socket.setsockopt(_zmq.LINGER, 0)
         self._socket.setsockopt(_zmq.CONFLATE, 1)
-        self._socket.connect(endpoint)
+        zmq_connect(self._socket, endpoint)
 
     def write(self, snapshot: LoadSnapshot) -> None:
         if snapshot.dp_rank != self.dp_rank:
@@ -670,6 +675,8 @@ class ZmqShmLoadSnapshotReader:
             self._socket.setsockopt(_zmq.IPV6, 1)
         self._socket.setsockopt(_zmq.LINGER, 0)
         self._socket.setsockopt(_zmq.CONFLATE, 1)
+        if endpoint.startswith("tcp://"):
+            restrict_zmq_peers(self._ctx, self._socket)
         self._socket.bind(endpoint)
 
         self._endpoint = endpoint
@@ -788,9 +795,9 @@ def create_load_snapshot_reader(port_args, caller: str):
             ``"MultiTokenizerRouter"`` -- determines who binds the zmq PULL
             socket when zmq mode is active.
     """
-    dp_size = get_parallel().dp_size
+    num_dp_ranks = get_parallel().num_dp_ranks
     if zmq_reader_owner(caller):
         return ZmqShmLoadSnapshotReader(
-            _zmq_addr_for(port_args), shm_path_for(port_args.instance_id), dp_size
+            _zmq_addr_for(port_args), shm_path_for(port_args.instance_id), num_dp_ranks
         )
-    return ShmLoadSnapshotReader(shm_path_for(port_args.instance_id), dp_size)
+    return ShmLoadSnapshotReader(shm_path_for(port_args.instance_id), num_dp_ranks)

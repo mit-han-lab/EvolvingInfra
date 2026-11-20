@@ -1,11 +1,11 @@
-# Adapted from SGLang python/sglang/srt/arg_groups/pd_disaggregation_hook.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/arg_groups/pd_disaggregation_hook.py (commit 297e54fd10), modified for evolving-infra.
 from __future__ import annotations
 
-import dataclasses
 import logging
 import os
 from typing import TYPE_CHECKING, Any
 
+from decoupled_engine.srt.arg_groups.arg_utils import record_fields
 from decoupled_engine.srt.arg_groups.overrides import (
     declare_resolution,
     model_config_of,
@@ -13,6 +13,7 @@ from decoupled_engine.srt.arg_groups.overrides import (
     resolving_view,
 )
 from decoupled_engine.srt.environ import envs
+from decoupled_engine.srt.runtime_context import attn_dp_enabled_of, num_dp_ranks_of
 
 if TYPE_CHECKING:
     from decoupled_engine.srt.server_args import ServerArgs
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 def handle_pd_disaggregation(server_args: ServerArgs) -> None:
     """Validate and normalize PD-disaggregation server args."""
     cfg = resolving_view(server_args)
+
     # "mooncake_tcp" is mooncake with the TCP transport forced: set MC_FORCE_TCP
     # so mooncake installs TcpTransport instead of RDMA, rewrite the backend to
     # mooncake, and skip RDMA HCA selection. Must run before backend-name checks.
@@ -64,11 +66,39 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
             "--disaggregation-decode-enable-radix-cache."
         )
 
+    if cfg.disaggregation_decode_allocation_policy == "prefill_complete":
+        _validate_prefill_complete(server_args)
+        if (
+            cfg.disaggregation_mode == "prefill"
+            and cfg.optimistic_prefill_attempts == 0
+        ):
+            declare_resolution(
+                server_args, "handle_pd_disaggregation", optimistic_prefill_attempts=1
+            )
+
     if cfg.disaggregation_mode == "prefill" and cfg.dcp_size > 1:
         logger.warning(
             "DCP on a PD prefill server is supported when prefill and decode "
             "use the same DCP layout, but it usually adds communication "
             "overhead without improving prefill performance."
+        )
+
+    if not 0 <= cfg.disaggregation_decode_host_receive_threshold <= 1:
+        raise ValueError(
+            "--disaggregation-decode-host-receive-threshold must be between 0 and 1"
+        )
+    if cfg.disaggregation_decode_host_receive_threshold < 1:
+        if cfg.enable_hisparse or cfg.enable_pd_role_switch:
+            raise ValueError(
+                "Decode host receive does not yet support HiSparse or role switching"
+            )
+
+        if cfg.disaggregation_decode_retraction_backup == "cpu_tensor":
+            raise ValueError("Decode host KV buffering requires host_pool retraction")
+        declare_resolution(
+            server_args,
+            "handle_pd_disaggregation",
+            disaggregation_decode_retraction_backup="host_pool",
         )
 
     if cfg.disaggregation_mode == "decode" and cfg.dcp_size > 1:
@@ -77,22 +107,14 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
         if cfg.disaggregation_transfer_backend not in (
             "mooncake",
             "nixl",
+            "mori",
+            "ascend",
             "fake",
         ):
             raise ValueError(
                 "PD decode DCP requires --disaggregation-transfer-backend "
-                "mooncake, nixl, or fake for synthetic benchmarking, got "
+                "mooncake, nixl, mori, ascend, or fake for synthetic benchmarking, got "
                 f"{cfg.disaggregation_transfer_backend!r}."
-            )
-        if cfg.disaggregation_decode_enable_radix_cache:
-            raise ValueError(
-                "PD decode DCP currently requires chunk cache; "
-                "--disaggregation-decode-enable-radix-cache is not supported."
-            )
-        if cfg.enable_hierarchical_cache:
-            raise ValueError(
-                "PD decode DCP currently requires chunk cache; "
-                "--enable-hierarchical-cache is not supported."
             )
 
     if cfg.disaggregation_mode == "decode":
@@ -107,7 +129,11 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
                     "--disaggregation-decode-enable-radix-cache is incompatible "
                     "with --disaggregation-transfer-backend fake"
                 )
+            # Upstream validates the speculative algorithm itself
+            # (speculative_hook: decode radix cache takes None, DSPARK, EAGLE
+            # or EAGLE3). EI's decode radix modes add their own constraints.
             speculative_algorithm = (cfg.speculative_algorithm or "").upper()
+            attn_dp_enabled = attn_dp_enabled_of(resolved_view(server_args))
             if content_only_decode_radix:
                 if speculative_algorithm != "DSPARK":
                     raise ValueError(
@@ -162,7 +188,11 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
                         "request's insert stops at the prefix this worker "
                         "already held (its decode_prefix_len)."
                     )
-            else:
+            elif cfg.enable_hierarchical_cache:
+                # With a HiCache host tier, full_state limits EAGLE and EAGLE3
+                # as below; without one, they take only upstream's checks.
+                # TODO: restore EAGLE and EAGLE3 drafts from the host tier
+                # without these limits.
                 # GLM EAGLE can retain target and draft KV at their shared
                 # physical indices. A HiCache host tier is allowed only with
                 # the packed MTP host layout, whose one restore op brings back
@@ -176,7 +206,7 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
                         or cfg.enable_multi_layer_eagle
                         or cfg.enable_session_radix_cache
                         or cfg.pp_size != 1
-                        or cfg.enable_dp_attention
+                        or attn_dp_enabled
                         or cfg.disaggregation_transfer_backend
                         not in ("mooncake", "nixl")
                     ):
@@ -185,10 +215,7 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
                             "no DP attention or multi-layer EAGLE, no session "
                             "cache, and mooncake or nixl."
                         )
-                    if (
-                        cfg.enable_hierarchical_cache
-                        and cfg.hicache_storage_backend is not None
-                    ):
+                    if cfg.hicache_storage_backend is not None:
                         # The decode EAGLE radix cache restores from the host
                         # tier only, and PD decode never prefetches from L3.
                         # P and D may share one launch config (role switch),
@@ -213,22 +240,15 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
                         or cfg.enable_multi_layer_eagle
                         or cfg.enable_session_radix_cache
                         or cfg.pp_size != 1
-                        or cfg.enable_dp_attention
+                        or attn_dp_enabled
                         or cfg.disaggregation_transfer_backend
                         not in ("mooncake", "nixl")
                     ):
                         raise ValueError(
                             "Native EAGLE3 radix requires topk1, PP1, no DP/multi-layer/session cache"
                         )
-                elif cfg.speculative_algorithm is not None:
-                    raise ValueError(
-                        "--disaggregation-decode-enable-radix-cache is incompatible "
-                        "with speculative decoding unless DSPARK uses "
-                        "--disaggregation-decode-radix-cache-mode content_only; "
-                        f"got --speculative-algorithm {cfg.speculative_algorithm}"
-                    )
 
-            if resolved_view(server_args).enable_dp_attention:
+            if attn_dp_enabled:
                 if content_only_decode_radix or window_host_decode_radix:
                     raise ValueError(
                         "--disaggregation-decode-radix-cache-mode "
@@ -251,7 +271,7 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
                 "handle_pd_disaggregation",
                 disable_radix_cache=True,
             )
-            logger.warning("KV cache is forced as chunk cache for decode server")
+            logger.warning("Radix cache is disabled for decode server")
 
         _default_decode_extra_slots(server_args)
 
@@ -268,9 +288,9 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
             )
 
     elif cfg.disaggregation_mode == "prefill":
-        assert (
-            cfg.disaggregation_transfer_backend != "fake"
-        ), "Prefill server does not support 'fake' as the transfer backend"
+        assert cfg.disaggregation_transfer_backend != "fake", (
+            "Prefill server does not support 'fake' as the transfer backend"
+        )
 
         if envs.SGLANG_RUST_SERVER.get():
             _alias_bootstrap_port_to_api_port(server_args)
@@ -286,6 +306,86 @@ def handle_pd_disaggregation(server_args: ServerArgs) -> None:
                 f"got '{cfg.disaggregation_transfer_backend}'."
             )
 
+        # Reject features whose role-specific state is not rebuilt on a flip.
+        if cfg.enable_pd_role_switch:
+            view = resolved_view(server_args)
+            unsupported = []
+            if view.ep_size > 1:
+                unsupported.append(f"expert parallelism (--ep-size {view.ep_size})")
+            if view.moe_a2a_backend != "none":
+                unsupported.append(
+                    f"MoE all-to-all (--moe-a2a-backend {view.moe_a2a_backend})"
+                )
+            if view.pp_size > 1:
+                unsupported.append(f"pipeline parallelism (--pp-size {view.pp_size})")
+            if (
+                attn_dp_enabled_of(view)
+                and view.enable_dp_attention_local_control_broadcast
+            ):
+                unsupported.append("DP attention local control broadcast")
+            if view.dcp_size > 1:
+                unsupported.append(
+                    f"decode context parallelism (--dcp-size {view.dcp_size})"
+                )
+            if view.speculative_algorithm is not None:
+                unsupported.append(
+                    "speculative decoding "
+                    f"(--speculative-algorithm {view.speculative_algorithm})"
+                )
+            if unsupported:
+                raise ValueError(
+                    "--enable-pd-role-switch does not rebuild role-specific "
+                    "state for the following features: "
+                    + ", ".join(unsupported)
+                    + ". Remove these options or drop --enable-pd-role-switch."
+                )
+
+
+def _validate_prefill_complete(server_args: ServerArgs) -> None:
+    cfg = resolving_view(server_args)
+    unsupported = []
+    if cfg.disaggregation_mode not in ("prefill", "decode"):
+        unsupported.append("aggregated serving")
+    if cfg.disaggregation_transfer_backend != "mooncake":
+        unsupported.append("transfer backends other than Mooncake")
+    if cfg.pp_size != 1 or cfg.attn_cp_size != 1 or cfg.dcp_size != 1:
+        unsupported.append("pipeline or attention context parallelism")
+    attn_dp_size = cfg.dp_size if cfg.enable_dp_attention else 1
+    if cfg.tp_size != attn_dp_size:
+        unsupported.append("attention tensor parallelism greater than one")
+    if cfg.enable_pdmux or cfg.decoupled_spec_role != "null":
+        unsupported.append("PD multiplexing or decoupled speculation")
+    if cfg.enable_pd_role_switch:
+        unsupported.append("runtime PD role switching")
+    if cfg.encoder_only or cfg.language_only:
+        unsupported.append("encoder disaggregation")
+    if cfg.enable_hisparse:
+        unsupported.append("HiSparse")
+    if cfg.disaggregation_decode_host_receive_threshold < 1:
+        unsupported.append("decode host KV buffering")
+    if cfg.disaggregation_mode == "decode" and (
+        cfg.disaggregation_decode_enable_radix_cache or cfg.enable_hierarchical_cache
+    ):
+        unsupported.append("decode radix cache or decode HiCache")
+    if (
+        cfg.disaggregation_mode == "prefill"
+        and cfg.enable_hierarchical_cache
+        and (
+            cfg.hicache_storage_backend is not None
+            or cfg.hicache_write_policy != "write_back"
+        )
+    ):
+        unsupported.append("prefill HiCache other than L2 write_back")
+    if envs.SGLANG_DISAGG_STAGING_BUFFER.get():
+        unsupported.append("staging buffers")
+    if envs.SGLANG_RUST_SERVER.get():
+        unsupported.append("the Rust bootstrap registry")
+    if unsupported:
+        raise ValueError(
+            "--disaggregation-decode-allocation-policy prefill_complete does not "
+            "yet support " + ", ".join(unsupported)
+        )
+
 
 def _default_decode_extra_slots(server_args: ServerArgs) -> None:
     """Default the number of *extra* decode req_to_token slots reserved for
@@ -296,7 +396,7 @@ def _default_decode_extra_slots(server_args: ServerArgs) -> None:
     if cfg.disaggregation_decode_extra_slots is None:
         extra_slots = 0
         if cfg.max_running_requests is not None:
-            per_worker = cfg.max_running_requests // max(1, cfg.dp_size)
+            per_worker = max(1, cfg.max_running_requests // num_dp_ranks_of(cfg))
             if per_worker <= 32:
                 extra_slots = per_worker * 2
         declare_resolution(
@@ -312,11 +412,26 @@ def _alias_bootstrap_port_to_api_port(server_args: ServerArgs) -> None:
     consumer (KVManager registration, PrefillBootstrapQueue) reads the resolved
     field and agrees automatically. Decode is untouched: there the field names
     the PREFILL side's bootstrap port and must stay as the operator set it.
+    A transfer backend that brings its own bootstrap server keeps the port as
+    configured: that server, not the Rust registry, listens there.
     """
+    # Lazy: disagg_service pulls in the disaggregation package. Its helper calls
+    # disagg_service.get_kv_class, which a transfer backend registered at
+    # runtime may rebind.
+    from decoupled_engine.srt.managers.disagg_service import rust_server_serves_kv_bootstrap
+
     cfg = resolving_view(server_args)
+    if not rust_server_serves_kv_bootstrap(cfg.disaggregation_transfer_backend):
+        logger.info(
+            "SGLANG_RUST_SERVER: transfer backend %s runs its own KV bootstrap "
+            "server; keeping disaggregation_bootstrap_port %d",
+            cfg.disaggregation_transfer_backend,
+            cfg.disaggregation_bootstrap_port,
+        )
+        return
     default_port = next(
         f.default
-        for f in dataclasses.fields(server_args)
+        for f in record_fields(type(server_args))
         if f.name == "disaggregation_bootstrap_port"
     )
     if cfg.disaggregation_bootstrap_port not in (
@@ -414,9 +529,22 @@ def handle_encoder_disaggregation(server_args: Any):
         "KimiK25ForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
         "MiMoV2ForCausalLM",
+        "Glm5NextForConditionalGeneration",
+        "MiniMaxM3SparseForConditionalGeneration",
+        "MuseSparkForConditionalGeneration",
     ]:
         raise ValueError(
             f"Model type {model_arch} is not supported for encoder disaggregation. "
             f"Supported architectures: Qwen2VL, Qwen3VL, Qwen3.5, InternS2, "
-            f"Qwen2Audio, Qwen2.5Omni, Dots3-Note, Kimi, MiMoV2."
+            f"Qwen2Audio, Qwen2.5Omni, Dots3-Note, Kimi, MiMoV2, GLM5Next, MiniMax-M3, MuseSpark."
+        )
+
+    if (
+        model_arch == "MuseSparkForConditionalGeneration"
+        and cfg.language_only
+        and cfg.enable_adaptive_dispatch_to_encoder
+    ):
+        raise ValueError(
+            "Muse language-only servers do not load local encoders; "
+            "--enable-adaptive-dispatch-to-encoder is not supported."
         )

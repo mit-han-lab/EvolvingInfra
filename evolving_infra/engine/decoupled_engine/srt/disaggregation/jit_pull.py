@@ -111,7 +111,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from decoupled_engine.srt.disaggregation.utils import DisaggregationMode, is_aborted
 from decoupled_engine.srt.environ import envs
 from decoupled_engine.srt.mem_cache.peer_kv_touch import TouchSender, TouchSpan
-from decoupled_engine.srt.runtime_context import get_memory
+from decoupled_engine.srt.runtime_context import get_memory, get_parallel
 
 if TYPE_CHECKING:
     from decoupled_engine.srt.managers.schedule_batch import Req
@@ -338,11 +338,11 @@ def _unsupported(scheduler: Scheduler, repull: bool, jit_mode: str) -> List[str]
         # Admission skips the request after a match that may stage a mamba
         # copy-on-write slot; only a rejected add_one_req reverts that.
         problems.append("a non-mamba model")
-    if scheduler.ps.pp_size != 1:
+    if get_parallel().pp_size != 1:
         problems.append("pp_size == 1")
-    if scheduler.ps.attn_cp_size != 1:
+    if get_parallel().attn_cp_size != 1:
         problems.append("attn_cp_size == 1")
-    if scheduler.enable_dp_attention:
+    if scheduler.attn_dp_enabled:
         problems.append("no DP attention")
     if repull and get_memory().hicache_storage_repull_min_tokens < 1:
         problems.append("--hicache-storage-repull-min-tokens >= 1")
@@ -450,7 +450,7 @@ class JitPull:
         # (b1) Deferred pulls in flight, in issue order (rid -> request).
         self._jit_inflight: Dict[str, Req] = {}
         self._pass = 0
-        self._log = scheduler.ps.attn_tp_rank == 0
+        self._log = get_parallel().attn_tp_rank == 0
         self._last_summary = time.monotonic()
         # F1 (SGLANG_PEER_KV_TOUCH_DEFERRED_PULLS): attention-TP rank 0 only,
         # queue mode only; None otherwise.
@@ -553,8 +553,9 @@ class JitPull:
     def _io_ahead_tokens(self) -> int:
         """Stable outstanding demand, never loader-thread progress or time."""
         total = 0
-        for rid, info in self.cache.ongoing_prefetch.items():
-            req = self._jit_inflight.get(rid)
+        # Keyed by CacheRequestHandle (v0.5.23); _jit_inflight by rid.
+        for handle, info in self.cache.ongoing_prefetch.items():
+            req = self._jit_inflight.get(handle.rid)
             issued = getattr(req, "jit_pull_issued", None)
             if issued is not None:
                 total += max(0, issued.expected - issued.local)
@@ -657,7 +658,7 @@ class JitPull:
         from decoupled_engine.srt.disaggregation.late_d_need import evictable_prefix_tokens
         from decoupled_engine.srt.managers.schedule_policy import CLIP_MAX_NEW_TOKENS, PrefillAdder
 
-        prefix = len(req.prefix_indices)
+        prefix = req.prefix_len
         need = len(req.full_untruncated_fill_ids) - prefix
         output = min(max(req.sampling_params.max_new_tokens - len(req.output_ids), 0),
                      CLIP_MAX_NEW_TOKENS)
@@ -797,18 +798,18 @@ class JitPull:
         chunked = self.scheduler.chunked_req
         if chunked is None:
             return 0
-        return max(0, len(chunked.origin_input_ids) - len(chunked.prefix_indices))
+        return max(0, len(chunked.origin_input_ids) - chunked.prefix_len)
 
     def _maybe_repull(self, req: Req) -> bool:
         expected = self._expected(req, len(req.full_untruncated_fill_ids))
         if expected is None:
             return False
-        local = len(req.prefix_indices) + req.host_hit_length
+        local = req.prefix_len + req.host_hit_length
         if expected - local < self.threshold(req.kv_pull_hint):
             return False
         if req.qp_repull_attempts >= self.max_attempts:
             return False
-        if req.rid in self.cache.ongoing_prefetch:
+        if self.cache.has_ongoing_prefetch(req.cache_request_handle):
             return False
         req.qp_repull_attempts += 1
         return self._issue(req, REPULL, req.qp_repull_attempts)
@@ -829,11 +830,11 @@ class JitPull:
         when a prefetch operation started."""
         self.scheduler._prefetch_kvcache(req)
         expected = self._expected(req, len(req.full_untruncated_fill_ids)) or 0
-        local = len(req.prefix_indices) + req.host_hit_length
-        if req.rid not in self.cache.ongoing_prefetch:
+        local = req.prefix_len + req.host_hit_length
+        if not self.cache.has_ongoing_prefetch(req.cache_request_handle):
             # Nothing started: admit now. A declined prefetch leaves a miss
             # marker; drop it so the paced retry does not re-issue it.
-            self.cache.pop_storage_prefetch_miss(req.rid)
+            self.cache.storage_prefetch_retries.cancel(req.rid)
             self.stats[kind + "_not_issued"] += 1
             if self._log:
                 logger.info(
@@ -850,7 +851,7 @@ class JitPull:
             return False
         op = None
         if envs.SGLANG_JIT_PULL_LOOKUP_AWARE_HOLD.get():
-            info = self.cache.ongoing_prefetch[req.rid]
+            info = self.cache.ongoing_prefetch[req.cache_request_handle]
             op = getattr(info, "operation", info)
         req.jit_pull_issued = IssuedPull(
             kind, attempt, expected, local, time.monotonic(), self._pass, op
@@ -866,7 +867,7 @@ class JitPull:
                 attempt,
                 expected,
                 local,
-                len(req.prefix_indices),
+                req.prefix_len,
                 req.host_hit_length,
                 expected - local,
                 note,
@@ -876,7 +877,8 @@ class JitPull:
     def _observe_landings(self) -> None:
         """(b1) Deferred pulls that ended (landed, or stopped) before their
         request's admission visit."""
-        ongoing = self.cache.ongoing_prefetch
+        # The rids with a prefetch in flight (keyed by CacheRequestHandle).
+        ongoing = {handle.rid for handle in self.cache.ongoing_prefetch}
         bwp = getattr(self.scheduler, "bootstrap_prefetch", None)
         for rid in [rid for rid in self._jit_inflight if rid not in ongoing]:
             del self._jit_inflight[rid]
@@ -885,7 +887,7 @@ class JitPull:
                 bwp.retry_after_landing(rid)
 
     def _settle(self, req: Req, issued: IssuedPull) -> None:
-        local = len(req.prefix_indices) + req.host_hit_length
+        local = req.prefix_len + req.host_hit_length
         gain = max(0, local - issued.local)
         short = max(0, issued.expected - local)
         wait_ms = (time.monotonic() - issued.t_issue) * 1e3

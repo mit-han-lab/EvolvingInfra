@@ -342,9 +342,10 @@ class SymmetricAdmitAfterLaunch:
         queue = getattr(scheduler, "import_queue", None)
         if queue is None:
             return None
+        from decoupled_engine.srt.disaggregation.symmetric.scheduler_mixin import _parallel_or
         from decoupled_engine.srt.mem_cache.ce_loader import debug_force_gate_reorder_ranks
 
-        tp_rank = int(getattr(getattr(scheduler, "ps", None), "tp_rank", 0) or 0)
+        tp_rank = int(_parallel_or("tp_rank", 0) or 0)
         inst = cls(
             scheduler,
             queue,

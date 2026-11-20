@@ -102,8 +102,13 @@ class LockstepStats:
         cls, scheduler: Any, loop: str, six_h: bool = True
     ) -> LockstepStats:
         from decoupled_engine.srt.mem_cache.ce_loader import debug_forced_gate_reorder
+        from decoupled_engine.srt.runtime_context import get_parallel
 
-        tp_rank = getattr(getattr(scheduler, "ps", None), "tp_rank", 0)
+        try:
+            tp_rank = get_parallel().tp_rank
+        except (RuntimeError, ValueError):
+            # CPU stand-ins publish no runtime context: the old tolerant read.
+            tp_rank = getattr(getattr(scheduler, "ps", None), "tp_rank", 0)
         group = getattr(scheduler, "tp_cpu_group", None)
         return cls(
             loop,

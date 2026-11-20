@@ -1,4 +1,4 @@
-# Adapted from SGLang python/sglang/srt/mem_cache/unified_cache/cache_action.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/mem_cache/unified_cache/cache_action.py (commit 297e54fd10), modified for evolving-infra.
 """A TreeCore emits CacheActions through the TreeCoreInterface to guide
 Controller behavior.
 """
@@ -15,20 +15,6 @@ if TYPE_CHECKING:
     import torch
 
     from decoupled_engine.srt.mem_cache.unified_cache.unified_tree_core_interface import NodeId
-
-
-class ReplaceWriteThroughOnNodeSplit(msgspec.Struct, frozen=True):
-    """Replace the pending write-through node on a node split:
-
-        parent -> node    =>    parent -> new_node -> new_child
-
-    old_node_id (the pre-split node) is replaced by new_node_id + new_child_node_id.
-    """
-
-    ack_id: int
-    old_node_id: NodeId
-    new_node_id: NodeId
-    new_child_node_id: NodeId
 
 
 class FreeDeviceKV(msgspec.Struct, frozen=True):
@@ -48,6 +34,22 @@ class ComponentAction(msgspec.Struct, frozen=True):
     """Base for component-routed actions; the cache dispatches each one to
     ``component_type``'s class-level ``apply_component_action``; every subclass
     declares its ``component_type`` field."""
+
+
+class UpdatePendingBackupOnNodeSplit(ComponentAction, frozen=True):
+    """Update pending backups for the prefix and child produced by a split.
+
+    The cache first relocates write-through/linker publication lists when
+    ``ack_id`` is present, then routes this same action once to FULL for
+    component-owned buffer-write dependencies. Buffer-only splits may have
+    no tree acknowledgment.
+    """
+
+    ack_id: int | None
+    old_node_id: NodeId
+    new_node_id: NodeId
+    new_child_node_id: NodeId
+    component_type: ComponentType = ComponentType.FULL
 
 
 class FreeComponentDeviceSlot(ComponentAction, frozen=True):
@@ -102,6 +104,15 @@ class RecoverSWAWithLockedFull(ComponentAction, frozen=True):
     component_type: ComponentType = ComponentType.SWA
 
 
+class RecoverEvictedSWA(ComponentAction, frozen=True):
+    """Recover evicted SWA on kept Full IDs by moving the incoming SWA mapping,
+    leaving Full cleanup and tree publication to the caller."""
+
+    component_type: ComponentType
+    kept_full: torch.Tensor
+    incoming_full: torch.Tensor
+
+
 class SWARebuild(ComponentAction, frozen=True):
     """Rebuild a node's SWA value by translating its source full value, then store it."""
 
@@ -110,7 +121,7 @@ class SWARebuild(ComponentAction, frozen=True):
     component_type: ComponentType = ComponentType.SWA
 
 
-# Cache-owned actions, applied by UnifiedRadixCache itself.
+# The cache handles these directly; split updates also reach their component.
 CacheAction = (
-    ReplaceWriteThroughOnNodeSplit | FreeDeviceKV | FreeDeviceKVFullOnly | BackupKV
+    UpdatePendingBackupOnNodeSplit | FreeDeviceKV | FreeDeviceKVFullOnly | BackupKV
 )

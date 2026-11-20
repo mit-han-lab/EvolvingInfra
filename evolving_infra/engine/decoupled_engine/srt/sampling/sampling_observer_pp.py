@@ -11,10 +11,8 @@ from typing import (
 
 import torch
 
-from decoupled_engine.srt.sampling.sampling_observer import (
-    DeviceAuxiliaryOutput,
-    SamplingObserver,
-)
+from decoupled_engine.srt.managers.auxiliary_output import DeviceAuxiliaryOutput
+from decoupled_engine.srt.sampling.sampling_observer import SamplingObserver
 
 
 @runtime_checkable

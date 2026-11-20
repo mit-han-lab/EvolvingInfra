@@ -1,16 +1,18 @@
-# Adapted from SGLang python/sglang/srt/mem_cache/cache_init_params.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/mem_cache/cache_init_params.py (commit 297e54fd10), modified for evolving-infra.
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+
+from decoupled_engine.srt.mem_cache.events import KvEventLoraNames
 
 if TYPE_CHECKING:
     from decoupled_engine.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
     from decoupled_engine.srt.mem_cache.memory_pool import ReqToTokenPool
     from decoupled_engine.srt.mem_cache.unified_cache.components import ComponentType
-    from decoupled_engine.srt.mem_cache.unified_cache.components.tree_component import (
+    from decoupled_engine.srt.mem_cache.unified_cache.components.base import (
         TreeComponent,
     )
 
@@ -28,10 +30,17 @@ class CacheInitParams:
     attn_tp_cache_group: Optional[torch.distributed.ProcessGroup] = None
     pp_cache_group: Optional[torch.distributed.ProcessGroup] = None
     eviction_policy: str = "lru"
-    disable_finished_insert: bool = False
+    # Keyword arguments for the eviction policy's constructor; see the strategy
+    # classes in evict_policy.py for what each policy accepts.
+    eviction_policy_config: Optional[dict[str, Any]] = None
 
     enable_metrics: bool = False
     enable_kv_cache_events: bool = False
+    dynamo_kv_event_format: bool = False
+    # LoRA names for KV events; the scheduler registers requests in it.
+    kv_event_lora_names: KvEventLoraNames = dataclasses.field(
+        default_factory=KvEventLoraNames
+    )
     enable_session_radix_cache: bool = False
     enable_kv_session_retention: bool = False
 
@@ -47,17 +56,39 @@ class CacheInitParams:
     chunked_prefill_size: Optional[int] = None
 
     sliding_window_size: Optional[int] = None
-
-    # Time-to-live for cache entries in seconds. If None, TTL is disabled.
-    cache_ttl_seconds: Optional[float] = None
+    # False when tree nodes do not own the SWA state (a per-request SWA ring, or a
+    # paged SWA pool only a draft uses), so it must not gate prefix matching.
+    swa_gates_prefix_match: bool = True
+    decoder_swa_bounded_replay: bool = False
+    # Tokens back from the committed length that a fused draft reads in the
+    # swa sub-pool (BaseSpecWorker.draft_swa_window); 0 when it reads none.
+    draft_swa_window: int = 0
 
     tree_components: Optional[tuple[ComponentType, ...]] = None
     component_registry_override: Optional[dict[ComponentType, type[TreeComponent]]] = (
         None
     )
+    tree_core_backend: Optional[str] = dataclasses.field(default=None, kw_only=True)
 
     mtp_draft_device_pools: tuple[object, ...] = ()
-    # Separate (SIDECAR) HiCache draft device pools, e.g. the EAGLE3 draft of
-    # Kimi-K2.6. Host dedup's copy-engine fan-out (C2g) maps them at init,
-    # before the sidecar host pool is registered with the tree.
-    hicache_sidecar_draft_device_pools: tuple[object, ...] = ()
+    # Draft KV pools that share the target KV slots but are stored apart from it.
+    sidecar_draft_device_pools: tuple[object, ...] = ()
+    mtp_draft_mamba_pools: tuple[object, ...] = ()
+
+    @property
+    def swa_retain_window(self) -> Optional[int]:
+        # Cache history required by every reader of the SWA sub-pool. Retention,
+        # tree locks, prefix matching and host transfers must use the same span.
+        # The model's attention window remains sliding_window_size.
+        if self.sliding_window_size is None:
+            return None
+        return max(self.sliding_window_size, self.draft_swa_window)
+
+    @property
+    def hicache_sidecar_draft_device_pools(self) -> tuple[object, ...]:
+        # Separate (SIDECAR) HiCache draft device pools, e.g. the EAGLE3 draft of
+        # Kimi-K2.6. Host dedup's copy-engine fan-out (C2g) maps them at init,
+        # before the sidecar host pool is registered with the tree.
+        # EI name kept as an alias: upstream's sidecar_draft_device_pools holds
+        # the same SIDECAR plan pools (mla_host_dedup.py reads this name).
+        return tuple(self.sidecar_draft_device_pools or ())

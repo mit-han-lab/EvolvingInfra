@@ -1,5 +1,6 @@
-# Adapted from SGLang python/sglang/srt/models/kimi_k25.py (commit 9a489f8d2f), modified for evolving-infra.
+# Adapted from SGLang python/sglang/srt/models/kimi_k25.py (commit 297e54fd10), modified for evolving-infra.
 import logging
+from array import array
 from copy import deepcopy
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -29,8 +30,8 @@ from decoupled_engine.srt.layers.quantization.base_config import QuantizationCon
 from decoupled_engine.srt.layers.quantization.modelslim.modelslim import ModelSlimConfig
 from decoupled_engine.srt.layers.quantization.quark.quark import QuarkConfig
 from decoupled_engine.srt.managers.mm_utils import (
-    MultiModalityDataPaddingPatternMultimodalTokens,
     general_mm_embed_routine,
+    pad_mm_tokens,
 )
 from decoupled_engine.srt.managers.schedule_batch import (
     Modality,
@@ -50,7 +51,6 @@ from decoupled_engine.srt.multimodal.mm_utils import (
 from decoupled_engine.srt.runtime_context import (
     get_exec,
     get_mm,
-    get_parallel,
 )
 from decoupled_engine.srt.utils import add_prefix, is_cuda, is_npu
 
@@ -89,7 +89,6 @@ def apply_rope(
 
 
 class MoonViTEncoderLayer(nn.Module):
-
     def __init__(
         self,
         num_heads: int,
@@ -228,7 +227,6 @@ def get_1d_sincos_pos_embed(embed_dim, t_size, cls_token=False):
 
 
 class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
-
     def __init__(
         self,
         height: int,
@@ -372,7 +370,6 @@ class Rope2DPosEmbRepeated(nn.Module):
 
 
 class MoonVision3dPatchEmbed(nn.Module):
-
     def __init__(
         self,
         out_dim: int,
@@ -384,14 +381,14 @@ class MoonVision3dPatchEmbed(nn.Module):
         pos_emb_type: str = "divided_fixed",
     ):
         super().__init__()
-        assert isinstance(
-            patch_size, int | Sequence
-        ), f"Invalid patch_size type: {type(patch_size)}"
+        assert isinstance(patch_size, int | Sequence), (
+            f"Invalid patch_size type: {type(patch_size)}"
+        )
         if isinstance(patch_size, int):
             patch_size = (patch_size, patch_size)
-        assert (
-            len(patch_size) == 2
-        ), f"Expected patch_size to be a tuple of 2, got {patch_size}"
+        assert len(patch_size) == 2, (
+            f"Expected patch_size to be a tuple of 2, got {patch_size}"
+        )
         self.patch_size = patch_size
 
         self.proj = Conv2dLayer(
@@ -438,9 +435,9 @@ class MoonViT3dEncoder(nn.Module):
     ) -> None:
         super().__init__()
 
-        assert (
-            video_attn_type == "spatial_temporal"
-        ), f'video_attn_type must be "spatial_temporal", got {video_attn_type}'
+        assert video_attn_type == "spatial_temporal", (
+            f'video_attn_type must be "spatial_temporal", got {video_attn_type}'
+        )
         self.video_attn_type = video_attn_type
         self.rope_2d = Rope2DPosEmbRepeated(
             block_cfg["hidden_dim"] // block_cfg["num_heads"], 512, 512
@@ -637,6 +634,11 @@ def mm_projection_auto(
     return projected.reshape(-1, projected.shape[-1])
 
 
+def _fused_moe_text_config(hf_config):
+    """Return the nested fusable MoE config, or None for other branches."""
+    return None if hf_config.encoder_only else hf_config.text_config
+
+
 class KimiK25ForConditionalGeneration(nn.Module):
     supports_cuda_vmm_feature_transport = True
 
@@ -651,11 +653,19 @@ class KimiK25ForConditionalGeneration(nn.Module):
 
     @staticmethod
     def shared_experts_fusion_disable_reason(hf_config, quant_config):
-        if hf_config.encoder_only:
+        text_config = _fused_moe_text_config(hf_config)
+        if text_config is None:
             return None
         return DeepseekV3ForCausalLM.shared_experts_fusion_disable_reason(
-            hf_config.text_config, quant_config
+            text_config, quant_config
         )
+
+    @staticmethod
+    def num_fusable_shared_experts(hf_config) -> int:
+        text_config = _fused_moe_text_config(hf_config)
+        if text_config is None:
+            return 0
+        return DeepseekV3ForCausalLM.num_fusable_shared_experts(text_config)
 
     def __init__(
         self,
@@ -748,14 +758,9 @@ class KimiK25ForConditionalGeneration(nn.Module):
 
             CUDA IPC features are intentionally reconstructed after the image
             assignment.  Each image therefore crosses the tokenizer/scheduler
-            boundary once instead of once per TP rank.  The selected consumer
-            acknowledges the entire TP group so the bounded IPC pool remains
-            recyclable.
+            boundary once instead of once per TP rank. Unused ranks keep their
+            lease until request cleanup so cache eviction can re-run the encoder.
             """
-            # Match the configured TP consumer count captured when the
-            # tokenizer creates MmItemMemoryPool. A live attention subgroup
-            # size could leave acknowledgements missing and strand the lease.
-            ipc_consumer_count = max(get_parallel().tp_size, 1)
             device_index = device.index
             if device.type == "cuda" and device_index is None:
                 device_index = torch.cuda.current_device()
@@ -764,9 +769,7 @@ class KimiK25ForConditionalGeneration(nn.Module):
             for image_index in image_indices:
                 item = items[image_index]
                 if device.type == "cuda":
-                    item.reconstruct(
-                        device_index, ipc_consumer_count=ipc_consumer_count
-                    )
+                    item.reconstruct(device_index)
                 feature = item.feature
                 if not isinstance(feature, torch.Tensor):
                     raise TypeError(
@@ -803,9 +806,8 @@ class KimiK25ForConditionalGeneration(nn.Module):
         record_image_work()
         return image_features
 
-    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
-        pattern = MultiModalityDataPaddingPatternMultimodalTokens()
-        return pattern.pad_input_tokens(input_ids, mm_inputs)
+    def pad_input_ids(self, input_ids: array, mm_inputs: MultimodalInputs) -> array:
+        return pad_mm_tokens(input_ids, mm_inputs)
 
     @property
     def start_layer(self) -> int:

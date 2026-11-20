@@ -127,8 +127,8 @@ reference deployment's ports and settings are in [`examples/modal/stack.py`](../
 
 ## Provenance
 
-The engine and the router core are derived from [SGLang](https://github.com/sgl-project/sglang)
-at upstream commit `9a489f8d2f`; [evolving_infra/engine/README.md](../evolving_infra/engine/README.md#relation-to-sglang)
+The engine is derived from [SGLang](https://github.com/sgl-project/sglang) v0.5.23 (commit `297e54fd10`) and
+the router core from SGLang commit `9a489f8d2f`; [evolving_infra/engine/README.md](../evolving_infra/engine/README.md#relation-to-sglang)
 summarizes what the engine changes.
 [evolving_infra/router/core/PROVENANCE.md](../evolving_infra/router/core/PROVENANCE.md) records the router's origin, and
 [NOTICE](../NOTICE) lists every included third-party work.

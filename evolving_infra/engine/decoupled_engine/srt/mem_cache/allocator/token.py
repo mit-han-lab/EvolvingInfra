@@ -1,4 +1,3 @@
-# Adapted from SGLang python/sglang/srt/mem_cache/allocator/token.py (commit 9a489f8d2f), modified for evolving-infra.
 """
 Copyright 2025 SGLang Team
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -75,15 +74,23 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         else:
             self.free_group.append(self._copy_for_free_group(free_index))
 
-    def get_cpu_copy(self, indices, mamba_indices=None, req_pool_idx=None):
+    def free_page_ids(self, page_ids: torch.Tensor):
+        # page_size == 1: page ids are token ids.
+        self.free(page_ids)
+
+    def get_cpu_copy(self, indices, mamba_indices=None, req_pool_index=None):
         return self._kvcache.get_cpu_copy(
-            indices, mamba_indices=mamba_indices, req_pool_idx=req_pool_idx
+            indices,
+            mamba_indices=mamba_indices,
+            req_pool_index=req_pool_index,
         )
 
-    def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None, req_pool_idx=None):
+    def load_cpu_copy(
+        self, kv_cache_cpu, indices, mamba_indices=None, req_pool_index=None
+    ):
         return self._kvcache.load_cpu_copy(
             kv_cache_cpu,
             indices,
             mamba_indices=mamba_indices,
-            req_pool_idx=req_pool_idx,
+            req_pool_index=req_pool_index,
         )

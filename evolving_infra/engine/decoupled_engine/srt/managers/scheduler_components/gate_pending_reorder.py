@@ -63,12 +63,22 @@ from decoupled_engine.srt.mem_cache.ce_loader import (
     gate_pending_for_batch,
     log_debug_force_gate_reorder,
 )
+from decoupled_engine.srt.runtime_context import get_parallel
 
 logger = logging.getLogger(__name__)
 
 STATS: Counter = Counter()
 LOG_PERIOD_S = 60.0
 LOG_TAG = "GATE_REORDER"
+
+
+def _parallel_value(scheduler: Any, name: str, default: int) -> int:
+    """get_parallel().<name>. CPU stand-ins publish no runtime context: they
+    keep the old tolerant read of their ``ps`` record."""
+    try:
+        return getattr(get_parallel(), name)
+    except (RuntimeError, ValueError):
+        return getattr(getattr(scheduler, "ps", None), name, default)
 
 
 class GatePendingReorder:
@@ -103,12 +113,12 @@ class GatePendingReorder:
             return cls()
         if getattr(scheduler, "require_mlp_sync", False):
             return cls()  # DP attention: every rank keeps one order
-        if getattr(getattr(scheduler, "ps", None), "pp_size", 1) != 1:
+        if _parallel_value(scheduler, "pp_size", 1) != 1:
             return cls()
         cc = getattr(getattr(scheduler, "tree_cache", None), "cache_controller", None)
         if cc is None:
             return cls()  # no HiCache: no loads, no gate
-        tp_rank = getattr(getattr(scheduler, "ps", None), "tp_rank", 0)
+        tp_rank = _parallel_value(scheduler, "tp_rank", 0)
         if tp_rank == 0:
             logger.info(
                 "%s loop=%s on (fires on a pending shared-loader gate)", LOG_TAG, loop

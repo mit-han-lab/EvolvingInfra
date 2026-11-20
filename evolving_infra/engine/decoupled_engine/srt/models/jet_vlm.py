@@ -1,4 +1,5 @@
 import math
+from array import array
 from collections.abc import Iterable
 
 import einops
@@ -15,7 +16,7 @@ import decoupled_engine.srt.utils as utils
 from decoupled_engine.srt.configs.jet_vlm import JetVLMConfig
 from decoupled_engine.srt.layers.logits_processor import LogitsProcessorOutput
 from decoupled_engine.srt.layers.quantization.base_config import QuantizationConfig
-from decoupled_engine.srt.managers.mm_utils import MultiModalityDataPaddingPatternMultimodalTokens
+from decoupled_engine.srt.managers.mm_utils import pad_mm_tokens
 from decoupled_engine.srt.managers.schedule_batch import (
     Modality,
     MultimodalDataItem,
@@ -133,11 +134,8 @@ class JetVLMForConditionalGeneration(nn.Module):
                 )
                 weight_loader(param, loaded_weight)
 
-    def pad_input_ids(
-        self, input_ids: list[int], mm_inputs: MultimodalInputs
-    ) -> list[int]:
-        pattern = MultiModalityDataPaddingPatternMultimodalTokens()
-        return pattern.pad_input_tokens(input_ids, mm_inputs)
+    def pad_input_ids(self, input_ids: array, mm_inputs: MultimodalInputs) -> array:
+        return pad_mm_tokens(input_ids, mm_inputs)
 
 
 EntryClass = [JetVLMForConditionalGeneration]

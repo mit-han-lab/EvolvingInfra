@@ -350,9 +350,10 @@ def init_layerwise_loadback(
         )
 
     # The bounds every load will use (uniform or LAYER_PART_BOUNDS): fail at
-    # startup, not at the first ring load after warmup.
+    # startup, not at the first ring load after warmup. v0.5.23 renamed the
+    # controller's layer_num to transfer_layer_id_max (what loads pass here).
     layer_part_bounds(
-        int(getattr(cache_controller, "layer_num", 0) or 0),
+        int(getattr(cache_controller, "transfer_layer_id_max", 0) or 0),
         envs.SGLANG_DSA_HOST_DEDUP_LAYER_PARTS.get(),
         envs.SGLANG_DSA_HOST_DEDUP_LAYER_PART_BOUNDS.get(),
     )
@@ -448,7 +449,14 @@ def debug_force_gate_reorder_ranks() -> frozenset:
 
 
 def _scheduler_tp_rank(scheduler) -> int:
-    rank = getattr(getattr(scheduler, "ps", None), "tp_rank", None)
+    # v0.5.23 dropped Scheduler.ps: the TP rank is get_parallel().tp_rank,
+    # which raises when no parallel context is published (CPU stand-ins).
+    try:
+        from decoupled_engine.srt.runtime_context import get_parallel
+
+        rank = get_parallel().tp_rank
+    except (AttributeError, RuntimeError, ValueError):
+        rank = None
     if rank is None:
         rank = getattr(scheduler, "tp_rank", 0)
     return int(rank or 0)

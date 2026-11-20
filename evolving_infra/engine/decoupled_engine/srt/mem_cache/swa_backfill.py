@@ -59,7 +59,7 @@ import torch
 from decoupled_engine.srt.environ import envs
 from decoupled_engine.srt.mem_cache.hicache_storage import PoolName
 from decoupled_engine.srt.mem_cache.peer_kv_namespace import peer_page_keys
-from decoupled_engine.srt.mem_cache.unified_cache.components.tree_component import (
+from decoupled_engine.srt.mem_cache.unified_cache.component_type import (
     ComponentType,
 )
 from decoupled_engine.srt.mem_cache.unified_cache.swa_ledger import SwaHostLedger, SwaSegment
@@ -104,15 +104,18 @@ _PHASE_CODES = {QUEUED: 1, LOOKUP: 2, READ: 3, BACKOFF: 4, DONE: 5}
 
 def swa_backfill_page_keys(radix_key: Any, num_pages: int, page_size: int) -> list[str]:
     """Peer page keys of the first ``num_pages`` pages of ``radix_key``: the
-    tree's chain hashes (``get_hash_str`` from the root, as a node's
-    ``hash_value``) wrapped in the key's (cache_salt, extra_key) namespace,
+    tree's chain hashes (``get_storage_hash_str`` from the root, as a node's
+    ``hash_value``; v0.5.23 seeds them with the key's namespace) wrapped in
+    the key's (cache_salt, extra_key) namespace,
     exactly as the owner publishes them (UnifiedTreeCore._peer_push_servable_node).
     A backfill of [start, end) uses keys[start // page_size : end // page_size]."""
-    from decoupled_engine.srt.mem_cache.utils import get_hash_str
+    from decoupled_engine.srt.mem_cache.utils import get_storage_hash_str
 
     if num_pages <= 0:
         return []
-    hashes = get_hash_str(radix_key[: num_pages * page_size], None, page_size=page_size)
+    hashes = get_storage_hash_str(
+        radix_key[: num_pages * page_size], None, page_size=page_size
+    )
     return peer_page_keys(
         hashes,
         getattr(radix_key, "cache_salt", None),
