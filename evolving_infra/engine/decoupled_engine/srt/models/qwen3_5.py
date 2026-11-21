@@ -1332,9 +1332,24 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         """Full attention forward pass."""
-        if _is_cuda and self.attn_output_gate:
-            q, k, v, gate = self.forward_prepare_cuda_fused(
+        if (
+            _is_cuda
+            and self.attn_output_gate
+            and positions.ndim == 2
+            and forward_batch.forward_mode.is_extend_without_speculative()
+        ):
+            # Multimodal (3, T) positions of a prefill: image and video tokens have
+            # different temporal, height and width positions, and the rotary embedding
+            # applies them by section. The fused kernel reads one position per token.
+            q, k, v, gate = self.forward_prepare_native(
                 positions=positions,
+                hidden_states=hidden_states,
+            )
+        elif _is_cuda and self.attn_output_gate:
+            # Decode and speculative batches repeat one position row three times
+            # (forward_batch_info.py): the fused kernel takes the temporal row.
+            q, k, v, gate = self.forward_prepare_cuda_fused(
+                positions=positions[0] if positions.ndim == 2 else positions,
                 hidden_states=hidden_states,
             )
         elif (_is_hip or _is_xpu or _is_cpu) and self.attn_output_gate:
