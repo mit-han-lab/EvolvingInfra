@@ -144,3 +144,48 @@ def test_dsv4_registration_gives_each_compression_ratio_a_full_indexed_pool(
     assert {layout.name: list(layout.entry_indices) for layout in layouts} == {"full": [], **pools}
     assert all(list(layout.page_nbytes) == [64 * (e + 1) for e in layout.entry_indices] for layout in layouts)
     assert list(extra) == ["swa"]
+
+
+def test_dsv4_swa_pages_carry_a_drafts_swa_layers(native):
+    """setup_state_kv_args lists a DSpark or NextN draft's SWA layers as a second
+    StateType.SWA component on the target's SWA page indices. A reader that imports
+    a prompt's SWA tail gets the draft's window with the target's: without it the
+    reader's draft attends to whatever its pages held before."""
+    cache = dsv4_cache({4: 0, 128: 0, 1: 1, 2: 3}, {1: 1, 2: 3}, [0, 1, 2, 2, 2, 0])
+    pages = 9
+    strides = [6, 6, 4]  # two target SWA layers, then the draft's
+
+    def register(engine, fill):
+        target = [engine.memory.alloc(pages * strides[0], fill=fill) for _ in range(2)]
+        draft = [engine.memory.alloc(pages * strides[2], fill=fill)]
+        args = SimpleNamespace(
+            page_size=256, kv_data_ptrs=list(range(1, 9)), kv_item_lens=[64] * 8,
+            kv_layer_ids=list(range(8)), aux_data_ptrs=[], aux_item_lens=[],
+            state_types=[native.StateType.SWA, native.StateType.DSV4_REQUEST_STATE, native.StateType.SWA],
+            state_data_ptrs=[target, [7], draft], state_item_lens=[strides[:2], [8], strides[2:]],
+            engine_rank=0,
+        )
+        _, extra = native.registration_pools_for(kvcache=cache, kv_args=args)
+        return extra["swa"], target + draft
+
+    owner = native.FakeReadEngine(session_id="owner")
+    reader = native.FakeReadEngine(session_id="reader")
+    try:
+        remote, source_ptrs = register(owner, 0)
+        local, target_ptrs = register(reader, 255)
+        for entry, (ptr, stride) in enumerate(zip(source_ptrs, strides)):
+            for page in range(pages):
+                owner.memory.view(ptr + page * stride, stride)[:] = bytes([16 * entry + page]) * stride
+        source_pages, target_pages = [2, 3], [5, 6]
+        local_ptrs, remote_ptrs, lengths = native.build_page_read_plan(
+            local=local, remote=remote, local_pages=target_pages, remote_pages=source_pages)
+        assert reader.batch_read("owner", local_ptrs, remote_ptrs, lengths) == 0
+        mapping = dict(zip(target_pages, source_pages))
+        for entry, (ptr, stride) in enumerate(zip(target_ptrs, strides)):
+            for page in range(pages):
+                value = 16 * entry + mapping[page] if page in mapping else 255
+                got = bytes(reader.memory.view(ptr + page * stride, stride))
+                assert got == bytes([value]) * stride, f"SWA layer {entry} page {page} not imported"
+    finally:
+        owner.close()
+        reader.close()

@@ -271,7 +271,11 @@ def registration_pools_for(
     and every ratio's pool (COMPRESSED_POOLS) is addressed by the FULL page
     index; "full" itself owns no bytes. SWA pages live in the StateType.SWA
     state entries (get_state_buf_infos), one page of swa_page_size tokens per
-    index, and become the "swa" pool.
+    index, and become the "swa" pool: the target's SWA layers, then a DSpark or
+    NextN draft's, which setup_state_kv_args lists as a second StateType.SWA
+    component. The draft pool shares the target's SWA page indices, so one page
+    list moves both, and the reader's draft attends over the window its owner
+    wrote from the prompt's target hidden states.
     """
 
     if any(cls.__name__ == "DSATokenToKVPool" for cls in type(kvcache).__mro__):
@@ -320,10 +324,10 @@ def registration_pools_for(
             raise NotImplementedError(
                 "symmetric-pd symmetric: DSv4 without a StateType.SWA component"
             )
-        i = state_types.index(StateType.SWA)
+        swa = [i for i, state_type in enumerate(state_types) if state_type == StateType.SWA]
         extra[POOL_SWA] = PoolRegion(
-            ptrs=[int(p) for p in kv_args.state_data_ptrs[i]],
-            page_nbytes=[int(n) for n in kv_args.state_item_lens[i]],
+            ptrs=[int(p) for i in swa for p in kv_args.state_data_ptrs[i]],
+            page_nbytes=[int(n) for i in swa for n in kv_args.state_item_lens[i]],
         )
     return layouts, extra
 
