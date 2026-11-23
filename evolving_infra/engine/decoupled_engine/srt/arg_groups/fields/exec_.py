@@ -187,9 +187,10 @@ class ExecFeatures(msgspec.Struct):
             "runs past the last cached SWA window, as at a branch inside an "
             "earlier prompt, reuse it up to one SWA window (rounded up to pages) "
             "before its end and recompute the rest from an empty window, instead "
-            "of backing off to that window. Off unless set; refused where the "
-            "prefill attention cannot floor the window. Not numerically "
-            "equivalent to full prefill.",
+            "of backing off to that window. On for DeepSeek-V4.1 in the symmetric "
+            "paper preset unless KV session retention is on, otherwise off unless "
+            "set; refused where the prefill attention cannot floor the window. Not "
+            "numerically equivalent to full prefill.",
             action=argparse.BooleanOptionalAction,
             resolvable=True,
         ),

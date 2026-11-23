@@ -7,7 +7,8 @@ that the other flags leave off (:func:`plan_features`): the host KV tier, the
 prefill work snapshot, late decode choice computing before the decode is
 bound, the peer KV servicer and pulls (when the RDMA devices are known; not
 under DP attention), KV session retention (FULL-only models and DeepSeek-V4;
-one DP rank, no DP attention) and host dedup for the model's attention kind
+one DP rank, no DP attention), SWA branch replay (DeepSeek-V4.1, where
+retention stays off) and host dedup for the model's attention kind
 (single-node TP). ``--symmetric-preset none`` leaves the flags as given.
 
 Each switch below is an environment variable that is off on its own. When the
@@ -235,8 +236,9 @@ def plan_features(
 ) -> Dict[str, Any]:
     """The server-argument fields of the paper's configuration still off.
 
-    ``model``: ``{"dedup": <dedup flag name or None>, "retention": bool}``
-    from the model configuration; None skips dedup and retention.
+    ``model``: ``{"dedup": <dedup flag name or None>, "retention": bool,
+    "swa_branch_replay": bool}`` from the model configuration; None skips
+    dedup, retention and SWA branch replay.
     ``ratio_unset``: the user gave no ``--hicache-ratio``; with host dedup it
     becomes the paper's 4 (4.445 with the peer KV servicer, which withholds
     10 % of the host tier)."""
@@ -311,6 +313,18 @@ def plan_features(
             and (getattr(cfg, "attn_dp_size", 1) or 1) == 1
         ):
             fields["enable_kv_session_retention"] = True
+        # Unset only: the DeepSeek-V4.1 hook resolves before the preset and
+        # declares it off where the prefill attention cannot floor the window.
+        # Not where KV session retention resolves on: the two have not run
+        # together (every DeepSeek-V4.1 config here runs DP attention, where
+        # the scheduler refuses retention).
+        retention = fields.get("enable_kv_session_retention", getattr(cfg, "enable_kv_session_retention", False))
+        if (
+            model.get("swa_branch_replay")
+            and getattr(cfg, "enable_swa_branch_replay", None) is None
+            and not retention
+        ):
+            fields["enable_swa_branch_replay"] = True
     return fields
 
 
@@ -331,8 +345,10 @@ def preset_retention(*, v4: bool, hybrid_swa: bool, ssm_state: bool, npu: bool) 
 
 
 def model_info(server_args: Any) -> Optional[Dict[str, Any]]:
-    """The host dedup flag of the configured model and whether the preset
-    turns KV session retention on for it (preset_retention), or None."""
+    """The host dedup flag of the configured model, whether the preset turns
+    KV session retention on for it (preset_retention), and whether it turns SWA
+    branch replay on (DeepSeek-V4.1, the DeepSeek-V4 model whose prefill
+    attention floors the SWA window), or None."""
     try:
         from decoupled_engine.srt.arg_groups.overrides import model_config_of
         from decoupled_engine.srt.configs.model_config import (
@@ -361,7 +377,11 @@ def model_info(server_args: Any) -> Optional[Dict[str, Any]]:
             ssm_state=uses_ssm_state(config),
             npu=is_npu(),
         )
-        return {"dedup": dedup, "retention": retention}
+        return {
+            "dedup": dedup,
+            "retention": retention,
+            "swa_branch_replay": getattr(hf, "model_type", None) == "deepseek_v41",
+        }
     except Exception as e:  # no model config at resolution (tests, dummy paths)
         logger.info("Symmetric defaults: model not inspected (%s)", e)
         return None

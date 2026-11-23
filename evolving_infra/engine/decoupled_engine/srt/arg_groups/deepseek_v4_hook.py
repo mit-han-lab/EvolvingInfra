@@ -315,9 +315,11 @@ def resolve_swa_branch_replay(server_args: ServerArgs) -> None:
     swa_valid_start. The floor covers every per-position state the tree drops
     with SWA only when no layer keeps a compressor state in SWA pages (ratios 4
     and 128 do). An explicit on elsewhere fails startup. Left unset, the option
-    is declared off where it cannot run, so a default that resolves after this
-    hook does not turn it on there; otherwise it stays unset, which is off. The
-    radix cache can still keep the mode off and log why
+    is declared off where it cannot run, so the symmetric `paper` preset
+    (symmetric_defaults.plan_features), which resolves after this hook and
+    turns it on for DeepSeek-V4.1 where KV session retention stays off, leaves
+    it off there; elsewhere it stays unset, which the preset turns on and which
+    is off without it. The radix cache can still keep the mode off and log why
     (UnifiedRadixCache._resolve_swa_branch_replay)."""
     cfg = resolving_view(server_args)
     model_config = model_config_of(server_args)

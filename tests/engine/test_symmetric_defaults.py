@@ -284,3 +284,30 @@ def test_the_preset_turns_retention_on_for_full_only_models_and_deepseek_v4():
     # Another model with sliding-window layers can run on an all-sliding cache.
     assert not sd.preset_retention(**{**full_only, "hybrid_swa": True})
     assert not sd.preset_retention(**{**full_only, "ssm_state": True})
+
+
+def test_the_preset_turns_swa_branch_replay_on_for_deepseek_v41_where_it_is_unset():
+    v41 = {"dedup": "enable_dsv4_hicache_host_dedup", "retention": True, "swa_branch_replay": True}
+    assert sd.plan_features(bare(enable_dp_attention=True), v41, free_port=lambda: 1)["enable_swa_branch_replay"]
+    # Off from the operator, or from the DeepSeek-V4.1 hook where the prefill cannot floor the window.
+    f = sd.plan_features(bare(enable_swa_branch_replay=False), v41, free_port=lambda: 1)
+    assert "enable_swa_branch_replay" not in f
+    # Another model (DeepSeek-V4-Flash keeps compressor state in SWA pages), no model, another preset.
+    f = sd.plan_features(bare(), {**v41, "swa_branch_replay": False}, free_port=lambda: 1)
+    assert "enable_swa_branch_replay" not in f
+    assert "enable_swa_branch_replay" not in sd.plan_features(bare(), None, free_port=lambda: 1)
+    assert sd.plan_features(bare(symmetric_preset="none"), v41, free_port=lambda: 1) == {}
+
+
+def test_the_preset_keeps_swa_branch_replay_off_where_kv_session_retention_resolves_on():
+    # The replay has not run with KV session retention: the preset turns on one of the two, never both.
+    v41 = {"dedup": "enable_dsv4_hicache_host_dedup", "retention": True, "swa_branch_replay": True}
+    # One DP rank without DP attention: the preset turns retention on and leaves the replay off.
+    f = sd.plan_features(bare(), v41, free_port=lambda: 1)
+    assert f["enable_kv_session_retention"] and "enable_swa_branch_replay" not in f
+    # Retention set by the operator keeps the replay off too.
+    f = sd.plan_features(bare(enable_dp_attention=True, enable_kv_session_retention=True), v41, free_port=lambda: 1)
+    assert "enable_swa_branch_replay" not in f
+    # DP attention (every DeepSeek-V4.1 config here): no retention, so the replay.
+    f = sd.plan_features(bare(enable_dp_attention=True, attn_dp_size=4), v41, free_port=lambda: 1)
+    assert f["enable_swa_branch_replay"] and "enable_kv_session_retention" not in f
