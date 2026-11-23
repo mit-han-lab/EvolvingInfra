@@ -5,9 +5,10 @@ plus a little more. Plain LRU eviction treats that context like any other cache 
 evicts it during the pause. KV retention lets the router tell the engines which context agents
 still need, so the engines evict unreferenced KV first.
 
-The engine takes retention on a FULL-only or FULL+SWA cache tree. The symmetric preset turns it on
-for models with a FULL-only tree (GLM-5.2, Kimi-K2.6) and for DeepSeek-V4 (FULL+SWA). Another model
-with sliding-window layers needs `--enable-kv-session-retention` on its engines, and a model with a
+The engine takes retention on a FULL-only or FULL+SWA cache tree, with one DP rank, one pipeline
+stage and no DP attention. The symmetric preset turns it on for models with a FULL-only tree
+(GLM-5.2, Kimi-K2.6) and for DeepSeek-V4 (FULL+SWA) on such engines. Another model with
+sliding-window layers needs `--enable-kv-session-retention` on its engines, and a model with a
 Mamba state runs without retention.
 
 ## Use it

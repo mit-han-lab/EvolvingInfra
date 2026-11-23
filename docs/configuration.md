@@ -34,7 +34,7 @@ them in one `Symmetric features:` line at startup.
 | Peer KV pulls | `--enable-peer-kv-servicer`, `--hicache-storage-backend dynamic` with the peer KV backend | On when `--disaggregation-ib-device` is set, except under DP attention (its ranks would share one servicer port). The servicer listens on `--peer-kv-servicer-port` (default 18100) and the next ports, one per GPU; give each engine on a node its own range |
 | Late decode choice | `--disaggregation-late-d choose`, `--disaggregation-late-d-lead-mode need`, `--disaggregation-late-d-allocation-trigger first_chunk` | The router-link port is a free port, reported in `/server_info` |
 | Prefill work snapshot | `--enable-prefill-work-snapshot` | Read by the router's cost function |
-| KV session retention | `--enable-kv-session-retention` | On models with a FULL-only cache tree and on DeepSeek-V4: GLM-5.2, Kimi-K2.6, DeepSeek-V4-Flash. Without it the engine ignores the router's session tags |
+| KV session retention | `--enable-kv-session-retention` | On models with a FULL-only cache tree and on DeepSeek-V4: GLM-5.2, Kimi-K2.6, DeepSeek-V4-Flash; not under DP attention or with DP or PP above 1, which the engine refuses. Without it the engine ignores the router's session tags |
 
 ### Other flags
 

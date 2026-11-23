@@ -253,6 +253,11 @@ def test_paper_features_keep_what_the_user_set_and_skip_what_cannot_run():
     # Every DP rank is attention-TP rank 0: the servicer's per-rank ports would collide.
     assert "enable_peer_kv_servicer" not in f and "hicache_storage_backend" not in f
     assert f["enable_hierarchical_cache"] and f["enable_prefill_work_snapshot"]
+    # The scheduler refuses KV session retention under DP attention, with DP > 1 or PP > 1. At resolution a DP4
+    # attention worker (--dp-size 4 --enable-dp-attention) reads attn_dp_size 4 and dp_size 1.
+    assert "enable_kv_session_retention" not in f
+    for kw in ({"attn_dp_size": 4}, {"dp_size": 2}, {"pp_size": 2}):
+        assert "enable_kv_session_retention" not in sd.plan_features(bare(**kw), DSA, free_port=lambda: 1), kw
     # A model the preset gives retention (DeepSeek-V4 here), and one it does not.
     f = sd.plan_features(bare(), {"dedup": "enable_dsv4_hicache_host_dedup", "retention": True},
                          free_port=lambda: 1, ratio_unset=True)

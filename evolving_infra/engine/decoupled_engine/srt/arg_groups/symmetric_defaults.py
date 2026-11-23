@@ -6,9 +6,9 @@ default), resolution first turns on the features of the paper's configuration
 that the other flags leave off (:func:`plan_features`): the host KV tier, the
 prefill work snapshot, late decode choice computing before the decode is
 bound, the peer KV servicer and pulls (when the RDMA devices are known; not
-under DP attention), KV session retention (FULL-only models and DeepSeek-V4)
-and host dedup for the model's attention kind (single-node TP).
-``--symmetric-preset none`` leaves the flags as given.
+under DP attention), KV session retention (FULL-only models and DeepSeek-V4;
+one DP rank, no DP attention) and host dedup for the model's attention kind
+(single-node TP). ``--symmetric-preset none`` leaves the flags as given.
 
 Each switch below is an environment variable that is off on its own. When the
 server arguments select the feature it belongs to, resolution turns it on,
@@ -298,11 +298,17 @@ def plan_features(
             fields["hicache_ratio"] = 4.445 if servicer else 4.0
             # The paper's ratio is a fixed setting: keep host-pool auto-sizing off for it.
             fields["hicache_host_memory_fraction"] = None
+        # The scheduler refuses retention with DP > 1, PP > 1 or DP attention
+        # (Scheduler.init_kv_session_retention; attention DP is attn_dp_size > 1).
         if (
             model.get("retention")
             and not getattr(cfg, "enable_kv_session_retention", False)
             and not getattr(cfg, "disable_radix_cache", False)
             and getattr(cfg, "radix_eviction_policy", "lru") == "lru"
+            and getattr(cfg, "dp_size", 1) == 1
+            and getattr(cfg, "pp_size", 1) == 1
+            and not getattr(cfg, "enable_dp_attention", False)
+            and (getattr(cfg, "attn_dp_size", 1) or 1) == 1
         ):
             fields["enable_kv_session_retention"] = True
     return fields

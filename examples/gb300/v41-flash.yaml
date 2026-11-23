@@ -9,7 +9,7 @@ page_size: 256                 # the engine forces 256 for DeepSeek-V4
 context_length: 1048576
 gpus_per_worker: 4
 dp_attention: true             # every GPU of a worker is one DP-attention rank (--dp-size 4)
-retention: false               # KV session retention needs a FULL-only cache tree; V4.1's is FULL+SWA
+retention: false               # the engines refuse KV session retention under DP attention
 engine_args:
   - --trust-remote-code
   - --ep-size=4
