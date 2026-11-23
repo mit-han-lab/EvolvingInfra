@@ -60,6 +60,10 @@ class CacheInitParams:
     # paged SWA pool only a draft uses), so it must not gate prefix matching.
     swa_gates_prefix_match: bool = True
     decoder_swa_bounded_replay: bool = False
+    # SWA branch replay (--enable-swa-branch-replay): a match whose FULL prefix
+    # runs past the deepest SWA window reuses FULL up to one window's pages
+    # before its end; the request recomputes the rest from an empty window.
+    swa_branch_replay: bool = False
     # Tokens back from the committed length that a fused draft reads in the
     # swa sub-pool (BaseSpecWorker.draft_swa_window); 0 when it reads none.
     draft_swa_window: int = 0

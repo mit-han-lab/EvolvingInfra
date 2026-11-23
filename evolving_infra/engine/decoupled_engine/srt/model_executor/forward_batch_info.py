@@ -793,9 +793,14 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # For ngram embedding
     ngram_embedding_info: Optional[NgramEmbeddingInfo] = None
     encoder_swa_replay: bool = False
-    # Encoder replay folded into the extend: per-row window floor [num_tokens]
-    # int64 (the request's replay start, 0 for other requests).
+    # Per-row floor of the encoder layers' SWA window [num_tokens] int64: the
+    # first position a row reads SWA KV from. An extend's rows get their
+    # request's Req.swa_valid_start (SWA branch replay); the encoder replay fold
+    # gives its hits their replay start. 0 elsewhere; None when all rows are 0.
     encoder_swa_row_floor: Optional[torch.Tensor] = None
+    # The same floor per request (Req.swa_valid_start, CPU), for the sparse
+    # prefill's chunk cache; None when every request's is 0.
+    swa_valid_starts: Optional[List[int]] = None
     encoder_swa_compress_rows: Optional[torch.Tensor] = None  # non-replay rows, int64
 
     # DeepSeek-V4.1 engram, extend only: the n - 1 tokens before each request's
@@ -1262,6 +1267,13 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             if ret.positions is None:
                 ret.positions = positions
             ret.extend_logprob_start_lens_cpu = extend_logprob_start_lens
+            if isinstance(extend_seq_lens, list):
+                floors = [getattr(req, "swa_valid_start", 0) for req in batch.reqs]
+                if any(floors):
+                    ret.swa_valid_starts = floors
+                    ret.encoder_swa_row_floor = _swa_valid_start_rows(
+                        floors, extend_seq_lens, device
+                    )
 
         if model_runner.ngram_embedding_manager.enabled:
             ret._init_ngram_embedding_info(batch, device)
@@ -2422,6 +2434,21 @@ def compute_position_torch(
     extend_start_loc = torch.zeros_like(extend_seq_lens)
     extend_start_loc[1:] = torch.cumsum(extend_seq_lens[:-1], dim=0)
     return positions.to(torch.int64), extend_start_loc
+
+
+def _swa_valid_start_rows(
+    floors: List[int], extend_seq_lens: List[int], device
+) -> torch.Tensor:
+    """Each extend row's SWA window floor: its request's swa_valid_start (an SWA
+    branch replay). A floor at or below a row's window start changes nothing, so
+    decode rows in an extend batch keep their windows."""
+    rows = torch.repeat_interleave(
+        torch.tensor(floors, dtype=torch.int64),
+        torch.tensor(extend_seq_lens, dtype=torch.int64),
+    )
+    if is_pin_memory_available(device):
+        rows = rows.pin_memory()
+    return rows.to(device, non_blocking=True)
 
 
 def _hash_rids_to_tensor(*, rids: List[str], device: torch.device) -> torch.Tensor:

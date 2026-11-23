@@ -1,3 +1,4 @@
+# Adapted from SGLang python/sglang/srt/arg_groups/fields/exec_.py (commit 297e54fd10), modified for evolving-infra.
 """Config fields of the ``exec`` namespace."""
 
 from __future__ import annotations
@@ -175,6 +176,20 @@ class ExecFeatures(msgspec.Struct):
             "prefill; requests for prompt logprobs compute every prompt row. Use "
             "--no-enable-decoder-swa-bounded-replay to retain full prefill, e.g. "
             "for RL rollouts whose logprobs must match the trainer.",
+            action=argparse.BooleanOptionalAction,
+            resolvable=True,
+        ),
+    ] = None
+    enable_swa_branch_replay: A[
+        Optional[bool],
+        Arg(
+            help="DeepSeek-V4.1 SWA branch replay: when a prompt's cached full KV "
+            "runs past the last cached SWA window, as at a branch inside an "
+            "earlier prompt, reuse it up to one SWA window (rounded up to pages) "
+            "before its end and recompute the rest from an empty window, instead "
+            "of backing off to that window. Off unless set; refused where the "
+            "prefill attention cannot floor the window. Not numerically "
+            "equivalent to full prefill.",
             action=argparse.BooleanOptionalAction,
             resolvable=True,
         ),

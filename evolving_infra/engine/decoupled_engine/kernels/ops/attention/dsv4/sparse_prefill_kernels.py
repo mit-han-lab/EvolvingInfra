@@ -64,6 +64,7 @@ def _combine_topk_swa_indices_kernel(
     swa_lengths_ptr,
     swa_win_starts_ptr,
     swa_win_lens_ptr,
+    swa_floor_ptr,
     num_tokens,
     num_reqs,
     top_k,
@@ -75,6 +76,7 @@ def _combine_topk_swa_indices_kernel(
     BLOCK_T: tl.constexpr,
     SEARCH_STEPS: tl.constexpr,
     HAS_SWA_WIN: tl.constexpr,
+    HAS_SWA_FLOOR: tl.constexpr,
 ):
     # BLOCK_T consecutive tokens per program, so the grid scales with tokens, not requests.
     token = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
@@ -117,6 +119,11 @@ def _combine_topk_swa_indices_kernel(
         swa_len = tl.load(swa_win_lens_ptr + token, mask=owned, other=0)
     else:
         swa_len = tl.where(owned, tl.minimum(pos + 1, WINDOW_SIZE), 0)
+        if HAS_SWA_FLOOR:
+            # The request reads no SWA below its floor (an SWA branch replay's
+            # swa_valid_start), so the window starts there at the latest.
+            floor = tl.load(swa_floor_ptr + batch_idx, mask=owned, other=0)
+            swa_len = tl.minimum(swa_len, tl.maximum(pos + 1 - floor, 0))
 
     combined_row = token.to(tl.int64)[:, None] * combined_indices_stride
     topk_row = token.to(tl.int64)[:, None] * topk_indices_stride
@@ -188,6 +195,7 @@ def combine_topk_swa_indices(
     swa_win_starts: Optional[torch.Tensor] = None,
     swa_win_lens: Optional[torch.Tensor] = None,
     swa_win_max_len: Optional[int] = None,
+    swa_floor: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Combine top-k and SWA indices for flash_mla_sparse_fwd.
 
@@ -208,6 +216,9 @@ def combine_topk_swa_indices(
     and lengths, replacing the causal window [pos - swa_len + 1, pos].
     swa_win_max_len is a precomputed int(swa_win_lens.max()) (no device sync);
     the combined width covers max(window_size, swa_win_max_len).
+
+    EI (SWA branch replay): optional swa_floor, int32 [num_reqs], the first
+    absolute position each request's causal window may read; 0 for none.
     """
     assert topk_indices.dtype == torch.int32
     assert query_start_loc.dtype == torch.int32
@@ -236,6 +247,11 @@ def combine_topk_swa_indices(
             swa_win_max_len = int(swa_win_lens.max().item())
         eff_window = max(window_size, swa_win_max_len)
     num_reqs = seq_lens.shape[0]
+    if swa_floor is not None:
+        assert swa_indices is None and not has_swa_win, (
+            "a window floor applies to the causal window only"
+        )
+        assert swa_floor.dtype == torch.int32 and swa_floor.shape == (num_reqs,)
     combined_topk = combined_topk_width(topk, eff_window)
     if out_indices is None:
         # The kernel writes whole -1 padded rows.
@@ -277,6 +293,8 @@ def combine_topk_swa_indices(
         swa_lengths,
         swa_win_starts,
         swa_win_lens,
+        # Unused when HAS_SWA_FLOOR is False; any valid pointer will do.
+        swa_floor if swa_floor is not None else seq_lens,
         num_tokens,
         num_reqs,
         top_k=topk,
@@ -288,6 +306,7 @@ def combine_topk_swa_indices(
         BLOCK_T=block_t,
         SEARCH_STEPS=max(num_reqs, 1).bit_length(),
         HAS_SWA_WIN=has_swa_win,
+        HAS_SWA_FLOOR=swa_floor is not None,
         num_warps=2,
     )
     return combined_indices, combined_lens

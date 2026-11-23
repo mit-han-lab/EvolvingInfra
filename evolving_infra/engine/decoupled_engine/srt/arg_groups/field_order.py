@@ -1,3 +1,4 @@
+# Adapted from SGLang python/sglang/srt/arg_groups/field_order.py (commit 297e54fd10), modified for evolving-infra.
 """Field order preserving the ServerArgs positional constructor signature.
 
 Append new built-in fields to this tuple; inserting or regrouping changes existing
@@ -552,5 +553,6 @@ POSITIONAL_FIELD_ORDER = (
     "enable_return_aux_hidden_states",
     "aux_hidden_state_capture",
     "return_aux_hidden_state_layer_ids",
+    "enable_swa_branch_replay",
 )
 # fmt: on

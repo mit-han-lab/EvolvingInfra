@@ -1147,6 +1147,17 @@ class Req(ReqDllmMixin):
         # Full-KV-derived boundary whose SWA window should be inserted after
         # the current prefill pass.
         self.swa_branching_seqlen: Optional[int] = None
+        # SWA branch replay (MatchResult.swa_branch_replay): the matched prefix
+        # has no SWA window. Its first extend sets swa_valid_start to its own
+        # start, the first position whose SWA KV this request's attention reads.
+        # Adapted from DeepInfer csrc/engine/input_metadata/
+        # prepare_tensor_input_v4.cpp (swa_valid_start)@a679bb8.
+        self.swa_branch_replay = False
+        self.swa_valid_start = 0
+        # MatchResult.swa_branch_node: the node ending at the branch point,
+        # FULL on the host tier only. The load-back restores it with the reused
+        # prefix and leaves the request anchored on it (init_load_back).
+        self.swa_branch_node = None
         # An export ending inside an image must retain the SWA window before
         # the image-safe cache boundary, including during its release insert.
         self.swa_export_cache_retain_floor: Optional[int] = None
@@ -1679,6 +1690,8 @@ class Req(ReqDllmMixin):
             or self.swa_host_hit_length > 0
             or self.mamba_host_hit_length > 0
             or self.auxiliary_swa_host_hit_length > 0
+            # An SWA branch replay's branch node, past the reused prefix.
+            or self.swa_branch_node is not None
         )
 
     def materialized_host_hit_len(self) -> int:
@@ -2305,6 +2318,7 @@ class Req(ReqDllmMixin):
         self.routed_experts = None
         self.indexer_topk = None
         self.last_node = None
+        self.swa_branch_node = None
         self.kv.cache_protected_len = 0
         self.kv.cache_inserted_len = 0
         self.kv_rotation_base = None
@@ -3141,6 +3155,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         seq_lens = [r.extend_end for r in reqs]
         orig_seq_lens = [max(r.extend_end, len(r.origin_input_ids)) for r in reqs]
         prefix_lens = [r.prefix_len for r in reqs]
+        for r in reqs:
+            if r.swa_branch_replay:
+                # The prefix as admitted (after any host load-back) has no SWA
+                # window; ForwardBatch floors this request's windows here.
+                r.swa_valid_start = r.prefix_len
+                r.swa_branch_replay = False
         extend_lens = [r.extend_len for r in reqs]
         extend_logprob_start_lens = [
             compute_extend_logprob_start_len(

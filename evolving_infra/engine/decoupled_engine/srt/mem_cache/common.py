@@ -310,6 +310,10 @@ def match_kv_cache(
     max_len = req._compute_max_prefix_len(len(token_ids))
     req.num_matched_prefix_tokens = min(req.prefix_len + req.host_hit_length, max_len)
     req.swa_branching_seqlen = match_result.swa_branching_seqlen
+    # The request's first extend sets swa_valid_start (prepare_for_extend).
+    req.swa_branch_replay = match_result.swa_branch_replay
+    req.swa_branch_node = match_result.swa_branch_node
+    req.swa_valid_start = 0
     # A probe match keeps what it did not report; a new round resets both.
     if match_result.mamba_branching_seqlen is not None:
         req.mamba_branching_seqlen = match_result.mamba_branching_seqlen

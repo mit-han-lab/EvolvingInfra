@@ -1,6 +1,7 @@
 # Adapted from SGLang python/sglang/srt/mem_cache/unified_cache/components/swa.py (commit 297e54fd10), modified for evolving-infra.
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Callable, Optional, Sequence
 
 import torch
@@ -22,6 +23,7 @@ from decoupled_engine.srt.mem_cache.hicache_storage import (
     PoolTransfer,
     PoolTransferResult,
 )
+from decoupled_engine.srt.mem_cache.radix_cache import RadixKey
 from decoupled_engine.srt.mem_cache.unified_cache.cache_action import (
     FreeComponentDeviceSlot,
     FreeComponentHostSlot,
@@ -57,6 +59,8 @@ if TYPE_CHECKING:
         UnifiedRadixCache,
         UnifiedTreeNode,
     )
+
+logger = logging.getLogger(__name__)
 
 
 class SWAComponent(TreeComponent):
@@ -111,6 +115,8 @@ class SWAComponent(TreeComponent):
     # window (--dsv4-uniform-swa-residency window) instead of whole paths.
     uniform_lifecycle = False
     device_window = False
+    # SWA branch replay inserts that stopped at a host-only node (fallback).
+    _replay_insert_caps = 0
 
     @property
     def _device_full(self) -> bool:
@@ -529,13 +535,15 @@ class SWAComponent(TreeComponent):
         )
 
     def _recover_from_incoming(
-        self, *, node, incoming_full, start, end, result, cache_actions
+        self, *, node, incoming_full, start, end, result, cache_actions, keep_full
     ):
         full_cd = node.component_data[BASE_COMPONENT_TYPE]
         old_full = full_cd.value
         # A locked SWA tombstone also has Full locked, so only an unlocked
-        # Full value can be replaced by the incoming ids.
-        if full_cd.lock_ref > 0:
+        # Full value can be replaced by the incoming ids. An SWA branch replay's
+        # incoming Full was recomputed from an empty window (keep_full): the
+        # node keeps its own Full and takes only the incoming SWA.
+        if full_cd.lock_ref > 0 or keep_full:
             cache_actions.append(
                 RecoverSWAWithLockedFull(node.id, old_full, incoming_full)
             )
@@ -590,6 +598,7 @@ class SWAComponent(TreeComponent):
                 end=end,
                 result=result,
                 cache_actions=cache_actions,
+                keep_full=0 < params.swa_replay_start <= live_start,
             )
             if not self._independent:
                 consumed_from = min(consumed_from, live_start - total_prefix_len)
@@ -1296,24 +1305,79 @@ class SWAComponent(TreeComponent):
         insert_params.set_evicted_seqlen(
             self.component_type, req.kv.get_evicted_seqlen(self.component_type)
         )
+        replay_start = getattr(req, "swa_valid_start", 0)
+        # SWA branch replay: an insert must not pass a node whose Full is on
+        # the host tier only, or it would restore that node from this request's
+        # recomputed pages. Raw-token end of the insert, or None.
+        replay_cap = None
+        if replay_start:
+            # SWA branch replay: existing nodes keep their own Full KV.
+            insert_params.swa_replay_start = replay_start
+            device_end = self._device_end_before_host_only(req, token_ids_len)
+            if device_end is not None:
+                if device_end <= req.kv.cache_protected_len:
+                    # Insert nothing new. The insert then makes no leaf, so the
+                    # request's own window still slides with what it computed.
+                    if req.swa_branching_seqlen is not None:
+                        # The window at the branch point is not cached either:
+                        # the request's anchor normally holds the branch node on
+                        # the device (UnifiedRadixCache._match_swa_branch_replay),
+                        # so this is the fallback when it could not, e.g. a
+                        # failed load-back.
+                        self._replay_insert_caps += 1
+                        caps = self._replay_insert_caps
+                        if caps & (caps - 1) == 0:
+                            logger.info(
+                                "SWA branch replay: a host-only node on the "
+                                "path; the insert stops at the reused prefix "
+                                "(%d times so far)",
+                                caps,
+                            )
+                    insert_params.swa_window_key_len = token_ids_len - int(
+                        self.tree_core.is_eagle
+                    )
+                    return req.kv.cache_protected_len
+                # Insert up to that node (e.g. a prompt ending inside the
+                # earlier prompt's host-only tail, past the branch point).
+                replay_cap = device_end + int(self.tree_core.is_eagle)
 
         # A recurrent checkpoint must stay attached to its exact token prefix.
         # Let MambaComponent select the insertion length for hybrid caches.
         if self.cache.is_mamba_enabled:
-            return None
+            return replay_cap
 
         branching_seqlen = req.swa_branching_seqlen
         if branching_seqlen is None or branching_seqlen <= req.kv.cache_protected_len:
-            return None
+            return replay_cap
 
         # An EAGLE key with N bigrams spans N + 1 raw tokens.
         effective_cache_len = branching_seqlen + int(self.tree_core.is_eagle)
-        if effective_cache_len > token_ids_len:
-            return None
+        if effective_cache_len > token_ids_len or (
+            replay_cap is not None and effective_cache_len > replay_cap
+        ):
+            return replay_cap
 
         # Record the logical SWA branch boundary for insertion.
         insert_params.swa_branching_seqlen = branching_seqlen
         return effective_cache_len
+
+    def _device_end_before_host_only(
+        self, req: Req, token_ids_len: int
+    ) -> Optional[int]:
+        """Where the device-resident Full of the request's first
+        ``token_ids_len`` tokens ends (key units), if the tree holds a node past
+        it with Full on the host tier only (one an insert would restore from the
+        request's pages); else None."""
+        key = RadixKey(
+            req.full_untruncated_fill_ids,
+            req.extra_key,
+            limit=token_ids_len,
+            cache_salt=req.cache_salt,
+        )
+        device_len, _, _ = self.tree_core.match_full_device_prefix(key)
+        if self.tree_core.match_full_prefix_len(key) > device_len:
+            return device_len
+        return None
 
     def _free_out_of_window_slots(self, req: Req, pre_len: int) -> None:
         if self.uniform_lifecycle or self.sliding_window_size is None:
@@ -1331,6 +1395,8 @@ class SWAComponent(TreeComponent):
     def free_out_of_window_slots(
         self, req: Req, pre_len: int, insert_params: InsertParams
     ) -> None:
+        if insert_params.swa_window_key_len is not None:
+            pre_len = max(pre_len, insert_params.swa_window_key_len - 1)
         self._free_out_of_window_slots(req, pre_len)
         insert_params.set_evicted_seqlen(
             self.component_type, req.kv.get_evicted_seqlen(self.component_type)
