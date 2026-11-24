@@ -92,7 +92,7 @@ that is given wins.
 | Prefill completion forecast and global queue (with the cost function) | `--prefill-wait forecast`, `--global-queue`, `--global-queue-room forecast`, `--forecast-next-pass-lag`, `--move-margin 0`, `--max-state-age-ms 5000`, and the error table built into the router. The paper's runs used `--prefill-wait tokens --global-queue=false`; the GLM-5.2 and DeepSeek-V4-Flash configs pin these |
 | Late decode choice | `--pd-late-decode choose --pd-late-decode-rule fit_req --pd-late-decode-candidates all --pd-late-decode-local off --pd-late-decode-fit-native --pd-native-decode-state` |
 | KV session retention | `--symmetric-pd-kv-session-retention`; `--symmetric-pd-no-kv-session-retention` keeps it off for a model whose engine runs without it (a Mamba state, or sliding-window layers outside DeepSeek-V4) |
-| Placement basics | `--symmetric-pd-force-split`, `--symmetric-pd-d-select round-robin`, `--symmetric-pd-load-poll-ms 100`, `--symmetric-pd-import-cache-policy retain` (a D may become a P later, so imported KV follows the host write policy), `--kv-indexer-timeout-ms 200` |
+| Placement basics | `--symmetric-pd-force-split`, `--symmetric-pd-d-select round-robin`, `--symmetric-pd-load-poll-ms 100`, `--symmetric-pd-import-cache-policy retain` (a D may become a P later, so imported KV follows the host write policy), `--kv-indexer-timeout-ms 200` and `--kv-indexer-timeout-ms-per-100k-tokens 40` (the KV directory's lookup of a token-id prompt gets 200 ms plus 40 ms per 100,000 tokens, its hashing time at load) |
 
 ### Tuning
 

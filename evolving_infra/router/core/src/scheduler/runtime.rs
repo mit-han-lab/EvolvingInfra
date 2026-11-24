@@ -475,6 +475,9 @@ pub struct SymmetricPdRuntime {
     policy: Arc<dyn PlacementPolicy>,
     model: ModelId,
     indexer: Option<KvHintInjector>,
+    /// With the indexer: where this router sent each prompt, read when a
+    /// lookup fails ([`super::placement_record`]).
+    placement_record: Option<super::placement_record::PlacementRecord>,
     /// Random-seeded so restarts do not reuse ids the engines may still hold.
     transfer_counter: AtomicU64,
     /// `--symmetric-pd-p-select gateway-cache-aware`: the gateway cache-aware
@@ -558,6 +561,9 @@ impl SymmetricPdRuntime {
         policy: Arc<dyn PlacementPolicy>,
     ) -> Arc<Self> {
         let indexer = kv.map(KvHintInjector::new);
+        let placement_record = indexer
+            .as_ref()
+            .map(|ix| super::placement_record::PlacementRecord::new(ix.instances()));
         if indexer.is_none() {
             warn!(
                 target: "symmetric_pd",
@@ -611,6 +617,7 @@ impl SymmetricPdRuntime {
             cfg,
             model,
             indexer,
+            placement_record,
             policy,
             transfer_counter: AtomicU64::new(rand::random::<u64>() & (i64::MAX as u64)),
         });
@@ -962,14 +969,25 @@ impl SymmetricPdRuntime {
     ///
     /// # Outputs
     /// Parsed hits, query milliseconds, and optional raw JSON for pull-hint construction.
-    /// Missing indexer or unsuccessful lookup returns `(empty, 0.0, None)` so placement can
-    /// continue.
+    /// When the lookup fails, the answer of the router's placement record for the prompt
+    /// ([`super::placement_record`]) with 0 ms; without the indexer, or without a recorded
+    /// prefix, `(empty, 0.0, None)` so placement can continue.
     pub async fn hits_with_reply(&self, input: &PlaceInput) -> (IndexerHits, f64, Option<Value>) {
+        self.lookup(input, None).await
+    }
+
+    /// [`Self::hits_with_reply`] with the prompt's page hashes of the placement
+    /// record (`hashes`), computed here only when a failed lookup needs them.
+    async fn lookup(
+        &self,
+        input: &PlaceInput,
+        hashes: Option<&[u64]>,
+    ) -> (IndexerHits, f64, Option<Value>) {
         let Some(ix) = &self.indexer else {
             return (IndexerHits::new(), 0.0, None);
         };
         let model = input.model_id.as_deref().unwrap_or(&self.model.0);
-        match ix
+        if let Some((reply, ms)) = ix
             .query_indexer(
                 input.tokens.as_deref(),
                 input.hashes.as_deref(),
@@ -978,8 +996,39 @@ impl SymmetricPdRuntime {
             )
             .await
         {
-            Some((reply, ms)) => (self.parse_hits(&reply), ms, Some(reply)),
+            return (self.parse_hits(&reply), ms, Some(reply));
+        }
+        // The directory did not answer: where this router sent the prompt's prefix.
+        let owned;
+        let hashes = match (hashes, input.tokens.as_deref()) {
+            (Some(hashes), _) => hashes,
+            (None, Some(tokens)) => {
+                owned = super::placement_record::page_hashes(tokens);
+                owned.as_slice()
+            }
+            (None, None) => return (IndexerHits::new(), 0.0, None),
+        };
+        match self.placement_record.as_ref().and_then(|r| r.reply(hashes)) {
+            Some(reply) => {
+                info!(
+                    target: "symmetric_pd",
+                    rid = input.rid.as_deref().unwrap_or("-"),
+                    prompt_len = input.prompt_len,
+                    record = %reply["instances"],
+                    "kv directory lookup failed; placing by the router's placement record"
+                );
+                (self.parse_hits(&reply), 0.0, Some(reply))
+            }
             None => (IndexerHits::new(), 0.0, None),
+        }
+    }
+
+    /// Record that the prompt of `hashes` went to worker `url`.
+    fn record_placement(&self, hashes: Option<&[u64]>, url: &str) {
+        if let (Some(record), Some(hashes)) = (&self.placement_record, hashes) {
+            if let Some(instance) = record.worker_instance(url) {
+                record.record(hashes, instance);
+            }
         }
     }
 
@@ -1106,7 +1155,13 @@ impl SymmetricPdRuntime {
     /// deadline before forced placement.
     pub async fn admit(&self, input: PlaceInput) -> Result<Decision, SymmetricPdError> {
         let arrived = Instant::now();
-        let (mut hits, indexer_ms, reply) = self.hits_with_reply(&input).await;
+        // The prompt's pages in the placement record (with the indexer, for token-id prompts).
+        let record_hashes = self
+            .placement_record
+            .as_ref()
+            .and(input.tokens.as_deref())
+            .map(super::placement_record::page_hashes);
+        let (mut hits, indexer_ms, reply) = self.lookup(&input, record_hashes.as_deref()).await;
         let deadline = arrived + Duration::from_millis(self.cfg.max_queue_wait_ms);
         let prompt_len = input.prompt_len.max(1);
         let (pin, replay) = match &self.replay {
@@ -1342,6 +1397,7 @@ impl SymmetricPdRuntime {
                 "symmetric_pd pull hint on P-leg"
             );
         }
+        self.record_placement(record_hashes.as_deref(), &p_worker.url);
         let queue_wait_ms = arrived.elapsed().as_millis() as u64;
         log_decision(
             &placement,
@@ -2159,6 +2215,7 @@ mod tests {
             min_incremental_tokens: 0,
             local_prefix_fallback: false,
             indexer_timeout_ms: 20,
+            indexer_timeout_ms_per_100k_tokens: 0,
             worker_map: vec![
                 KvWorkerMapEntry {
                     id: 1,
@@ -3589,6 +3646,50 @@ mod tests {
     const CF_P1: &str = "http://10.0.0.1:30000";
     const CF_P2: &str = "http://10.0.0.2:30000";
     const CF_D: &str = "http://10.0.0.3:30000";
+    /// The KV directory does not answer (no indexer listens), so the router
+    /// places the next turn of a prompt by its own record of where it sent the
+    /// previous turn: the worker that holds it (not the idle one), with that
+    /// hit in whole pages.
+    #[tokio::test]
+    async fn a_failed_lookup_places_by_the_routers_own_record() {
+        let reg = registry_with(vec![
+            ("http://a", WorkerMode::Symmetric, Some(9000), sym(1.0, 0.0)),
+            ("http://b", WorkerMode::Symmetric, Some(9000), sym(1.0, 0.0)),
+            ("http://d", WorkerMode::Symmetric, Some(9000), sym(0.0, 1.0)),
+        ]);
+        let mut kv = kv_cfg();
+        kv.indexer_url = DEAD_INDEXER.into();
+        let mut cfg = SymmetricPdConfig::default();
+        cfg.placement.force_split = true;
+        let rt = SymmetricPdRuntime::spawn(cfg, Some(&kv), reg, model());
+        let turn1: Vec<u32> = (0..40_000).collect();
+        let first = rt
+            .admit(PlaceInput {
+                tokens: Some(turn1.clone()),
+                prompt_len: 40_000,
+                rid: Some("t1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // The first turn is still in flight: its worker is the busier P.
+        let holder = first.p_worker.url.clone();
+        let mut turn2 = turn1;
+        turn2.extend(50_000..50_512);
+        let second = rt
+            .admit(PlaceInput {
+                tokens: Some(turn2),
+                prompt_len: 40_512,
+                rid: Some("t2".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(second.p_worker.url, holder, "placed by the record");
+        // 156 whole pages of 256 tokens of the first turn.
+        assert_eq!(second.placement.term(TERM_HIT_TOKENS), Some(39_936.0));
+    }
+
     /// A closed port: the indexer query fails, so no request has a hit.
     const DEAD_INDEXER: &str = "http://127.0.0.1:9";
 
@@ -3612,6 +3713,7 @@ mod tests {
             min_incremental_tokens: 512,
             local_prefix_fallback: false,
             indexer_timeout_ms: 2000,
+            indexer_timeout_ms_per_100k_tokens: 0,
             worker_map: [CF_P1, CF_P2]
                 .iter()
                 .enumerate()
@@ -3658,15 +3760,28 @@ mod tests {
             .collect()
     }
 
+    /// An `n`-token prompt of `rid` that shares no page with another rid's: a
+    /// failed lookup finds it in no worker's placement record.
+    fn cold_prompt(rid: Option<&str>, n: usize) -> Vec<u32> {
+        let mut tokens = vec![7; n];
+        if let Some(first) = tokens.first_mut() {
+            *first = rid.map_or(0, |r| {
+                r.bytes()
+                    .fold(1u32, |h, b| h.wrapping_mul(31).wrapping_add(b.into()))
+            });
+        }
+        tokens
+    }
+
     /// Admit `rid` with an `n`-token prompt (token ids, so the indexer is
-    /// queried).
+    /// queried) that no other rid's prompt shares a page with.
     async fn admit_tokens(
         rt: &Arc<SymmetricPdRuntime>,
         rid: Option<&str>,
         n: usize,
     ) -> Result<Decision, SymmetricPdError> {
         let input = PlaceInput {
-            tokens: Some(vec![7; n]),
+            tokens: Some(cold_prompt(rid, n)),
             prompt_len: n as u64,
             rid: rid.map(str::to_string),
             ..Default::default()
@@ -3880,6 +3995,7 @@ mod tests {
             min_incremental_tokens: 512,
             local_prefix_fallback: false,
             indexer_timeout_ms: 200,
+            indexer_timeout_ms_per_100k_tokens: 0,
             worker_map: [CF_P1, CF_P2, CF_D, CF_D2]
                 .iter()
                 .enumerate()
@@ -3943,6 +4059,7 @@ mod tests {
             min_incremental_tokens: 512,
             local_prefix_fallback: false,
             indexer_timeout_ms: 200,
+            indexer_timeout_ms_per_100k_tokens: 0,
             worker_map: [CF_P1, CF_P2, CF_D, CF_D2]
                 .iter()
                 .enumerate()
@@ -3979,7 +4096,7 @@ mod tests {
     /// One cold 5,000-token admission with the forecast session key `session`.
     async fn admit_forecast(rt: &Arc<SymmetricPdRuntime>, rid: &str, session: &str) -> Decision {
         let input = PlaceInput {
-            tokens: Some(vec![7; 5_000]),
+            tokens: Some(cold_prompt(Some(rid), 5_000)),
             prompt_len: 5_000,
             rid: Some(rid.into()),
             forecast_session: Some(session.into()),

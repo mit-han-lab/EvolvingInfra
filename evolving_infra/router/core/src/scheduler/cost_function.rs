@@ -970,6 +970,7 @@ mod tests {
             min_incremental_tokens: gate,
             local_prefix_fallback: false,
             indexer_timeout_ms: 20,
+            indexer_timeout_ms_per_100k_tokens: 0,
             worker_map: urls
                 .iter()
                 .enumerate()

@@ -53,6 +53,10 @@ pub struct KvHintConfig {
     pub min_incremental_tokens: u32,
     pub local_prefix_fallback: bool,
     pub indexer_timeout_ms: u64,
+    /// Milliseconds added to the query timeout per 100,000 prompt tokens of a
+    /// token-id query (`--kv-indexer-timeout-ms-per-100k-tokens`): the
+    /// directory hashes every token, so its work grows with the prompt.
+    pub indexer_timeout_ms_per_100k_tokens: u64,
     pub worker_map: Vec<KvWorkerMapEntry>,
 }
 
@@ -81,6 +85,7 @@ pub struct KvHintInjector {
     min_incremental_tokens: u32,
     local_prefix_fallback: bool,
     timeout: Duration,
+    timeout_ms_per_100k_tokens: u64,
     url_by_id: HashMap<u64, String>,
     servicer_by_id: HashMap<u64, String>,
 }
@@ -125,9 +130,34 @@ impl KvHintInjector {
             min_incremental_tokens: cfg.min_incremental_tokens,
             local_prefix_fallback: cfg.local_prefix_fallback,
             timeout: Duration::from_millis(cfg.indexer_timeout_ms),
+            timeout_ms_per_100k_tokens: cfg.indexer_timeout_ms_per_100k_tokens,
             url_by_id,
             servicer_by_id,
         }
+    }
+
+    /// The deadline of one indexer query of `tokens` prompt tokens:
+    /// `--kv-indexer-timeout-ms` plus `--kv-indexer-timeout-ms-per-100k-tokens`
+    /// per 100,000 tokens. A query by prepared page hashes (`tokens` 0) has
+    /// no tokens to hash and keeps the fixed timeout.
+    pub fn query_timeout(&self, tokens: usize) -> Duration {
+        let extra_ms = self
+            .timeout_ms_per_100k_tokens
+            .saturating_mul(tokens as u64)
+            / 100_000;
+        self.timeout + Duration::from_millis(extra_ms)
+    }
+
+    /// The instance ids of `--kv-worker-map`, ascending, with their worker
+    /// URLs: the instances the router's placement record names.
+    pub fn instances(&self) -> Vec<(u64, String)> {
+        let mut ids: Vec<(u64, String)> = self
+            .url_by_id
+            .iter()
+            .map(|(id, url)| (*id, url.clone()))
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Worker URL of an indexer instance id (`--kv-worker-map`).
@@ -211,9 +241,12 @@ impl KvHintInjector {
     ///
     /// # Outputs
     /// Returns parsed JSON and elapsed milliseconds through receiving response
-    /// headers, including a possible single retry after a send error. JSON body
-    /// decoding occurs after that timing sample. Returns `None` for empty input,
-    /// transport/status/JSON failures; failures are logged and no KV is moved.
+    /// headers, including a possible single retry after a send error other
+    /// than the deadline. The deadline is [`Self::query_timeout`] of the
+    /// prompt's tokens. JSON body decoding occurs after that timing sample.
+    /// Returns `None` for empty input, transport/status/JSON failures; each
+    /// failure is logged with the elapsed time and the prompt's tokens, and no
+    /// KV is moved.
     pub async fn query_indexer(
         &self,
         token_ids: Option<&[u32]>,
@@ -221,9 +254,9 @@ impl KvHintInjector {
         cache_salt: Option<&str>,
         model_name: Option<&str>,
     ) -> Option<(Value, f64)> {
-        let mut payload = match (token_ids, block_hashes) {
-            (Some(t), _) if !t.is_empty() => json!({ "token_ids": t }),
-            (_, Some(h)) if !h.is_empty() => json!({ "block_hashes": h }),
+        let (mut payload, tokens) = match (token_ids, block_hashes) {
+            (Some(t), _) if !t.is_empty() => (json!({ "token_ids": t }), t.len()),
+            (_, Some(h)) if !h.is_empty() => (json!({ "block_hashes": h }), 0),
             _ => return None,
         };
         if let Some(model) = model_name.filter(|m| !m.is_empty()) {
@@ -232,41 +265,47 @@ impl KvHintInjector {
         if let Some(salt) = cache_salt.filter(|s| !s.is_empty()) {
             payload["cache_salt"] = Value::String(salt.to_string());
         }
+        let timeout = self.query_timeout(tokens);
         let start = std::time::Instant::now();
         let mut resp = self
             .client
             .post(&self.query_url)
-            .timeout(self.timeout)
+            .timeout(timeout)
             .json(&payload)
             .send()
             .await;
-        if resp.is_err() {
+        if resp.as_ref().is_err_and(|e| !e.is_timeout()) {
             // One immediate retry on a fresh connection: /query is
             // semantically idempotent and a send error is almost always a
-            // transient connection-level failure.
+            // transient connection-level failure. A query that ran out of
+            // time would only wait again.
             resp = self
                 .client
                 .post(&self.query_url)
-                .timeout(self.timeout)
+                .timeout(timeout)
                 .json(&payload)
                 .send()
                 .await;
         }
         let indexer_ms = start.elapsed().as_secs_f64() * 1e3;
+        let timeout_ms = timeout.as_millis() as u64;
         let value: Value = match resp {
             Ok(r) if r.status().is_success() => match r.json().await {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!(error = %e, "kv_hint: indexer reply decode failed; fail-open");
+                    tracing::warn!(error = %e, elapsed_ms = indexer_ms, prompt_tokens = tokens,
+                        timeout_ms, "kv_hint: indexer reply decode failed; fail-open");
                     return None;
                 }
             },
             Ok(r) => {
-                tracing::warn!(status = %r.status(), "kv_hint: indexer query failed; fail-open");
+                tracing::warn!(status = %r.status(), elapsed_ms = indexer_ms,
+                    prompt_tokens = tokens, timeout_ms, "kv_hint: indexer query failed; fail-open");
                 return None;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "kv_hint: indexer query failed; fail-open");
+                tracing::warn!(error = %e, timed_out = e.is_timeout(), elapsed_ms = indexer_ms,
+                    prompt_tokens = tokens, timeout_ms, "kv_hint: indexer query failed; fail-open");
                 return None;
             }
         };
@@ -515,6 +554,7 @@ mod tests {
             min_incremental_tokens: min_incremental,
             local_prefix_fallback: false,
             indexer_timeout_ms: 20,
+            indexer_timeout_ms_per_100k_tokens: 0,
             worker_map: vec![
                 KvWorkerMapEntry {
                     id: 1,
@@ -716,6 +756,84 @@ mod tests {
         let inj = injector(256, 0);
         let ans = answer(&inj, json!({"instances": {"99": {"cpu": 65536}}}));
         assert!(ans.candidates.is_empty());
+    }
+
+    /// An indexer whose `/query` answers `delay` after it has read the request
+    /// (the time its adapter takes to hash a long prompt), with instance 1
+    /// holding 1,000,000 tokens; its base URL.
+    async fn slow_indexer(delay: Duration) -> String {
+        use axum::{body::Bytes, routing::post, Json, Router};
+        let app = Router::new().route(
+            "/query",
+            post(move |_body: Bytes| async move {
+                tokio::time::sleep(delay).await;
+                Json(json!({"instances": {"1": {"gpu": 1_000_000, "cpu": 1_000_000}}}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// The injector of the paper preset (`--symmetric-pd-preset paper`) with
+    /// the KV directory at `url` and two workers.
+    fn paper_injector(url: &str) -> KvHintInjector {
+        use clap::Parser;
+        let map = r#"[{"id":1,"url":"http://a:30000","servicer":"a:18100"},{"id":2,"url":"http://b:30000","servicer":"b:18100"}]"#;
+        let argv = [
+            "sgl-router",
+            "--model-id",
+            "m",
+            "--tokenizer-path",
+            "/tmp/tokenizer.json",
+            "--policy",
+            "symmetric_pd",
+            "--symmetric-pd-worker",
+            "http://a:30000,8998,1,0",
+            "--symmetric-pd-worker",
+            "http://b:30000,8998,0,1",
+            "--symmetric-pd-preset",
+            "paper",
+            "--kv-indexer-url",
+            url,
+            "--kv-worker-map",
+            map,
+        ];
+        let config = crate::config::Cli::try_parse_from(argv)
+            .unwrap()
+            .into_config()
+            .unwrap();
+        KvHintInjector::new(config.model.kv_hint.as_ref().unwrap())
+    }
+
+    /// The directory lookup of a 1M-token prompt (DeepSeek-V4.1's context)
+    /// answers within its deadline: the paper preset's 200 ms plus 40 ms per
+    /// 100k tokens, 600 ms. The directory takes 250 ms, past the fixed part
+    /// alone; the other 350 ms cover sending the 1M token ids.
+    #[tokio::test]
+    async fn a_long_prompt_lookup_answers_within_its_deadline() {
+        let url = slow_indexer(Duration::from_millis(250)).await;
+        let inj = paper_injector(&url);
+        let tokens: Vec<u32> = (0..1_000_000u32).map(|i| i % 10).collect();
+        let (reply, ms) = inj
+            .query_indexer(Some(&tokens), None, None, None)
+            .await
+            .expect("the directory answers a 1M-token lookup");
+        assert_eq!(reply["instances"]["1"]["gpu"], 1_000_000);
+        assert!(ms >= 250.0, "{ms}");
+    }
+
+    /// The deadline grows with the prompt's tokens; a query by prepared page
+    /// hashes keeps the fixed part.
+    #[test]
+    fn the_query_deadline_grows_with_the_prompt() {
+        let mut inj = injector(256, 0);
+        assert_eq!(inj.query_timeout(1_000_000), Duration::from_millis(20));
+        inj.timeout_ms_per_100k_tokens = 40;
+        assert_eq!(inj.query_timeout(0), Duration::from_millis(20));
+        assert_eq!(inj.query_timeout(50_000), Duration::from_millis(40));
+        assert_eq!(inj.query_timeout(849_000), Duration::from_millis(359));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 pub mod cost_function;
 pub mod placement;
 pub mod placement_cost;
+pub mod placement_record;
 pub mod policy;
 pub mod role_drain;
 mod runtime;

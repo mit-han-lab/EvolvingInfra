@@ -80,6 +80,7 @@ fn hint_config(indexer_url: String, worker_map: Vec<KvWorkerMapEntry>) -> KvHint
         min_incremental_tokens: 0,
         local_prefix_fallback: false,
         indexer_timeout_ms: 500,
+        indexer_timeout_ms_per_100k_tokens: 0,
         worker_map,
     }
 }
