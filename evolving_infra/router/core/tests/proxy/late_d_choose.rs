@@ -533,6 +533,7 @@ async fn fixture(n: usize, opts: Opts) -> Fixture {
             min_incremental_tokens: 0,
             local_prefix_fallback: false,
             indexer_timeout_ms: 500,
+            indexer_timeout_ms_per_100k_tokens: 0,
             worker_map: vec![
                 KvWorkerMapEntry {
                     id: 1,

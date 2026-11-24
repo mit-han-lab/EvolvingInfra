@@ -316,6 +316,7 @@ async fn fixture_full(
                 local_prefix_fallback: false,
                 // Generous for a same-process mock; production default is 20.
                 indexer_timeout_ms: 500,
+                indexer_timeout_ms_per_100k_tokens: 0,
                 worker_map,
             }),
             pd_decode_policy: PdDecodePolicy::AffinityMinLoad,

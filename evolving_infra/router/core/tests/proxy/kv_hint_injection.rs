@@ -89,6 +89,7 @@ fn config_with_hint(indexer_url: &str, worker_map: Vec<KvWorkerMapEntry>) -> Con
                 local_prefix_fallback: false,
                 // Generous for a same-process mock; production default is 20.
                 indexer_timeout_ms: 500,
+                indexer_timeout_ms_per_100k_tokens: 0,
                 worker_map,
             }),
             pd_decode_policy: sgl_router::config::PdDecodePolicy::AffinityMinLoad,

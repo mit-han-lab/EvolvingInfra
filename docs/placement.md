@@ -17,9 +17,14 @@ indexer feeds these events to Dynamo's KV indexer. For each request the router q
 the prompt's page hashes and gets, per worker, how many prefix tokens it holds on GPU and in host
 memory.
 
-The directory is advisory. If it is down or slow (`--kv-indexer-timeout-ms`), the router places
-on load and role weights alone. The engine still checks that the pages are there before using
-them.
+The directory is advisory. Its lookup of a prompt hashes every token, so the router gives it
+`--kv-indexer-timeout-ms` plus `--kv-indexer-timeout-ms-per-100k-tokens` per 100,000 prompt
+tokens. If it is down or slower than that, the router reads its own record of where it sent each
+prompt instead: per 256-token page from the prompt's start, the workers it placed that page on
+(the last million pages it placed). A worker then holds its longest recorded prefix of the
+request's prompt, so the next turn of a long prompt still finds the worker that holds the previous
+one. Without a recorded prefix it places on load and role weights alone. The engine still checks
+that the pages are there before using them.
 
 ## Picking P
 

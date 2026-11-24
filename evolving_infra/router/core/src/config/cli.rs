@@ -32,6 +32,12 @@ const DEFAULT_COST_FUNCTION_LOAD_POLL_MS: u64 = 100;
 const DEFAULT_KV_HINT_INDEXER_TIMEOUT_MS: u64 = 20;
 /// KV hint indexer query timeout set by `--symmetric-pd-preset paper`.
 const PAPER_PRESET_KV_HINT_INDEXER_TIMEOUT_MS: u64 = 200;
+/// `--kv-indexer-timeout-ms-per-100k-tokens` set by `--symmetric-pd-preset
+/// paper`: the query adapter's measured time per 100k prompt tokens at load,
+/// 99th percentile (202-209 ms for prompts of 512k tokens and more on the
+/// 12-node GB300 rounds, its own `total_ms` log), so a long prompt's lookup
+/// ends within the deadline.
+const PAPER_PRESET_KV_INDEXER_TIMEOUT_MS_PER_100K_TOKENS: u64 = 40;
 /// `--symmetric-pd-preset paper` with `--prefill-wait forecast`: the
 /// `--max-state-age-ms`.
 const PAPER_PRESET_MAX_STATE_AGE_MS: f64 = 5000.0;
@@ -247,6 +253,12 @@ pub struct Cli {
     /// Defaults to 20.
     #[arg(long)]
     pub kv_indexer_timeout_ms: Option<u64>,
+    /// Milliseconds added to `--kv-indexer-timeout-ms` per 100,000 prompt
+    /// tokens of a token-id query: the KV directory hashes every token, so a
+    /// long prompt's lookup gets the time its own size takes. Default 0 (a
+    /// fixed timeout); 40 with `--symmetric-pd-preset paper`.
+    #[arg(long)]
+    pub kv_indexer_timeout_ms_per_100k_tokens: Option<u64>,
     /// JSON array mapping indexer instance ids to workers and their peer-KV
     /// servicer addresses:
     /// `[{"id":1,"url":"http://a:30000","servicer":"a:18100"}]`.
@@ -986,6 +998,8 @@ impl Cli {
         if self.kv_indexer_url.is_some() {
             self.kv_indexer_timeout_ms
                 .get_or_insert(PAPER_PRESET_KV_HINT_INDEXER_TIMEOUT_MS);
+            self.kv_indexer_timeout_ms_per_100k_tokens
+                .get_or_insert(PAPER_PRESET_KV_INDEXER_TIMEOUT_MS_PER_100K_TOKENS);
         }
         let servicers = self
             .kv_worker_map
@@ -1501,6 +1515,7 @@ impl Cli {
             || self.kv_pull_hint_min_incremental_tokens.is_some()
             || self.kv_pull_hint_local_prefix_fallback
             || self.kv_indexer_timeout_ms.is_some()
+            || self.kv_indexer_timeout_ms_per_100k_tokens.is_some()
             || self.kv_worker_map.is_some();
         // symmetric_pd: the indexer is optional (placement degrades to load /
         // role only, logged), so the flags are accepted but not required.
@@ -1509,7 +1524,8 @@ impl Cli {
             return Err(anyhow!(
                 "--kv-indexer-url / --kv-pull-hint-min-tokens / \
                  --kv-pull-hint-min-incremental-tokens / --kv-pull-hint-local-prefix-fallback / --kv-indexer-timeout-ms / \
-                 --kv-worker-map require --inject-kv-pull-hint or --policy symmetric_pd"
+                 --kv-indexer-timeout-ms-per-100k-tokens / --kv-worker-map require --inject-kv-pull-hint or \
+                 --policy symmetric_pd"
             ));
         }
         let spd_wants_indexer = spd_selected && self.kv_indexer_url.is_some();
@@ -1550,6 +1566,9 @@ impl Cli {
                     ),
                     local_prefix_fallback: self.kv_pull_hint_local_prefix_fallback,
                     indexer_timeout_ms: timeout_ms,
+                    indexer_timeout_ms_per_100k_tokens: self
+                        .kv_indexer_timeout_ms_per_100k_tokens
+                        .unwrap_or(0),
                     worker_map,
                 })
             } else {
@@ -2320,6 +2339,14 @@ mod tests {
             SymmetricPdImportCachePolicy::Retain
         );
         assert_eq!(c.model.kv_hint.as_ref().unwrap().indexer_timeout_ms, 200);
+        assert_eq!(
+            c.model
+                .kv_hint
+                .as_ref()
+                .unwrap()
+                .indexer_timeout_ms_per_100k_tokens,
+            40
+        );
         assert!(spd.role_drain_timeout.is_none(), "no external role control");
 
         let mut roles = with_kv.clone();
