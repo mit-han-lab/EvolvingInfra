@@ -31,8 +31,10 @@ radix tree does not track storage residency — a future miss simply
 recomputes).
 
 v1 scope cuts (deliberate): no mooncake-store fallback tier
-(peer-only), no cross-rank fan-out (rank-symmetric fetch: rank i pulls
-from owner rank i = servicer base port + tp_rank).
+(peer-only), no cross-rank fan-out (rank-symmetric fetch: attention-TP rank i
+pulls from the owner's attention-TP rank i, at the port the hint names plus i).
+The hint names the owner DP rank's servicer (one per DP rank under DP
+attention), so any reader rank reads any owner rank.
 
 Deployment:
     --hicache-storage-backend dynamic
@@ -475,9 +477,11 @@ class PeerKVBackend(HiCacheStorage):
                 shared.get_session_id(),
             )
             return _ReaderTransferEngine(engine=shared)
+        # The NICs of this scheduler's GPU: under DP attention every rank is
+        # attention-TP rank 0, so the rank does not name the GPU.
         te = _ReaderTransferEngine(
             hostname=get_local_ip_auto(),
-            gpu_id=self._rank,
+            gpu_id=self._local_gpu_id(),
             ib_device=self._ib_device,
         )
         logger.info(
@@ -1896,74 +1900,81 @@ class PeerKVBackend(HiCacheStorage):
         lease_seen: Optional[_PeerLease] = None
         failed = False
         req_id = self._req_id_from(extra_info)
-        for transfer in transfers:
-            keys = transfer.keys or []
-            n = len(keys)
-            match = (
-                self._match_lease_pages(keys, req_id, self._attempt_id_from(extra_info))
-                if n
-                else None
-            )
-            if match is None:
+        try:
+            for transfer in transfers:
+                keys = transfer.keys or []
+                n = len(keys)
+                match = (
+                    self._match_lease_pages(keys, req_id, self._attempt_id_from(extra_info))
+                    if n
+                    else None
+                )
+                if match is None:
+                    self._trace(
+                        event="get_pool",
+                        lease_id="",
+                        req_id=req_id,
+                        pool=str(transfer.name),
+                        pages=n,
+                        bytes=0,
+                        dur_ms=0.0,
+                        verdict="nolease",
+                        **self._trace_context_from(extra_info),
+                    )
+                    results[transfer.name] = [False] * n
+                    continue
+                lease, idxs = match
+                lease_seen = lease
+                host_pool = self.registered_pools[transfer.name]
+                t0 = time.monotonic()
+                if not any(True for _ in _iter_host_pool_buffers(host_pool)):
+                    # Logical-anchor transfer (dsv4 "swa"): the local pool owns
+                    # indices but no bytes and its get_page_buffer_meta returns
+                    # None; the owner attested these pages with [] segments.
+                    # Count them as fetched — the bytes live in sidecar pools.
+                    local_sizes = []
+                    ok = True
+                else:
+                    local_ptrs, local_sizes = _flatten_meta(
+                        *host_pool.get_page_buffer_meta(transfer.host_indices)
+                    )
+                    ok = self._read_pages(
+                        lease=lease,
+                        pool_name=str(transfer.name),
+                        page_idxs=idxs,
+                        local_ptrs=local_ptrs,
+                        local_sizes=local_sizes,
+                    )
                 self._trace(
                     event="get_pool",
-                    lease_id="",
-                    req_id=req_id,
+                    lease_id=lease.lease_id,
+                    req_id=lease.req_id,
                     pool=str(transfer.name),
                     pages=n,
-                    bytes=0,
-                    dur_ms=0.0,
-                    verdict="nolease",
-                    **self._trace_context_from(extra_info),
+                    bytes=sum(local_sizes),
+                    dur_ms=(time.monotonic() - t0) * 1e3,
+                    verdict="ok" if ok else "fail",
+                    **self._lease_trace_context(lease),
                 )
-                results[transfer.name] = [False] * n
-                continue
-            lease, idxs = match
-            lease_seen = lease
-            host_pool = self.registered_pools[transfer.name]
-            t0 = time.monotonic()
-            if not any(True for _ in _iter_host_pool_buffers(host_pool)):
-                # Logical-anchor transfer (dsv4 "swa"): the local pool owns
-                # indices but no bytes and its get_page_buffer_meta returns
-                # None; the owner attested these pages with [] segments.
-                # Count them as fetched — the bytes live in sidecar pools.
-                local_sizes = []
-                ok = True
-            else:
-                local_ptrs, local_sizes = _flatten_meta(
-                    *host_pool.get_page_buffer_meta(transfer.host_indices)
-                )
-                ok = self._read_pages(
-                    lease=lease,
-                    pool_name=str(transfer.name),
-                    page_idxs=idxs,
-                    local_ptrs=local_ptrs,
-                    local_sizes=local_sizes,
-                )
-            self._trace(
-                event="get_pool",
-                lease_id=lease.lease_id,
-                req_id=lease.req_id,
-                pool=str(transfer.name),
-                pages=n,
-                bytes=sum(local_sizes),
-                dur_ms=(time.monotonic() - t0) * 1e3,
-                verdict="ok" if ok else "fail",
-                **self._lease_trace_context(lease),
-            )
-            results[transfer.name] = [ok] * n
-            if ok:
-                lease.record_fetched(str(transfer.name), idxs)
-            else:
-                failed = True
-        # The controller calls batch_get_v2 once per KV batch (KV-derived
-        # sidecars) and once more for the trailing pools after KV completes.
-        # Release only when every expected pool is in (or on failure — the
-        # engine's all-or-nothing verdict discards the prefetch anyway).
-        # NOT after the first call: that killed every multi-batch pull at
-        # batch 2 and every single-batch pull at the trailing SWA fetch.
-        if lease_seen is not None and (failed or lease_seen.is_complete()):
-            self._release(lease_seen, complete=not failed)
+                results[transfer.name] = [ok] * n
+                if ok:
+                    lease.record_fetched(str(transfer.name), idxs)
+                else:
+                    failed = True
+        except BaseException:
+            # A read that raises fails the prefetch like a failed read: the
+            # owner's pins go at once, not at the lease TTL.
+            failed = True
+            raise
+        finally:
+            # The controller calls batch_get_v2 once per KV batch (KV-derived
+            # sidecars) and once more for the trailing pools after KV completes.
+            # Release only when every expected pool is in (or on failure — the
+            # engine's all-or-nothing verdict discards the prefetch anyway).
+            # NOT after the first call: that killed every multi-batch pull at
+            # batch 2 and every single-batch pull at the trailing SWA fetch.
+            if lease_seen is not None and (failed or lease_seen.is_complete()):
+                self._release(lease_seen, complete=not failed)
         return results
 
     # ------------------------------------------------------------------

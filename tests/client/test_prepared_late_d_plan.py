@@ -289,6 +289,23 @@ def test_classic_router_plans_are_accepted(tag, hint):
     ForwardPD.model_validate(plan)
 
 
+@pytest.mark.parametrize("rank, accepted", [(0, True), (3, True), (-1, False), (True, False), (1.0, False),
+                                            ("1", False), ([1], False)])
+def test_a_p_leg_s_routed_dp_rank_is_validated_as_the_tokenizer_does(rank, accepted):
+    prepared = descriptor()
+    for plan in (classic_plan(prepared, tag=TAG), late_plan(prepared, tag=TAG)):
+        plan["prefill"]["routed_dp_rank"] = rank
+        if accepted:
+            _validate_prepared_plan(plan, prepared)
+            assert ForwardPD.model_validate(plan).prefill.routed_dp_rank == rank
+        else:
+            assert_rejected(plan, prepared)
+            with pytest.raises(ValueError):
+                ForwardPD.model_validate(plan)
+        plan["decode"]["routed_dp_rank"] = 0
+        assert_rejected(plan, prepared)
+
+
 def test_classic_plan_rejections_are_unchanged():
     prepared = descriptor()
     plan = classic_plan(prepared, tag=TAG)

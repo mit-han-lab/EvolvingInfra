@@ -33,6 +33,8 @@ def handle_hicache(server_args: Any):
             "--enable-peer-kv-servicer requires --enable-hierarchical-cache "
             "(it serves the HiCache pinned host tier)."
         )
+    if cfg.enable_peer_kv_servicer and cfg.disable_peer_kv:
+        raise ValueError("--enable-peer-kv-servicer and --disable-peer-kv contradict.")
     if cfg.peer_kv_demote_source and not cfg.enable_peer_kv_servicer:
         raise ValueError(
             "--peer-kv-demote-source requires --enable-peer-kv-servicer "

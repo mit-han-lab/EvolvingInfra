@@ -181,20 +181,29 @@ pub(crate) fn include_rejected(error: &anyhow::Error) -> bool {
         })
 }
 
-/// The fields of one `/v1/loads` progress poll ([`fetch_progress_poll`]):
-/// the prefill-work progress, the rest of the load row (the trace's
-/// `engine_load`) and the raw `prefill_routing` snapshot.
-pub(crate) type ProgressPoll = (crate::prefill_work::PrefillProgress, Value, Option<Value>);
+/// One DP rank's row of a `/v1/loads` progress poll ([`fetch_progress_poll`]):
+/// its `dp_rank` (None when the row has none), the prefill-work progress, the
+/// rest of the load row (the trace's `engine_load`) and the raw
+/// `prefill_routing` snapshot.
+#[derive(Debug)]
+pub(crate) struct ProgressRow {
+    pub dp_rank: Option<u32>,
+    pub progress: crate::prefill_work::PrefillProgress,
+    pub load: Value,
+    pub routing: Option<Value>,
+}
 
-/// One `/v1/loads` poll: the prefill-work progress, the rest of the load row
-/// for the trace, and with `routing` the raw `prefill_routing` snapshot. The
-/// snapshot is removed from the load row, so the trace's `engine_load` keeps
-/// its size.
+/// One `/v1/loads` poll: every DP rank's row, in reply order. Each rank is a
+/// scheduler with its own RID namespace and its own progress epoch and
+/// sequence; the caller gives each row to its rank's slot and never merges
+/// two ranks. With `routing`, each row carries its raw `prefill_routing`
+/// snapshot, removed from the load row so the trace's `engine_load` keeps its
+/// size.
 pub(crate) async fn fetch_progress_poll(
     client: &reqwest::Client,
     base: &str,
     routing: bool,
-) -> anyhow::Result<ProgressPoll> {
+) -> anyhow::Result<Vec<ProgressRow>> {
     let include = if routing {
         "core,queues,prefill_work,prefill_routing"
     } else {
@@ -212,22 +221,47 @@ pub(crate) async fn fetch_progress_poll(
         .get_mut("loads")
         .and_then(Value::as_array_mut)
         .ok_or_else(|| anyhow::anyhow!("missing loads[]"))?;
-    // TP shares one scheduler RID namespace. Supporting DP requires explicit
-    // per-rank cursors and routing; never silently take an arbitrary rank.
-    anyhow::ensure!(
-        loads.len() == 1,
-        "uncached balance requires DP=1 per worker"
-    );
-    let mut load = loads.swap_remove(0);
-    let progress = load
-        .as_object_mut()
-        .and_then(|row| row.remove("prefill_work"))
-        .ok_or_else(|| anyhow::anyhow!("engine must enable --enable-prefill-work-snapshot"))?;
-    let snapshot = load
-        .as_object_mut()
-        .and_then(|row| row.remove("prefill_routing"))
-        .filter(|_| routing);
-    Ok((serde_json::from_value(progress)?, load, snapshot))
+    anyhow::ensure!(!loads.is_empty(), "empty loads[]");
+    loads
+        .drain(..)
+        .map(|mut load| {
+            let row = load
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("a loads[] row is not an object"))?;
+            let dp_rank = row
+                .get("dp_rank")
+                .and_then(Value::as_u64)
+                .and_then(|r| u32::try_from(r).ok());
+            let progress = row.remove("prefill_work").ok_or_else(|| {
+                anyhow::anyhow!("engine must enable --enable-prefill-work-snapshot")
+            })?;
+            let snapshot = row.remove("prefill_routing").filter(|_| routing);
+            Ok(ProgressRow {
+                dp_rank,
+                progress: serde_json::from_value(progress)?,
+                load,
+                routing: snapshot,
+            })
+        })
+        .collect()
+}
+
+/// The cursor of one poll's rows for [`Query::check`]: a single row's epoch
+/// and sequence; for several ranks, their epochs joined and their sequences
+/// summed (each rank's own cursor is checked again where its row is applied).
+pub(crate) fn rows_cursor(rows: &[ProgressRow]) -> (String, u64) {
+    if let [row] = rows {
+        return (row.progress.epoch.clone(), row.progress.sequence);
+    }
+    let epoch = rows
+        .iter()
+        .map(|r| r.progress.epoch.as_str())
+        .collect::<Vec<_>>()
+        .join("|");
+    let sequence = rows
+        .iter()
+        .fold(0u64, |sum, r| sum.saturating_add(r.progress.sequence));
+    (epoch, sequence)
 }
 
 #[cfg(test)]
@@ -298,6 +332,37 @@ mod tests {
         assert!(refresh.initialized("p"));
         assert!(refresh.claim("p", now + age * 3, age, true).is_none());
         assert!(refresh.claim("p", now + age * 4, age, false).is_some());
+    }
+
+    /// A DP-attention worker answers one `/v1/loads` row per DP rank, each with
+    /// its own scheduler's prefill progress; the poll returns every row with
+    /// its rank, so the cost function's work book sees each rank's progress.
+    #[tokio::test]
+    async fn a_dp_worker_s_progress_poll_reads_every_rank() {
+        use axum::{routing::get, Json, Router};
+        let rows: Vec<Value> = (0..4)
+            .map(|rank| {
+                serde_json::json!({
+                    "dp_rank": rank, "num_waiting_uncached_tokens": 0,
+                    "prefill_work": {"epoch": format!("e{rank}"), "sequence": 1, "remaining": {}},
+                })
+            })
+            .collect();
+        let app = Router::new().route(
+            "/v1/loads",
+            get(move || {
+                let rows = rows.clone();
+                async move { Json(serde_json::json!({ "loads": rows })) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let polled = fetch_progress_poll(&client, &url, false).await;
+        assert!(polled.is_ok(), "{:?}", polled.err());
+        let ranks: Vec<Option<u32>> = polled.unwrap().iter().map(|row| row.dp_rank).collect();
+        assert_eq!(ranks, vec![Some(0), Some(1), Some(2), Some(3)]);
     }
 
     #[test]

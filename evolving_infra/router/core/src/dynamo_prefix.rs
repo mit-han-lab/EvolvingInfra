@@ -126,6 +126,7 @@ mod tests {
                 id: 1,
                 url: "http://p0".into(),
                 servicer: String::new(),
+                dp_rank: None,
             }],
         });
         let answer = index.answer_from_reply(

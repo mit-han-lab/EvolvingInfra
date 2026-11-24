@@ -535,6 +535,11 @@ async fn register_one(
             w.set_chunk_tokens(chunk);
         }
     }
+    if info.peer_kv_pull.is_some() {
+        if let Some(w) = registry.get(&worker_id) {
+            w.set_peer_kv_pull(info.peer_kv_pull);
+        }
+    }
     if info.late_d.is_some() {
         if let Some(w) = registry.get(&worker_id) {
             w.set_late_d(info.late_d.clone());

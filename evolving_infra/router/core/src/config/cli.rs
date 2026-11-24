@@ -1589,6 +1589,20 @@ impl Cli {
                     ));
                 }
             }
+            // The forecast keeps its state (engine snapshots, pushed state,
+            // rejected includes) per worker, not per DP rank: refused when a
+            // worker is placed per rank (DP slots).
+            let forecast = spd
+                .cost_function
+                .as_ref()
+                .is_some_and(|c| c.forecast.is_some());
+            if forecast && !crate::kv_hint::ranks_by_url(&kv.worker_map).is_empty() {
+                return Err(anyhow!(
+                    "--prefill-wait forecast and --global-queue-room forecast keep their state per \
+                     worker, not per DP rank: with a --kv-worker-map that names dp_rank, use \
+                     --prefill-wait tokens (and --global-queue-room tokens)"
+                ));
+            }
         }
 
         let circuit_breaker = self.cb_threshold.map(|threshold| CircuitBreakerConfig {
@@ -4794,6 +4808,45 @@ mod tests {
         assert!(
             err.contains("--global-queue-room requires --symmetric-pd-p-select cost-function"),
             "{err}"
+        );
+    }
+
+    /// A `--kv-worker-map` that places a worker per DP rank refuses the
+    /// forecast wait and the queue's forecast room (their state is per
+    /// worker); the token-count wait without them is accepted, and so is the
+    /// forecast when no worker is placed per rank.
+    #[test]
+    fn symmetric_pd_forecast_is_refused_with_dp_slots() {
+        const DP_MAP: &str = concat!(
+            r#"[{"id":1,"url":"http://10.0.0.1:18080","servicer":"10.0.0.1:18100","dp_rank":0},"#,
+            r#"{"id":2,"url":"http://10.0.0.1:18080","servicer":"10.0.0.1:18101","dp_rank":1},"#,
+            r#"{"id":3,"url":"http://10.0.0.2:18080","servicer":"10.0.0.2:18100"},"#,
+            r#"{"id":4,"url":"http://10.0.0.3:18080","servicer":"10.0.0.3:18100"}]"#
+        );
+        let dp = |add: &[&str]| {
+            let mut args = vec!["--kv-worker-map", DP_MAP];
+            args.extend(add);
+            cost_function_config(&["--kv-worker-map", "--pd-late-decode"], &args)
+        };
+        for add in [
+            &["--prefill-wait", "forecast"][..],
+            &["--symmetric-pd-preset", "paper"][..],
+            &["--symmetric-pd-preset", "paper", "--prefill-wait", "tokens"][..],
+        ] {
+            let err = dp(add).unwrap_err().to_string();
+            assert!(err.contains("not per DP rank"), "{add:?}: {err}");
+        }
+        let pinned = [
+            "--symmetric-pd-preset",
+            "paper",
+            "--prefill-wait",
+            "tokens",
+            "--global-queue=false",
+        ];
+        assert!(dp(&pinned).is_ok());
+        assert!(dp(&[]).is_ok());
+        assert!(
+            cost_function_config(&["--pd-late-decode"], &["--prefill-wait", "forecast"]).is_ok()
         );
     }
 

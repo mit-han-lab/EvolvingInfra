@@ -244,10 +244,19 @@ impl PlacementCostParams {
     /// Predicted wall time of one pull of `pulled` tokens, in seconds.
     /// Zero tokens means no pull, which takes no time.
     pub fn pull_seconds(&self, pulled: u64) -> f64 {
+        self.pull_seconds_after(pulled, 0)
+    }
+
+    /// Predicted wall time of one pull of `pulled` tokens from a source whose
+    /// servicer still has `queued` tokens of earlier pulls to serve, in
+    /// seconds: the pull's fixed part plus the size-dependent part of all
+    /// `queued + pulled` tokens. Zero tokens means no pull.
+    pub fn pull_seconds_after(&self, pulled: u64, queued: u64) -> f64 {
         if pulled == 0 {
             return 0.0;
         }
-        (self.fetch_fixed_ms + self.fetch_ms_per_100k_tokens * pulled as f64 / 100_000.0) / 1000.0
+        let tokens = pulled.saturating_add(queued) as f64;
+        (self.fetch_fixed_ms + self.fetch_ms_per_100k_tokens * tokens / 100_000.0) / 1000.0
     }
 
     /// True with the token-count wait and a fixed copy price and rate: the trace
@@ -455,8 +464,22 @@ pub fn placement_cost_full(
     pulled: u64,
     wait: Option<WaitTerms>,
 ) -> CandidateCost {
+    placement_cost_queued(params, backlog, uncached, pulled, 0, wait)
+}
+
+/// [`placement_cost_full`] for a pull whose source servicer still has
+/// `pull_queued` tokens of earlier pulls to serve: the pull time is
+/// [`PlacementCostParams::pull_seconds_after`].
+pub fn placement_cost_queued(
+    params: &PlacementCostParams,
+    backlog: u128,
+    uncached: u64,
+    pulled: u64,
+    pull_queued: u64,
+    wait: Option<WaitTerms>,
+) -> CandidateCost {
     let rate = params.prefill_rate_tokens_per_s;
-    let pull_s = params.pull_seconds(pulled);
+    let pull_s = params.pull_seconds_after(pulled, pull_queued);
     let copy_tokens = params.copy_price * pulled as f64;
     let (backlog, own, wait_s, service_s) = match wait {
         None => {
@@ -506,6 +529,9 @@ pub struct CostInput<'a> {
     pub uncached: u64,
     /// Tokens pulled from another P (0 = no pull).
     pub pulled: u64,
+    /// Tokens of earlier pulls still queued on the pull's source servicer
+    /// (0 without a pull); the pull reads after them.
+    pub pull_queued: u64,
     /// the forecast wait: this P's forecast terms. None: the token-count terms (wait =
     /// tokens, or a P without a usable forecast).
     pub wait: Option<WaitTerms>,
@@ -551,11 +577,12 @@ fn placement_costs(params: &PlacementCostParams, inputs: &[CostInput<'_>]) -> Ve
     inputs
         .iter()
         .map(|input| {
-            placement_cost_full(
+            placement_cost_queued(
                 params,
                 input.backlog,
                 input.uncached,
                 input.pulled,
+                input.pull_queued,
                 input.wait,
             )
         })
@@ -1183,6 +1210,7 @@ mod placement_cost_tests {
             local_hit,
             uncached,
             pulled,
+            pull_queued: 0,
             wait: None,
             bound_s: None,
             forecast_off: false,
@@ -2248,6 +2276,7 @@ mod placement_cost_tests {
                     local_hit: next(3) * 8_192,
                     uncached: 1 + next(3) * 4_000,
                     pulled: [0, 0, 512, 18_000][next(4) as usize],
+                    pull_queued: 0,
                     wait: (next(2) == 1).then_some(WaitTerms {
                         wait_s: next(5) as f64 * 0.75,
                         service_s: 0.05 + next(4) as f64 * 0.25,

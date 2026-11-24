@@ -241,11 +241,13 @@ async fn pd_hinted_path_tags_the_prefill_body_only() {
             id: 1,
             url: prefill.url.clone(),
             servicer: "p1:18100".into(),
+            dp_rank: None,
         },
         KvWorkerMapEntry {
             id: 2,
             url: "http://owner:30000".into(),
             servicer: "owner:18100".into(),
+            dp_rank: None,
         },
     ];
     let cfg = config(Some(hint_config(indexer, map)));

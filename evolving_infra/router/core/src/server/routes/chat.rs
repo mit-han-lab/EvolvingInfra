@@ -654,6 +654,7 @@ pub async fn chat_completions(
             forward_input_ids,
             &d.marks,
             d.pull_hint.as_ref(),
+            d.p_dp_rank,
         )?;
         (d_body, p_body)
     } else if let Some(hint) = &kv_pull_hint {

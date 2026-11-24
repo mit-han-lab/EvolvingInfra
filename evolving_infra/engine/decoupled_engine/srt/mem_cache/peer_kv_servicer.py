@@ -106,6 +106,22 @@ POISON_BYTE = 0xDE
 POISON_LEN = 64
 
 
+def servicer_bind_port(base: int, tp_rank: int) -> int:
+    """The port the servicer of global TP rank ``tp_rank`` binds: one port per
+    GPU from ``base`` (``--peer-kv-servicer-port``), as the launcher reserves
+    them. Under DP attention TP rank ``dp_rank * attn_tp_size +
+    attn_tp_rank``, so every (DP rank, attention-TP rank) of a worker has its
+    own servicer, on every host of the worker."""
+    return base + tp_rank
+
+
+def servicer_group_port(base: int, tp_rank: int, attn_tp_rank: int) -> int:
+    """The port that names this rank's attention group (its DP rank): the port
+    of its attention-TP rank 0. Pull hints and publications carry this port; a
+    reader dials it plus its own attention-TP rank, so shard i reads shard i."""
+    return servicer_bind_port(base, tp_rank - attn_tp_rank)
+
+
 class PeerLookupTraceRecord(msgspec.Struct, gc=False):
     op: str  # lookup | lookup_swa_range | release | expire
     ts: float

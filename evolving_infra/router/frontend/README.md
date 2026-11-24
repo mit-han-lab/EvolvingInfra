@@ -123,7 +123,8 @@ For split execution the Backend sends an already selected plan to
   "prefill": {
     "target": {"transport": "sglang_generate", "endpoint": "http://p/generate", "config_id": "glm-config"},
     "kv_export": {"transfer_id": 123, "reader_addr": "tcp://d:port"},
-    "pull_hint": {"...": "optional existing engine pull-hint fields"}
+    "pull_hint": {"...": "optional existing engine pull-hint fields"},
+    "routed_dp_rank": 1
   },
   "decode": {
     "target": {"transport": "sglang_generate", "endpoint": "http://d/generate", "config_id": "glm-config"},
@@ -134,7 +135,10 @@ For split execution the Backend sends an already selected plan to
 ```
 
 `kv_export`, `kv_import` and optional `pull_hint` are produced by the engine
-Backend adapter, including all engine-required fields. The tokenizer does not
+Backend adapter, including all engine-required fields. Optional
+`prefill.routed_dp_rank` (a JSON integer, at least 0) names the DP rank of a
+DP-attention P worker that the router placed the leg on; P gets it as
+`routed_dp_rank`. The tokenizer does not
 choose nodes, create transfer IDs or invent KV policy. `transfer_id` is a JSON
 u64 and must match both marks and every decode candidate's `kv_import`.
 Nested transfer IDs, `prefill.late_d.k` and each candidate's `late_d.k` and
@@ -151,7 +155,7 @@ and have the prepared input's `config_id`. The callback URL must be in
 The service consumes the reference exactly once. For text it serializes one common
 input body shared by both uploaders; for images it creates a separate decode body
 without image bytes. It attaches small per-leg suffixes. P gets
-`kv_export`, optional `kv_pull_hint`, and `stream=false`. D gets `kv_import` and
+`kv_export`, optional `kv_pull_hint` and `routed_dp_rank`, and `stream=false`. D gets `kv_import` and
 the original stream setting. Both retain the original sampling/output budget:
 the symmetric engine's export mode controls P's first-token completion.
 

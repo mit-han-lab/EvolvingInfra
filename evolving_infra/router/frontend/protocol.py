@@ -105,6 +105,9 @@ class PrefillLeg(BaseModel):
     target: Target
     kv_export: dict
     pull_hint: dict | None = None
+    # The DP rank of the P worker that runs the leg, when the router chose one
+    # (the engine's `routed_dp_rank`).
+    routed_dp_rank: Annotated[int, Field(ge=0)] | None = None
     kv_session: KvSession | None = None
     # Late D choose: the router's symmetric `late_d` field (k, default_idx).
     late_d: dict | None = None

@@ -52,6 +52,19 @@ pub struct LateDWorkerInfo {
     pub kv_ip: Option<String>,
 }
 
+/// The peer KV pulls a worker's ranks take (`/server_info` internal state
+/// `peer_kv_pull`). `None` on the worker when the engine does not report it
+/// (an older engine): the router then hints its pulls as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerKvPull {
+    /// Every rank takes a hinted pull. False under DP attention for a cache
+    /// whose pull would need more than the full KV (no SWA branch replay).
+    pub takes: bool,
+    /// Tokens a request recomputes at the end of a pulled prefix (the SWA
+    /// branch replay window after a FULL-only pull; 0 for an exact pull).
+    pub replay_tokens: u64,
+}
+
 /// Parse a host from a worker URL. Matches SMG's `worker_builder.rs`
 /// fallback chain: parse as-is, retry with `http://` prefix if missing,
 /// fall back to `"localhost"` if both fail. The fallback is defensive —
@@ -213,6 +226,8 @@ pub struct Worker {
     chunk_tokens: AtomicU64,
     /// `/server_info` `late_d` block (see [`LateDWorkerInfo`]).
     late_d: RwLock<Option<LateDWorkerInfo>>,
+    /// `/server_info` `peer_kv_pull` (see [`PeerKvPull`]).
+    peer_kv_pull: RwLock<Option<PeerKvPull>>,
 }
 
 impl Worker {
@@ -252,6 +267,7 @@ impl Worker {
             kv_capacity_tokens: AtomicU64::new(0),
             chunk_tokens: AtomicU64::new(0),
             late_d: RwLock::new(None),
+            peer_kv_pull: RwLock::new(None),
         }
     }
 
@@ -340,6 +356,17 @@ impl Worker {
     /// Record the `/server_info` engine chunk (0 clears it).
     pub fn set_chunk_tokens(&self, tokens: u64) {
         self.chunk_tokens.store(tokens, Ordering::Relaxed);
+    }
+
+    /// The peer KV pulls this worker's ranks take, as reported by
+    /// `/server_info`, if reported.
+    pub fn peer_kv_pull(&self) -> Option<PeerKvPull> {
+        *self.peer_kv_pull.read()
+    }
+
+    /// Record the `/server_info` peer KV pull report (`None` clears it).
+    pub fn set_peer_kv_pull(&self, pull: Option<PeerKvPull>) {
+        *self.peer_kv_pull.write() = pull;
     }
 
     /// The `/server_info` `late_d` block, if the engine runs late D.

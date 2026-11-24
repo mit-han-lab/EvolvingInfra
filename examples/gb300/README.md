@@ -56,10 +56,17 @@ to the first token at prefill completion. Run it without `--planner`:
 evolving-infra serve --config examples/gb300/v41-flash-6p6d-ep4.yaml --hosts <node0>,...,<node11>
 ```
 
-The router places requests by cache hit (`--symmetric-pd-p-select=cache-first`) and chooses
-the decode worker at arrival (`--pd-late-decode=off`): its cost function and late decode
-choice need workers without DP attention. Each worker's DP controller places a request on one
-of its DP ranks ([symmetric P/D, DP attention](../../evolving_infra/engine/decoupled_engine/srt/disaggregation/symmetric/README.md#dp-attention)).
+The router places each prefill leg on one DP rank of a prefill worker with its cost function,
+pricing every (worker, DP rank) by its queue, its prefix hit and a fetch from the rank that holds
+the prefix (each prefill rank has its own peer KV servicer; the decode workers, which never
+prefill, run none; [placement](../../docs/placement.md)), with
+the token-count wait and no global queue, the copy price and rate measured (`auto`), and a
+fetch's time as measured on GB300 with this config on prompts outside any trace
+(`--fetch-fixed-ms 24`, `--fetch-ms-per-100k-tokens 106`). It
+chooses the decode worker at arrival (`--pd-late-decode=off`): late decode choice needs workers
+without DP attention. Each worker's DP controller sends a prefill leg to the rank the router
+names and places decode legs on its DP ranks
+([symmetric P/D, DP attention](../../evolving_infra/engine/decoupled_engine/srt/disaggregation/symmetric/README.md#dp-attention)).
 
 ## On one node
 

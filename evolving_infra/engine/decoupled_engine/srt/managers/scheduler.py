@@ -3149,6 +3149,7 @@ class Scheduler(
         from decoupled_engine.srt.mem_cache.peer_kv_servicer import (
             PeerKVServicer,
             build_owner_transfer_engine,
+            servicer_bind_port,
         )
         from decoupled_engine.srt.mem_cache.unified_cache.components import peek_time_counter
         from decoupled_engine.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
@@ -3222,6 +3223,8 @@ class Scheduler(
                 or host_dedup is not None
                 or ps.pp_size != 1
                 or ps.dp_size != 1
+                # A reader prepares a GPU export at the owner's rank 0.
+                or ps.attn_dp_size != 1
                 or ps.dcp_size != 1
                 or ps.nnodes != 1
                 or (
@@ -3265,8 +3268,10 @@ class Scheduler(
         self.peer_kv_servicer = PeerKVServicer(
             host_pool_group=self.tree_cache.host_pool_group,
             page_size=self.tree_cache.page_size,
-            bind_port=(
-                self.server_args.peer_kv_servicer_port + get_parallel().attn_tp_rank
+            # One servicer per GPU: under DP attention one per (DP rank,
+            # attention-TP rank), each DP rank's host tier its own.
+            bind_port=servicer_bind_port(
+                self.server_args.peer_kv_servicer_port, get_parallel().tp_rank
             ),
             max_leased_bytes=int(
                 _resolved(self.server_args, "peer_kv_servicer_max_leased_gb") * (1 << 30)
@@ -7036,6 +7041,10 @@ class Scheduler(
         tree_cache = getattr(self, "tree_cache", None)
         if getattr(tree_cache, "dsv4_uniform_swa_residency", "full") == "window":
             ei_state["dsv4_window"] = tree_cache.dsv4_window_info()
+        # The peer KV pulls this rank takes: the router hints and prices a
+        # pull only for a reader that takes one, net of its replay.
+        if hasattr(tree_cache, "peer_pull_info"):
+            ei_state["peer_kv_pull"] = tree_cache.peer_pull_info()
         if ei_state:
             from decoupled_engine.srt.utils.msgspec_utils import msgspec_to_builtins
 

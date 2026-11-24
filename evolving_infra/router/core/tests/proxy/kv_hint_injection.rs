@@ -187,11 +187,13 @@ async fn check_pd_hint(local_prefix_fallback: bool) {
                 id: 1,
                 url: prefill.url.clone(),
                 servicer: "p1:18100".into(),
+                dp_rank: None,
             },
             KvWorkerMapEntry {
                 id: 2,
                 url: "http://owner:30000".into(),
                 servicer: "owner:18100".into(),
+                dp_rank: None,
             },
         ],
     );
@@ -269,11 +271,13 @@ async fn plain_mode_hint_lands_on_single_body() {
                 id: 1,
                 url: plain.url.clone(),
                 servicer: "w1:18100".into(),
+                dp_rank: None,
             },
             KvWorkerMapEntry {
                 id: 2,
                 url: "http://owner:30000".into(),
                 servicer: "owner:18100".into(),
+                dp_rank: None,
             },
         ],
     );
@@ -316,6 +320,7 @@ async fn unreachable_indexer_fails_open() {
             id: 1,
             url: plain.url.clone(),
             servicer: "w1:18100".into(),
+            dp_rank: None,
         }],
     );
     let ctx = build_ctx(
@@ -358,11 +363,13 @@ async fn dynamo_cache_aware_routes_to_owner_without_cross_p_hint() {
                 id: 1,
                 url: p0.url.clone(),
                 servicer: String::new(),
+                dp_rank: None,
             },
             KvWorkerMapEntry {
                 id: 2,
                 url: p1.url.clone(),
                 servicer: String::new(),
+                dp_rank: None,
             },
         ],
     );

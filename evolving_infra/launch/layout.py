@@ -40,8 +40,13 @@ class Worker:
         return 8998 + 1000 * self.local
 
     @property
-    def servicer_port(self) -> int:  # one port per GPU from here
+    def servicer_port(self) -> int:  # one port per GPU from here, at its TP rank
         return 18100 + 1000 * self.local
+
+    def rank_servicer_port(self, dp_rank: int) -> int:
+        """The peer-KV servicer of DP rank ``dp_rank`` (on the worker's ``ip``): the port of
+        its attention-TP rank 0, TP rank ``dp_rank * (gpus // dp)``."""
+        return self.servicer_port + dp_rank * (self.gpus // self.dp)
 
     @property
     def events_port(self) -> int:  # KV events of DP rank r on events_port + r

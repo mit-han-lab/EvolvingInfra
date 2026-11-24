@@ -87,12 +87,13 @@ pub(super) fn chunk_of(worker: &Worker) -> (u64, &'static str) {
         .map_or((CHUNK_TOKENS, "default"), |c| (c, "server_info"))
 }
 
-/// The class of one request: (bound, h1, h2, C, C source, owner URL). The
-/// owner is the P with the largest local hit (the first one of the pool on a
-/// tie); its chunk decides. A request without a hit is free.
+/// The class of one request: (bound, h1, h2, C, C source, owner slot). The
+/// owner is the slot with the largest local hit (the first one of the pool on a
+/// tie); its chunk decides (`chunks`: each slot's chunk, [`CostFunction::slot_chunks`]).
+/// A request without a hit is free.
 pub(super) fn classify(
     candidates: &[Candidate],
-    pool: &[Arc<Worker>],
+    chunks: &[(String, (u64, &'static str))],
     tokens: u64,
 ) -> (bool, u64, u64, u64, &'static str, Option<String>) {
     let hits: Vec<u64> = candidates.iter().map(|c| c.local_hit.min(tokens)).collect();
@@ -103,9 +104,9 @@ pub(super) fn classify(
         .map(|c| c.worker_url.clone());
     let (chunk, source) = owner
         .as_deref()
-        .and_then(|url| pool.iter().find(|w| w.url == url))
-        .or_else(|| pool.first())
-        .map_or((CHUNK_TOKENS, "default"), |w| chunk_of(w));
+        .and_then(|key| chunks.iter().find(|(slot, _)| slot == key))
+        .or_else(|| chunks.first())
+        .map_or((CHUNK_TOKENS, "default"), |(_, chunk)| *chunk);
     (
         crate::global_queue::bound_to_owner(&hits, chunk),
         h1,
@@ -366,6 +367,18 @@ impl CostFunction {
         self.queue.is_some()
     }
 
+    /// Each prefill slot of `pool` ([`CostFunction::slots`]) with its engine
+    /// chunk ([`super::Slot::chunk`]).
+    pub(super) fn slot_chunks(&self, pool: &[Arc<Worker>]) -> Vec<(String, (u64, &'static str))> {
+        self.slots(pool)
+            .into_iter()
+            .map(|slot| {
+                let chunk = slot.chunk();
+                (slot.key, chunk)
+            })
+            .collect()
+    }
+
     /// A release pass is due (an applied progress poll, a terminal status).
     pub(super) fn queue_wake_poll(&self) {
         if let Some(queue) = &self.queue {
@@ -444,7 +457,8 @@ impl CostFunction {
         } else {
             self.candidates(ix, answer.as_ref(), tokens, pool)
         };
-        let (bound, h1, h2, chunk, chunk_source, owner) = classify(&candidates, pool, tokens);
+        let (bound, h1, h2, chunk, chunk_source, owner) =
+            classify(&candidates, &self.slot_chunks(pool), tokens);
         queue.state.lock().counters.arrivals += 1;
         // A rid that the queue holds has no reservation yet: refused here for
         // both classes (the book refuses a used or missing rid itself).
@@ -560,6 +574,9 @@ impl CostFunction {
         let mut first = true;
         loop {
             let pool = queue.step_pool();
+            // The walk steps over prefill slots: a worker placed per rank
+            // offers each DP rank with its share of the worker's chunk.
+            let slot_chunks = self.slot_chunks(&pool);
             // `--symmetric-pd-pull-from-any-holder`: a held request keeps a pull
             // hint whose source is still a registered worker of any role
             // (breaker allowing when the breaker is on).
@@ -580,9 +597,9 @@ impl CostFunction {
                 .as_ref()
                 .filter(|_| drain_wanted)
                 .map(|forecast| {
-                    let probes: Vec<Candidate> = pool
+                    let probes: Vec<Candidate> = slot_chunks
                         .iter()
-                        .map(|w| crate::prefill_work::queue_probe_candidate(&w.url))
+                        .map(|(slot, _)| crate::prefill_work::queue_probe_candidate(slot))
                         .collect();
                     forecast.context(
                         &self.book,
@@ -600,7 +617,7 @@ impl CostFunction {
             // A P that joined the step pool (again) restarts its T_react:
             // after a role switch back to prefill its earlier samples are
             // from another load (lock order: queue, then work book).
-            let now_urls: Vec<String> = pool.iter().map(|w| w.url.clone()).collect();
+            let now_urls: Vec<String> = slot_chunks.iter().map(|(slot, _)| slot.clone()).collect();
             if now_urls != st.pool_urls {
                 let joined: Vec<String> = now_urls
                     .iter()
@@ -629,8 +646,9 @@ impl CostFunction {
                 self.queue_trace_drops(&gone, "client_gone", None);
                 return outcome;
             }
-            let urls: Vec<String> = pool.iter().map(|w| w.url.clone()).collect();
-            let chunks: Vec<(u64, &'static str)> = pool.iter().map(|w| chunk_of(w)).collect();
+            let urls: Vec<String> = slot_chunks.iter().map(|(slot, _)| slot.clone()).collect();
+            let chunks: Vec<(u64, &'static str)> =
+                slot_chunks.iter().map(|(_, chunk)| *chunk).collect();
             let depth = vec![0u64; urls.len()];
             let now = Instant::now();
             let step = {
@@ -837,8 +855,8 @@ impl CostFunction {
             return;
         };
         let now = Instant::now();
-        let pool = queue.current_pool();
-        let urls: Vec<String> = pool.iter().map(|w| w.url.clone()).collect();
+        let slot_chunks = self.slot_chunks(&queue.current_pool());
+        let urls: Vec<String> = slot_chunks.iter().map(|(slot, _)| slot.clone()).collect();
         let (queue_len, held_input_tokens, held_uncached_tokens, oldest_hold_s, counters) = {
             let st = queue.state.lock();
             (
@@ -854,20 +872,20 @@ impl CostFunction {
                 st.counters,
             )
         };
-        let workers: Vec<Value> = pool
+        let workers: Vec<Value> = slot_chunks
             .iter()
-            .map(|w| {
-                let (chunk, chunk_source) = chunk_of(w);
+            .map(|(slot, (chunk, chunk_source))| {
+                let (chunk, chunk_source) = (*chunk, *chunk_source);
                 let row = self
                     .book
-                    .queue_rows(std::slice::from_ref(&w.url), now, chunk)
+                    .queue_rows(std::slice::from_ref(slot), now, chunk)
                     .pop()
                     .expect("one row per URL");
                 let fresh = row
                     .view_age_ms
                     .is_some_and(|ms| Duration::from_millis(ms) <= queue.stale_after);
                 json!({
-                    "worker_url": w.url,
+                    "worker_url": slot,
                     "chunk_tokens": chunk,
                     "chunk_source": chunk_source,
                     "queued_tokens": row.queued.to_string(),

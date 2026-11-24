@@ -684,10 +684,19 @@ class EiMemory(msgspec.Struct):
         "one-sided RDMA reads. Requires --enable-hierarchical-cache and the "
         "unified radix cache path with peer-enabled host pools (DeepSeek-V4 or DSA).",
     ] = False
+    disable_peer_kv: A[
+        bool,
+        "Keep the peer KV path off: the symmetric preset turns on neither the "
+        "PeerKVServicer nor the peer_kv reader, and --enable-peer-kv-servicer is "
+        "refused (an explicit peer_kv storage backend still runs its reader). For "
+        "a worker that never prefills a P-leg (a static split's decode worker): "
+        "no pull reads its host tier and it pulls nothing.",
+    ] = False
     peer_kv_servicer_port: A[
         int,
         "Base TCP port for the PeerKVServicer's ZMQ REP listener; each TP rank "
-        "binds base_port + attn_tp_rank.",
+        "binds base_port + its TP rank (one port per GPU; under DP attention one "
+        "servicer per DP rank and attention-TP rank).",
     ] = 18100
     enable_peer_kv_gpu_export: A[
         bool,

@@ -8,7 +8,16 @@ router addresses whole workers. The worker's DP controller places requests:
 - A decode leg (``kv_import`` without ``kv_export``) goes to
   ``planes.import_dp_rank(transfer_id)``. The prefill leg's owner computes the
   same rank and sends its publications there, so the two legs meet without a
-  message between the workers.
+  message between the workers. It goes there whatever rank it names
+  (``routed_dp_rank``), so a request cannot stop the controller; that rank's
+  scheduler refuses a decode leg that names another rank (HTTP 400,
+  ``symmetric_parse_marks``).
+- A prefill leg that names its rank (``routed_dp_rank``) goes to that rank.
+  The router names the P leg's rank when its cost function priced the
+  worker's ranks one by one (a rank that does not hold the prefix then fetches
+  it from the rank that does). The leg is recorded as if this rule had chosen
+  its rank (its pages, requests and uncached tokens), so the rule below stays
+  informed for the legs the router leaves to it.
 - Every other request (prefill legs, local requests) is placed by the router's
   cache-first prefill selection (``select_p_cache_first`` in
   ``router/core/src/scheduler/placement.rs``), applied to the worker's DP ranks
@@ -31,7 +40,8 @@ router addresses whole workers. The worker's DP controller places requests:
   rank's queue is longer, while a prefix that every rank holds (a shared
   system prompt) prefers no rank. Queued tokens do not outweigh a hit: on a
   saturated worker the ranks' queues differ by more than a whole prompt, and a
-  turn sent away from its rank computes its whole prompt again.
+  leg this rule places carries no pull hint, so a turn it sent away from its
+  rank would compute its whole prompt again.
 """
 
 from __future__ import annotations
@@ -117,15 +127,27 @@ class SymmetricDpPlacement:
             return least_loaded([r for r in ranks if held[r] == best])
         return least_loaded(ranks)
 
-    def place(self, input_ids: Optional[Sequence[int]], kv_export: Any = None, kv_import: Any = None) -> int:
+    def place(
+        self,
+        input_ids: Optional[Sequence[int]],
+        kv_export: Any = None,
+        kv_import: Any = None,
+        rank: Optional[int] = None,
+    ) -> int:
+        """The rank of one leg (module docstring). ``rank``: the rank the leg
+        names (``routed_dp_rank``); a prefill or local leg's is kept and
+        recorded like a rank this rule chose, a decode leg's is not used."""
         if kv_import is not None and kv_export is None:
             tid = _transfer_id(kv_import)
             if tid is not None:
                 return import_dp_rank(tid, self.dp_size)
+        if rank is not None and not 0 <= rank < self.dp_size:
+            raise ValueError(f"routed_dp_rank {rank} is not a rank of this worker ({self.dp_size} ranks)")
         ids = input_ids or ()
         hashes = self._page_hashes(ids)
         held = self.held_pages(hashes)
-        rank = self._rank(held, len(ids))
+        if rank is None:
+            rank = self._rank(held, len(ids))
         self._reqs[rank] += 1
         self._queued[rank] += max(0, len(ids) - held[rank] * self.page_size)
         bit = 1 << rank

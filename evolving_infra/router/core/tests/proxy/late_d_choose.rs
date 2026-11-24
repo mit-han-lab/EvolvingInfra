@@ -538,11 +538,13 @@ async fn fixture(n: usize, opts: Opts) -> Fixture {
                     id: 1,
                     url: p_url.clone(),
                     servicer: "p1:18100".into(),
+                    dp_rank: None,
                 },
                 KvWorkerMapEntry {
                     id: 2,
                     url: "http://owner:30000".into(),
                     servicer: "owner:18100".into(),
+                    dp_rank: None,
                 },
             ],
         })

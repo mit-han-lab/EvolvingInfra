@@ -25,6 +25,12 @@
 //! `routers/http/kv_pull_hint.rs`. This module retains the external-indexer
 //! boundary; colocating the indexer process with the router does not make
 //! cache ownership or physical KV transfer part of this client.
+//!
+//! DP attention: a worker whose map entries name two or more DP ranks
+//! (`dp_rank`) is a set of prefill slots, one per rank, each with its own
+//! directory instance and its own servicer. Hits, pull sources and pull
+//! targets are then per slot ([`slot_key`]); a worker without ranks in the map
+//! is one slot, keyed by its URL.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -32,17 +38,73 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// One `--kv-worker-map` entry: indexer instance id → worker base URL and
-/// its peer-KV servicer address (`host:port` of rank 0; the engine fans out
-/// per-rank by port offset).
-#[derive(Debug, Clone, Deserialize)]
+/// One `--kv-worker-map` entry: indexer instance id → worker base URL, its
+/// DP rank and that rank's peer-KV servicer address (`host:port`; an engine
+/// with attention TP inside the rank serves TP shard i at this port + i).
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct KvWorkerMapEntry {
     pub id: u64,
     pub url: String,
     /// Peer-KV servicer address; only the pull-hint path needs it, so the
     /// symmetric_pd placer (which maps hits to worker URLs only) may omit it.
+    /// An instance without one is never a pull source.
     #[serde(default)]
     pub servicer: String,
+    /// The DP rank of this instance on a DP-attention worker. A worker whose
+    /// entries name two or more ranks is placed per rank.
+    #[serde(default)]
+    pub dp_rank: Option<u32>,
+}
+
+/// Separator of a slot key: `<worker url>#dp<rank>`.
+const SLOT_RANK_SEPARATOR: &str = "#dp";
+
+/// The key of one prefill slot: the worker URL for a worker placed as a
+/// whole, `<url>#dp<rank>` for DP rank `rank` of a worker placed per rank.
+/// The key names the slot in the cost function's work book, the trace and
+/// the logs; requests go to the URL, with the rank as `routed_dp_rank`.
+pub fn slot_key(url: &str, dp_rank: Option<u32>) -> String {
+    match dp_rank {
+        Some(rank) => format!("{url}{SLOT_RANK_SEPARATOR}{rank}"),
+        None => url.to_string(),
+    }
+}
+
+/// The worker URL and DP rank of a slot key (see [`slot_key`]); a plain URL
+/// has no rank.
+pub fn split_slot(key: &str) -> (&str, Option<u32>) {
+    key.rsplit_once(SLOT_RANK_SEPARATOR)
+        .and_then(|(url, rank)| rank.parse::<u32>().ok().map(|rank| (url, Some(rank))))
+        .unwrap_or((key, None))
+}
+
+/// One directory instance: its worker, its DP rank when the worker is placed
+/// per rank, and its servicer.
+#[derive(Debug, Clone)]
+struct Instance {
+    url: String,
+    dp_rank: Option<u32>,
+    servicer: String,
+}
+
+/// The workers placed per rank (URL without a trailing `/`): those whose map
+/// entries name two or more distinct DP ranks, with their ranks ascending.
+pub(crate) fn ranks_by_url(map: &[KvWorkerMapEntry]) -> HashMap<String, Vec<u32>> {
+    let mut ranks: HashMap<String, Vec<u32>> = HashMap::new();
+    for entry in map {
+        if let Some(rank) = entry.dp_rank {
+            ranks
+                .entry(entry.url.trim_end_matches('/').to_string())
+                .or_default()
+                .push(rank);
+        }
+    }
+    ranks.retain(|_, list| {
+        list.sort_unstable();
+        list.dedup();
+        list.len() > 1
+    });
+    ranks
 }
 
 /// Parsed configuration for the injector (see CLI flags in `config::cli`).
@@ -56,11 +118,29 @@ pub struct KvHintConfig {
     pub worker_map: Vec<KvWorkerMapEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct HintCandidate {
     pub worker_url: String,
+    /// The holder's DP rank on a worker placed per rank; None otherwise.
+    pub dp_rank: Option<u32>,
     pub servicer_addr: String,
     pub expected_hit_tokens: u32,
+}
+
+impl HintCandidate {
+    /// The holder's slot key ([`slot_key`]).
+    pub fn slot(&self) -> String {
+        slot_key(&self.worker_url, self.dp_rank)
+    }
+
+    /// Whether this holder is the target `selected`: the same slot, or, for a
+    /// plain URL of a worker placed per rank, any rank of that worker.
+    fn is_target(&self, selected: &str) -> bool {
+        match split_slot(selected) {
+            (url, Some(rank)) => self.worker_url == url && self.dp_rank == Some(rank),
+            (url, None) => self.worker_url == url,
+        }
+    }
 }
 
 /// One indexer answer, reused across retry attempts of the same request.
@@ -68,7 +148,8 @@ pub struct HintCandidate {
 pub struct IndexerAnswer {
     /// Sorted by `expected_hit_tokens`, descending.
     pub candidates: Vec<HintCandidate>,
-    /// Residency is distinct from CPU availability; absent observations stay absent.
+    /// Residency is distinct from CPU availability; absent observations stay
+    /// absent. Keyed by slot ([`slot_key`]).
     pub observed_gpu_hits: HashMap<String, u32>,
     pub indexer_ms: f64,
 }
@@ -81,8 +162,10 @@ pub struct KvHintInjector {
     min_incremental_tokens: u32,
     local_prefix_fallback: bool,
     timeout: Duration,
-    url_by_id: HashMap<u64, String>,
-    servicer_by_id: HashMap<u64, String>,
+    instances: HashMap<u64, Instance>,
+    /// The DP ranks of each worker placed per rank (URL without a trailing
+    /// `/`), ascending.
+    ranks_by_url: HashMap<String, Vec<u32>>,
 }
 
 impl KvHintInjector {
@@ -112,12 +195,21 @@ impl KvHintInjector {
             .connect_timeout(Duration::from_secs(2))
             .build()
             .expect("build kv-hint reqwest client");
-        let mut url_by_id = HashMap::new();
-        let mut servicer_by_id = HashMap::new();
-        for entry in &cfg.worker_map {
-            url_by_id.insert(entry.id, entry.url.clone());
-            servicer_by_id.insert(entry.id, entry.servicer.clone());
-        }
+        let ranks_by_url = ranks_by_url(&cfg.worker_map);
+        let instances = cfg
+            .worker_map
+            .iter()
+            .map(|entry| {
+                // A rank counts only on a worker placed per rank.
+                let per_rank = ranks_by_url.contains_key(entry.url.trim_end_matches('/'));
+                let instance = Instance {
+                    url: entry.url.clone(),
+                    dp_rank: entry.dp_rank.filter(|_| per_rank),
+                    servicer: entry.servicer.clone(),
+                };
+                (entry.id, instance)
+            })
+            .collect();
         Self {
             client,
             query_url: format!("{}/query", cfg.indexer_url.trim_end_matches('/')),
@@ -125,8 +217,8 @@ impl KvHintInjector {
             min_incremental_tokens: cfg.min_incremental_tokens,
             local_prefix_fallback: cfg.local_prefix_fallback,
             timeout: Duration::from_millis(cfg.indexer_timeout_ms),
-            url_by_id,
-            servicer_by_id,
+            instances,
+            ranks_by_url,
         }
     }
 
@@ -140,7 +232,17 @@ impl KvHintInjector {
     /// Returns a borrowed worker URL when mapped, otherwise `None`. Performs
     /// no discovery lookup or network request.
     pub fn worker_url_for(&self, id: u64) -> Option<&str> {
-        self.url_by_id.get(&id).map(String::as_str)
+        self.instances.get(&id).map(|i| i.url.as_str())
+    }
+
+    /// The prefill slots of a worker: one per DP rank (ascending) for a worker
+    /// whose map entries name two or more ranks, else the worker itself
+    /// (`[None]`). `url` may end with `/`.
+    pub fn slot_ranks(&self, url: &str) -> Vec<Option<u32>> {
+        match self.ranks_by_url.get(url.trim_end_matches('/')) {
+            Some(ranks) => ranks.iter().copied().map(Some).collect(),
+            None => vec![None],
+        }
     }
 
     /// One indexer query per request; fail-open on any error. The answer is
@@ -301,9 +403,7 @@ impl KvHintInjector {
             let Ok(id) = id_str.parse::<u64>() else {
                 continue;
             };
-            let (Some(url), Some(servicer)) =
-                (self.url_by_id.get(&id), self.servicer_by_id.get(&id))
-            else {
+            let Some(instance) = self.instances.get(&id) else {
                 tracing::debug!(worker_id = id, "kv_hint: unmapped indexer instance");
                 continue;
             };
@@ -319,8 +419,9 @@ impl KvHintInjector {
                 continue;
             }
             out.push(HintCandidate {
-                worker_url: url.clone(),
-                servicer_addr: servicer.clone(),
+                worker_url: instance.url.clone(),
+                dp_rank: instance.dp_rank,
+                servicer_addr: instance.servicer.clone(),
                 expected_hit_tokens: expected,
             });
         }
@@ -330,12 +431,12 @@ impl KvHintInjector {
     /// Preserve explicit GPU-resident prefix measurements independently of CPU hits.
     ///
     /// # Inputs
-    /// `self` maps indexer IDs to worker URLs; `reply` contains tier summaries.
+    /// `self` maps indexer IDs to slots; `reply` contains tier summaries.
     ///
     /// # Outputs
-    /// Returns worker URL to GPU-hit-token mappings, including valid zeroes.
-    /// Missing, negative, noninteger, out-of-range or unmapped values are omitted
-    /// rather than reported as measured zero.
+    /// Returns slot key ([`slot_key`]) to GPU-hit-token mappings, including
+    /// valid zeroes. Missing, negative, noninteger, out-of-range or unmapped
+    /// values are omitted rather than reported as measured zero.
     fn parse_gpu_observations(&self, reply: &Value) -> HashMap<String, u32> {
         let Some(instances) = reply.get("instances").and_then(Value::as_object) else {
             return HashMap::new();
@@ -343,57 +444,72 @@ impl KvHintInjector {
         instances
             .iter()
             .filter_map(|(id, summary)| {
-                let url = self.url_by_id.get(&id.parse::<u64>().ok()?)?;
+                let instance = self.instances.get(&id.parse::<u64>().ok()?)?;
                 let gpu = u32::try_from(summary.get("gpu")?.as_u64()?).ok()?;
-                Some((url.clone(), gpu))
+                Some((slot_key(&instance.url, instance.dp_rank), gpu))
             })
             .collect()
     }
 
-    /// Pick the best owner != the selected worker; `None` below the gates.
+    /// Pick the best owner != the selected slot; `None` below the gates.
     /// The payload is the engine contract — field names must not change.
     /// Choose a peer prefix hint after the destination worker has been selected.
     ///
     /// # Inputs
     /// `self` supplies minimum-hit and incremental-hit gates; `answer` must
     /// have candidates sorted by decreasing expected hit tokens;
-    /// `selected_worker_url` is the target that would fetch peer KV.
+    /// `selected_worker_url` is the target that would fetch peer KV: a slot
+    /// key ([`slot_key`]), or a worker URL (then no rank of that worker is a
+    /// source).
     ///
     /// # Outputs
-    /// Returns the highest-ranked other worker's engine-compatible hint if
+    /// Returns the highest-ranked other slot's engine-compatible hint if
     /// its gates pass, otherwise `None`. Optional local-prefix fallback adds an
     /// engine-side minimum-deficit gate so complete local matches can be checked
     /// at execution time. This function neither changes placement nor starts transfer.
     pub fn pick(&self, answer: &IndexerAnswer, selected_worker_url: &str) -> Option<Value> {
-        let best = answer
+        let best = self
+            .sources(answer, selected_worker_url)
+            .into_iter()
+            .next()?;
+        Some(self.hint(best))
+    }
+
+    /// The holders of `answer` that may serve a pull to `selected` (a slot
+    /// key or a worker URL, as in [`Self::pick`]), best hit first: every other
+    /// slot with a servicer whose hit passes the minimum-hit gate and the
+    /// incremental gate against the target's own hit.
+    pub fn sources<'a>(&self, answer: &'a IndexerAnswer, selected: &str) -> Vec<&'a HintCandidate> {
+        let target = Self::target_hit_tokens(answer, selected);
+        answer
             .candidates
             .iter()
-            .find(|c| c.worker_url != selected_worker_url)?;
-        if best.expected_hit_tokens < self.min_tokens {
-            return None;
-        }
-        if self.min_incremental_tokens > 0 {
-            let target = Self::target_hit_tokens(answer, selected_worker_url);
-            let incremental = best.expected_hit_tokens.saturating_sub(target);
-            // FULL-prefix ownership does not guarantee the target has the
-            // SWA/state checkpoint for this endpoint. An opt-in fallback
-            // lets the engine apply the gate to its complete local match.
-            if incremental < self.min_incremental_tokens
-                && (!self.local_prefix_fallback
-                    || best.expected_hit_tokens < self.min_incremental_tokens)
-            {
-                return None;
-            }
-        }
+            .filter(|c| !c.is_target(selected) && !c.servicer_addr.trim().is_empty())
+            .filter(|c| c.expected_hit_tokens >= self.min_tokens)
+            .filter(|c| {
+                // FULL-prefix ownership does not guarantee the target has the
+                // SWA/state checkpoint for this endpoint. An opt-in fallback
+                // lets the engine apply the gate to its complete local match.
+                self.min_incremental_tokens == 0
+                    || c.expected_hit_tokens.saturating_sub(target) >= self.min_incremental_tokens
+                    || (self.local_prefix_fallback
+                        && c.expected_hit_tokens >= self.min_incremental_tokens)
+            })
+            .collect()
+    }
+
+    /// The engine's `kv_pull_hint` for a pull from `source`: its worker, the
+    /// servicer of its slot and its hit.
+    pub fn hint(&self, source: &HintCandidate) -> Value {
         let mut hint = json!({
-            "source_worker_id": best.worker_url,
-            "source_servicer_addr": best.servicer_addr,
-            "expected_hit_tokens": best.expected_hit_tokens,
+            "source_worker_id": source.worker_url,
+            "source_servicer_addr": source.servicer_addr,
+            "expected_hit_tokens": source.expected_hit_tokens,
         });
         if self.local_prefix_fallback {
             hint["min_local_deficit_tokens"] = json!(self.min_incremental_tokens.max(1));
         }
-        Some(hint)
+        hint
     }
 
     /// `--kv-pull-hint-min-incremental-tokens`: the pull floor (0 = gate off).
@@ -401,23 +517,25 @@ impl KvHintInjector {
         self.min_incremental_tokens
     }
 
-    /// The selected worker's own matched tokens in this answer (0 if absent).
+    /// The selected slot's own matched tokens in this answer (0 if absent).
     /// Read the selected worker's advisory prefix hit from a shared answer.
     ///
     /// # Inputs
     /// `answer` contains mapped candidates; `selected_worker_url` identifies
-    /// the chosen execution destination.
+    /// the chosen execution destination: a slot key, or a worker URL (then
+    /// its best rank's hit, the rank its DP controller would choose).
     ///
     /// # Outputs
-    /// Returns the first matching candidate's expected hit-token count, or
+    /// Returns the matching candidate's expected hit-token count, or
     /// zero when absent. This combines CPU/GPU availability and is not a GPU-only
     /// residency measurement.
     pub fn target_hit_tokens(answer: &IndexerAnswer, selected_worker_url: &str) -> u32 {
         answer
             .candidates
             .iter()
-            .find(|c| c.worker_url == selected_worker_url)
+            .filter(|c| c.is_target(selected_worker_url))
             .map(|c| c.expected_hit_tokens)
+            .max()
             .unwrap_or(0)
     }
 
@@ -450,7 +568,7 @@ impl KvHintInjector {
             Some(a) => (
                 a.candidates
                     .iter()
-                    .find(|c| c.worker_url != worker_url)
+                    .find(|c| !c.is_target(worker_url))
                     .map(|c| c.expected_hit_tokens)
                     .unwrap_or(0),
                 Self::target_hit_tokens(a, worker_url),
@@ -520,13 +638,46 @@ mod tests {
                     id: 1,
                     url: "http://a:30000".into(),
                     servicer: "a:18100".into(),
+                    dp_rank: None,
                 },
                 KvWorkerMapEntry {
                     id: 2,
                     url: "http://b:30000".into(),
                     servicer: "b:18100".into(),
+                    dp_rank: None,
                 },
             ],
+        })
+    }
+
+    /// Two DP-attention workers `a` and `b` of two ranks each: instance
+    /// `20001 + worker + 1000 * rank` (the launcher's ids), servicer
+    /// `<host>:18100 + rank`; worker `c` is one instance without a rank.
+    fn dp_injector(min_tokens: u32, min_incremental: u32) -> KvHintInjector {
+        let mut worker_map = Vec::new();
+        for (w, host) in ["a", "b"].iter().enumerate() {
+            for rank in 0..2u32 {
+                worker_map.push(KvWorkerMapEntry {
+                    id: 20001 + w as u64 + 1000 * u64::from(rank),
+                    url: format!("http://{host}:30000"),
+                    servicer: format!("{host}:{}", 18100 + rank),
+                    dp_rank: Some(rank),
+                });
+            }
+        }
+        worker_map.push(KvWorkerMapEntry {
+            id: 20003,
+            url: "http://c:30000".into(),
+            servicer: "c:18100".into(),
+            dp_rank: Some(0),
+        });
+        KvHintInjector::new(&KvHintConfig {
+            indexer_url: "http://indexer:8090".into(),
+            min_tokens,
+            min_incremental_tokens: min_incremental,
+            local_prefix_fallback: false,
+            indexer_timeout_ms: 20,
+            worker_map,
         })
     }
 
@@ -716,6 +867,117 @@ mod tests {
         let inj = injector(256, 0);
         let ans = answer(&inj, json!({"instances": {"99": {"cpu": 65536}}}));
         assert!(ans.candidates.is_empty());
+    }
+
+    #[test]
+    /// A map entry without a servicer (the ranks of a static split's decode
+    /// worker, which run none) keeps its hits for placement but is never a
+    /// pull source, even with the longest prefix.
+    fn a_holder_without_a_servicer_is_no_pull_source() {
+        let mut inj = injector(256, 0);
+        inj.instances.insert(
+            3,
+            Instance {
+                url: "http://d:30000".into(),
+                dp_rank: None,
+                servicer: String::new(),
+            },
+        );
+        let ans = answer(
+            &inj,
+            json!({"instances": {"3": {"gpu": 16384, "cpu": 16384}, "1": {"cpu": 4096}}}),
+        );
+        assert_eq!(ans.candidates[0].worker_url, "http://d:30000");
+        assert_eq!(ans.observed_gpu_hits.get("http://d:30000"), Some(&16384));
+        let sources: Vec<&str> = inj
+            .sources(&ans, "http://b:30000")
+            .iter()
+            .map(|c| c.worker_url.as_str())
+            .collect();
+        assert_eq!(sources, ["http://a:30000"]);
+        let hint = inj.pick(&ans, "http://b:30000").expect("hint from a");
+        assert_eq!(hint["source_servicer_addr"], "a:18100");
+    }
+
+    #[test]
+    /// A worker whose map names two or more DP ranks is one slot per rank: each
+    /// instance keeps its own hit and servicer, a hint names the holder rank's
+    /// servicer, and a sibling rank of the target's worker is a valid source.
+    fn dp_ranks_are_slots_with_their_own_hits_and_servicers() {
+        let inj = dp_injector(256, 512);
+        assert_eq!(inj.slot_ranks("http://a:30000/"), vec![Some(0), Some(1)]);
+        // One instance with a rank is a worker placed as a whole.
+        assert_eq!(inj.slot_ranks("http://c:30000"), vec![None]);
+        assert_eq!(slot_key("http://a:30000", Some(1)), "http://a:30000#dp1");
+        assert_eq!(
+            split_slot("http://a:30000#dp1"),
+            ("http://a:30000", Some(1))
+        );
+        assert_eq!(split_slot("http://a:30000"), ("http://a:30000", None));
+        let ans = answer(
+            &inj,
+            json!({"instances": {
+                "21001": {"gpu": 8192, "cpu": 0},
+                "20001": {"gpu": 1024, "cpu": 0},
+                "20002": {"cpu": 4096},
+                "20003": {"gpu": 2048}
+            }}),
+        );
+        let slots: Vec<String> = ans.candidates.iter().map(HintCandidate::slot).collect();
+        assert_eq!(
+            slots,
+            [
+                "http://a:30000#dp1",
+                "http://b:30000#dp0",
+                "http://c:30000",
+                "http://a:30000#dp0"
+            ]
+        );
+        assert_eq!(ans.observed_gpu_hits.get("http://a:30000#dp1"), Some(&8192));
+        assert_eq!(ans.observed_gpu_hits.get("http://a:30000#dp0"), Some(&1024));
+        assert_eq!(
+            KvHintInjector::target_hit_tokens(&ans, "http://a:30000#dp0"),
+            1024
+        );
+        // A plain worker URL reads its best rank (the rank its DP controller picks).
+        assert_eq!(
+            KvHintInjector::target_hit_tokens(&ans, "http://a:30000"),
+            8192
+        );
+        // Rank 0 of a pulls from rank 1 of the same worker, at that rank's servicer.
+        let hint = inj
+            .pick(&ans, "http://a:30000#dp0")
+            .expect("sibling rank source");
+        assert_eq!(hint["source_worker_id"], "http://a:30000");
+        assert_eq!(hint["source_servicer_addr"], "a:18101");
+        assert_eq!(hint["expected_hit_tokens"], 8192);
+        // Rank 1 holds the most itself: its best source is b rank 0, whose 4096
+        // tokens add nothing over its own 8192 (incremental gate).
+        assert!(inj.pick(&ans, "http://a:30000#dp1").is_none());
+        // b rank 1 holds nothing: a rank 1 is its source.
+        let hint = inj
+            .pick(&ans, "http://b:30000#dp1")
+            .expect("cross-worker source");
+        assert_eq!(hint["source_servicer_addr"], "a:18101");
+        // A worker-level target never takes one of its own ranks as the source,
+        // and its hit is its best rank's: nothing to gain from b or c.
+        assert!(inj.pick(&ans, "http://a:30000").is_none());
+        let hint = inj.pick(&ans, "http://c:30000").expect("other worker");
+        assert_eq!(hint["source_servicer_addr"], "a:18101");
+        let sources: Vec<String> = inj
+            .sources(&ans, "http://b:30000#dp1")
+            .iter()
+            .map(|c| c.slot())
+            .collect();
+        assert_eq!(
+            sources,
+            [
+                "http://a:30000#dp1",
+                "http://b:30000#dp0",
+                "http://c:30000",
+                "http://a:30000#dp0"
+            ]
+        );
     }
 
     #[test]

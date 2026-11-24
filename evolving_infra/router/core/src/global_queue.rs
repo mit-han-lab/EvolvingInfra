@@ -185,6 +185,8 @@ pub struct QueueTerms {
     /// u(P): tokens P computes after the hinted pull.
     pub uncached: u64,
     pub pulled: u64,
+    /// Earlier pulls still queued on the pull's source servicer (tokens).
+    pub pull_queued: u64,
 }
 
 /// The terms of a candidate with `local_hit` and `expected_hit` (own hit,
@@ -196,6 +198,7 @@ pub fn terms_of(local_hit: u64, expected_hit: u64, input_tokens: u64) -> QueueTe
         local_hit,
         uncached: input_tokens - expected_hit,
         pulled: expected_hit.saturating_sub(local_hit),
+        pull_queued: 0,
     }
 }
 
@@ -266,6 +269,7 @@ fn cost_inputs<'a>(
             local_hit: t.local_hit,
             uncached: t.uncached,
             pulled: t.pulled,
+            pull_queued: t.pull_queued,
             wait: None,
             bound_s: None,
             forecast_off: false,
@@ -471,7 +475,8 @@ mod tests {
             QueueTerms {
                 local_hit: 1000,
                 uncached: 3000,
-                pulled: 4000
+                pulled: 4000,
+                pull_queued: 0
             }
         );
         // Hits above the request length are clamped to it.
@@ -480,7 +485,8 @@ mod tests {
             QueueTerms {
                 local_hit: 8000,
                 uncached: 0,
-                pulled: 0
+                pulled: 0,
+                pull_queued: 0
             }
         );
     }

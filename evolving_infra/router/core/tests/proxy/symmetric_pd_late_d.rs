@@ -609,6 +609,7 @@ async fn fixture(opts: Opts) -> Fixture {
                     id: i as u64 + 1,
                     url: url.clone(),
                     servicer: format!("p{}:18100", i + 1),
+                    dp_rank: None,
                 })
                 .collect(),
         };

@@ -327,6 +327,12 @@ pub(crate) fn build_spd_bodies(
             .map_err(|e| ApiError::Internal(anyhow::Error::new(e).context("serialize leg body")))
     };
     let prefill_body = to_bytes(&prefill_value)?;
+    // A D-leg runs on its import rank: a client's DP rank stays on the P-leg.
+    if let Some(obj) = value.as_object_mut() {
+        for k in crate::backend::sglang::request::DP_RANK_KEYS {
+            obj.remove(k);
+        }
+    }
     // `--late-d-image-source-url`: the D-legs leave the pixels behind.
     let stripped = match (d_image_source, value.as_object_mut()) {
         (Some(source), Some(obj)) => crate::image_source::strip_images(obj, source),

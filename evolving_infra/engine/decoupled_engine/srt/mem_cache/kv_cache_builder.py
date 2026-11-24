@@ -734,6 +734,7 @@ def build_kv_cache(
         pp_size=parallel.pp_size,
         attn_cp_rank=parallel.attn_cp_rank,
         attn_cp_size=parallel.attn_cp_size,
+        attn_dp_size=parallel.attn_dp_size,
         chunked_prefill_size=effective_chunked_prefill_size,
         sliding_window_size=sliding_window_size,
         swa_gates_prefix_match=swa_gates_prefix_match,
