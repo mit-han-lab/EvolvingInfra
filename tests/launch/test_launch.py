@@ -61,7 +61,7 @@ def test_layout():
 @pytest.fixture
 def stack(monkeypatch, tmp_path):
     monkeypatch.setattr(hardware, "gpu_count", lambda: 4)
-    monkeypatch.setattr(hardware, "address", lambda host: {"a": "10.0.0.1", "b": "10.0.0.2"}[host])
+    monkeypatch.setattr(hardware, "address", lambda host: f"10.0.0.{ord(host) - ord('a') + 1}")  # a, b, c, ...
 
     def make(argv, hosts=("a",), rank=0):
         return serve.Stack(config(parse(["serve", *argv])), list(hosts), rank, tmp_path)
@@ -138,9 +138,22 @@ def test_kimi_config_passes_its_tokenizer_environment_and_image_layout(stack, tm
 
 def test_paper_configs_pin_the_token_wait_without_the_global_queue():
     for path in ("examples/gb300/glm52.yaml", "examples/gb300/glm52-1node.yaml", "examples/h200/dsv4-flash.yaml",
-                 "examples/agents/dsv4-flash.yaml", "examples/agents/glm52-1node.yaml"):
+                 "examples/agents/dsv4-flash.yaml", "examples/agents/glm52-1node.yaml",
+                 "examples/gb300/v41-flash.yaml", "examples/gb300/v41-flash-6p6d-ep4.yaml"):
         args = config(parse(["serve", "--config", path]))["router_args"]
         assert "--prefill-wait=tokens" in args and "--global-queue=false" in args, path
+
+
+def test_v41_configs_place_per_dp_rank_with_the_cost_function():
+    # The preset picks the cost function when the worker map names servicers, which it does per DP rank;
+    # no P selection is pinned, and the copy price and the rate are measured. The router refuses to start
+    # with a flag of the hold queue or the cache-first rule beside the cost function (cli.rs check_cost_function).
+    refused = ("--symmetric-pd-p-select", "--symmetric-pd-max-queue-wait-ms", "--symmetric-pd-max-uncached-tokens",
+               "--symmetric-pd-decision-replay", "--symmetric-pd-cache-threshold", "--symmetric-pd-balance-")
+    for path in ("examples/gb300/v41-flash.yaml", "examples/gb300/v41-flash-6p6d-ep4.yaml"):
+        args = config(parse(["serve", "--config", path]))["router_args"]
+        assert not [a for a in args if a.startswith(refused)], path
+        assert "--copy-price=auto" in args and "--prefill-rate-tokens-per-s=auto" in args, path
 
 
 def test_dp_attention_workers_publish_kv_events_per_rank(stack, tmp_path):
@@ -161,6 +174,64 @@ def test_dp_attention_workers_publish_kv_events_per_rank(stack, tmp_path):
     plain = stack(["--config", "examples/gb300/glm52.yaml"], hosts=("a", "b"))
     assert [(i, k) for i, _, _, k in plain.kv_instances()] == [(20001, 0), (20002, 1)]
     assert plain.workers[0].replay_port == plain.workers[0].events_port + 1
+
+
+def test_the_worker_map_names_each_dp_rank_and_its_own_servicer(stack, tmp_path):
+    # Two DP4 prefill workers and a DP4 decode worker, one host each.
+    (tmp_path / "dp.yaml").write_text(
+        "model: /m\npage_size: 256\ngpus_per_worker: 4\ndp_attention: true\nprefill_workers: 2\n")
+    s = stack(["--config", str(tmp_path / "dp.yaml")], hosts=tuple("abc"))
+    entries = s.kv_worker_map()
+    assert len(entries) == 12 and len({e["id"] for e in entries}) == 12
+    # Every (prefill worker, DP rank) has its own servicer address: the one its rank binds (servicer port + TP rank).
+    assert len({e["servicer"] for e in entries if "servicer" in e}) == 8
+    p0 = sorted((e["dp_rank"], e["servicer"]) for e in entries if e["url"] == s.workers[0].url)
+    assert p0 == [(r, f"10.0.0.1:{18100 + r}") for r in range(4)]
+    # This static split's decode worker runs no servicer (Stack.peer_kv): its ranks are mapped without one.
+    d = s.workers[-1]
+    assert sorted(e["dp_rank"] for e in entries if e["url"] == d.url and "servicer" not in e) == list(range(4))
+    # With decode host return it serves the KV it decoded: each rank's own servicer, a port its worker reserves.
+    (tmp_path / "ret.yaml").write_text(
+        (tmp_path / "dp.yaml").read_text() + "router_args: [--symmetric-pd-decode-host-return]\n")
+    s = stack(["--config", str(tmp_path / "ret.yaml")], hosts=tuple("abc"))
+    d = s.workers[-1]
+    dmap = {e["dp_rank"]: e["servicer"] for e in s.kv_worker_map() if e["url"] == d.url}
+    assert dmap == {r: f"10.0.0.3:{18100 + r}" for r in range(4)}
+    assert {int(addr.rsplit(":", 1)[1]) for addr in dmap.values()} <= set(d.ports())
+    # Without DP attention: one entry per worker, rank 0, the worker's servicer port.
+    plain = stack(["--config", "examples/gb300/glm52.yaml"], hosts=("a", "b"))
+    assert plain.kv_worker_map() == [
+        {"id": 20001, "url": "http://10.0.0.1:30000", "dp_rank": 0, "servicer": "10.0.0.1:18100"},
+        {"id": 20002, "url": "http://10.0.0.2:30000", "dp_rank": 0, "servicer": "10.0.0.2:18100"}]
+
+
+def test_a_static_dp_decode_worker_runs_no_peer_kv(stack, tmp_path):
+    # A static split's DP-attention decode workers never prefill a P-leg and no pull reads them, so their
+    # engines get --disable-peer-kv (no servicer and no reader on any rank); the prefill workers keep both.
+    s = stack(["--config", "examples/gb300/v41-flash-6p6d-ep4.yaml"], hosts=tuple("abcdefghijkl"))
+    prefill, decode = s.workers[:6], s.workers[6:]
+    assert [w.role for w in prefill] == ["prefill"] * 6 and [w.role for w in decode] == ["decode"] * 6
+    assert not any(s.peer_kv(d) for d in decode) and all(s.peer_kv(w) for w in prefill)
+    assert all("--disable-peer-kv" in s.engine_argv(d, {}) for d in decode)
+    assert not any("--disable-peer-kv" in s.engine_argv(w, {}) for w in prefill)
+    # Without DP attention a decode worker keeps both: a pull from any holder reads it.
+    plain = stack(["--config", "examples/gb300/glm52.yaml"], hosts=("a", "b"))
+    assert all(plain.peer_kv(w) and "--disable-peer-kv" not in plain.engine_argv(w, {}) for w in plain.workers)
+    # With the planner any worker may become a prefill worker; the config's own flags decide when given.
+    (tmp_path / "dp.yaml").write_text("model: /m\npage_size: 256\ngpus_per_worker: 4\ndp_attention: true\n")
+    s = stack(["--config", str(tmp_path / "dp.yaml")], hosts=("a", "b"))
+    assert not s.peer_kv(s.workers[1]) and "--disable-peer-kv" in s.engine_argv(s.workers[1], {})
+    s = stack(["--config", str(tmp_path / "dp.yaml"), "--planner"], hosts=("a", "b"))
+    assert s.peer_kv(s.workers[1]) and "--disable-peer-kv" not in s.engine_argv(s.workers[1], {})
+    (tmp_path / "srv.yaml").write_text(
+        "base: dp.yaml\nroles:\n  decode: {engine_args: [--enable-peer-kv-servicer]}\n")
+    s = stack(["--config", str(tmp_path / "srv.yaml")], hosts=("a", "b"))
+    assert s.peer_kv(s.workers[1]) and "--disable-peer-kv" not in s.engine_argv(s.workers[1], {})
+    (tmp_path / "off.yaml").write_text("base: dp.yaml\nroles:\n  prefill: {engine_args: [--disable-peer-kv]}\n")
+    s = stack(["--config", str(tmp_path / "off.yaml")], hosts=("a", "b"))
+    argv = s.engine_argv(s.workers[0], {})
+    assert not s.peer_kv(s.workers[0]) and argv.count("--disable-peer-kv") == 1
+    assert all("servicer" not in e for e in s.kv_worker_map())
 
 
 def test_roles_give_each_starting_role_its_engine_settings(stack, tmp_path):

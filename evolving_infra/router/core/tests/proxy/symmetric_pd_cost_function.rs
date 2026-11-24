@@ -42,8 +42,9 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tower::ServiceExt;
 
-/// One mock symmetric engine. It records every `/v1/completions` body and
-/// answers with one choice. A P-leg (`kv_export`) whose rid starts with
+/// One mock symmetric engine. It records every `/v1/completions` and
+/// `/v1/chat/completions` body and answers with one choice. A P-leg
+/// (`kv_export`) whose rid starts with
 /// `busy` waits for `release` (one waiter per notification); while it waits,
 /// `/v1/loads` lists 20,000 remaining uncached tokens for it in
 /// `prefill_work`. A P-leg whose rid starts with `gone` answers 500 with
@@ -57,56 +58,70 @@ struct Engine {
 
 impl Engine {
     async fn start(name: &'static str) -> Self {
+        Self::start_ranks(name, 0).await
+    }
+
+    /// [`Engine::start`] for a worker with `ranks` DP ranks: `/v1/loads` has
+    /// one row per rank, with its `dp_rank` (0: one row without a rank).
+    async fn start_ranks(name: &'static str, ranks: u32) -> Self {
         let bodies: Arc<Mutex<Vec<Value>>> = Arc::default();
         let release = Arc::new(Notify::new());
         let held: Arc<Mutex<BTreeMap<String, u64>>> = Arc::default();
         let sequence = Arc::new(AtomicU64::new(0));
-        let app = axum::Router::new()
-            .route(
-                "/v1/completions",
-                post({
-                    let (bodies, release, held) = (bodies.clone(), release.clone(), held.clone());
-                    move |Json(body): Json<Value>| {
-                        let (bodies, release, held) =
-                            (bodies.clone(), release.clone(), held.clone());
-                        async move {
-                            let rid = body["rid"].as_str().unwrap_or("").to_string();
-                            let hold = rid.starts_with("busy") && body.get("kv_export").is_some();
-                            let lost = rid.starts_with("lost") && body.get("kv_export").is_some();
-                            let gone = rid.starts_with("gone") && body.get("kv_export").is_some();
-                            bodies.lock().unwrap().push(body);
-                            if lost {
-                                std::future::pending::<()>().await;
-                            }
-                            if hold {
-                                held.lock().unwrap().insert(rid.clone(), 20_000);
-                                release.notified().await;
-                                held.lock().unwrap().remove(&rid);
-                            }
-                            if gone {
-                                // The symmetric owner ended the P-leg: its
-                                // reader left (the D-leg recomputes).
-                                let error = json!({"object": "error", "message": "reader left",
-                                    "type": "symmetric_reader_gone", "code": 500});
-                                return (StatusCode::INTERNAL_SERVER_ERROR, Json(error));
-                            }
-                            (
-                                StatusCode::OK,
-                                Json(json!({"choices": [{"index": 0, "text": "x"}]})),
-                            )
-                        }
+        let answer = {
+            let (bodies, release, held) = (bodies.clone(), release.clone(), held.clone());
+            move |Json(body): Json<Value>| {
+                let (bodies, release, held) = (bodies.clone(), release.clone(), held.clone());
+                async move {
+                    let rid = body["rid"].as_str().unwrap_or("").to_string();
+                    let hold = rid.starts_with("busy") && body.get("kv_export").is_some();
+                    let lost = rid.starts_with("lost") && body.get("kv_export").is_some();
+                    let gone = rid.starts_with("gone") && body.get("kv_export").is_some();
+                    bodies.lock().unwrap().push(body);
+                    if lost {
+                        std::future::pending::<()>().await;
                     }
-                }),
-            )
+                    if hold {
+                        held.lock().unwrap().insert(rid.clone(), 20_000);
+                        release.notified().await;
+                        held.lock().unwrap().remove(&rid);
+                    }
+                    if gone {
+                        // The symmetric owner ended the P-leg: its
+                        // reader left (the D-leg recomputes).
+                        let error = json!({"object": "error", "message": "reader left",
+                            "type": "symmetric_reader_gone", "code": 500});
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(error));
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(json!({"choices": [{"index": 0, "text": "x"}]})),
+                    )
+                }
+            }
+        };
+        let app = axum::Router::new()
+            .route("/v1/completions", post(answer.clone()))
+            .route("/v1/chat/completions", post(answer))
             .route(
                 "/v1/loads",
                 get(move || {
                     let held = held.lock().unwrap().clone();
                     let n = sequence.fetch_add(1, Ordering::SeqCst);
                     async move {
-                        let load = json!({"num_running_reqs": held.len(),
-                            "prefill_work": {"epoch": name, "sequence": n, "remaining": held}});
-                        Json(json!({"loads": [load]}))
+                        let loads: Vec<Value> = if ranks == 0 {
+                            vec![json!({"num_running_reqs": held.len(),
+                                "prefill_work": {"epoch": name, "sequence": n, "remaining": held}})]
+                        } else {
+                            (0..ranks)
+                                .map(|rank| {
+                                    json!({"dp_rank": rank, "num_running_reqs": 0,
+                                        "prefill_work": {"epoch": format!("{name}-{rank}"),
+                                            "sequence": n, "remaining": {}}})
+                                })
+                                .collect()
+                        };
+                        Json(json!({ "loads": loads }))
                     }
                 }),
             );
@@ -221,6 +236,7 @@ async fn fixture_with(
         timeout,
         extra,
         None,
+        0,
     )
     .await
 }
@@ -232,7 +248,10 @@ async fn fixture_with(
 /// is mapped but never registered (id `n_p + 2`, `http://127.0.0.1:9`: a
 /// removed worker whose blocks are still in the indexer), and sets
 /// `--symmetric-pd-pull-from-any-holder` to `flag`. `None`: only the P-role
-/// engines are mapped and the flag is off.
+/// engines are mapped and the flag is off. `dp_ranks` > 0: each P-role engine
+/// is a worker with that many DP ranks, mapped per rank (indexer id
+/// `100 * (i + 1) + rank`, servicer `p<i + 1>:<18100 + rank>`), as the
+/// launcher maps a DP-attention worker.
 #[allow(clippy::too_many_arguments)]
 async fn fixture_full(
     n_p: usize,
@@ -243,10 +262,11 @@ async fn fixture_full(
     timeout: Duration,
     extra: (Option<GlobalQueueConfig>, bool),
     any_holder: Option<bool>,
+    dp_ranks: u32,
 ) -> Fixture {
     let mut ps = Vec::new();
     for name in ["p1", "p2", "p3"].into_iter().take(n_p) {
-        ps.push(Engine::start(name).await);
+        ps.push(Engine::start_ranks(name, dp_ranks).await);
     }
     let d = Engine::start("d1").await;
     let reply = Arc::new(Mutex::new(reply));
@@ -261,10 +281,20 @@ async fn fixture_full(
     let mut worker_map: Vec<KvWorkerMapEntry> = ps
         .iter()
         .enumerate()
-        .map(|(i, p)| KvWorkerMapEntry {
-            id: i as u64 + 1,
-            url: p.url.clone(),
-            servicer: format!("p{}:18100", i + 1),
+        .flat_map(|(i, p)| {
+            let ranks: Vec<Option<u32>> = match dp_ranks {
+                0 => vec![None],
+                n => (0..n).map(Some).collect(),
+            };
+            ranks.into_iter().map(move |dp_rank| KvWorkerMapEntry {
+                id: match dp_rank {
+                    None => i as u64 + 1,
+                    Some(rank) => 100 * (i as u64 + 1) + u64::from(rank),
+                },
+                url: p.url.clone(),
+                servicer: format!("p{}:{}", i + 1, 18100 + dp_rank.unwrap_or(0)),
+                dp_rank,
+            })
         })
         .collect();
     if any_holder.is_some() {
@@ -272,11 +302,13 @@ async fn fixture_full(
             id: n_p as u64 + 1,
             url: d.url.clone(),
             servicer: "d1:18100".into(),
+            dp_rank: None,
         });
         worker_map.push(KvWorkerMapEntry {
             id: n_p as u64 + 2,
             url: "http://127.0.0.1:9".into(),
             servicer: "ghost:18100".into(),
+            dp_rank: None,
         });
     }
     let mut spd = SymmetricPdConfig {
@@ -392,6 +424,21 @@ impl Fixture {
             .unwrap()
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{rid}");
+    }
+
+    /// POST `body` to `path`; the response status.
+    async fn post(&self, path: &str, body: &Value) -> StatusCode {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), self.app.clone().oneshot(request))
+            .await
+            .unwrap()
+            .unwrap()
+            .status()
     }
 
     /// The cost-function decision of the `reserve` row of `rid`.
@@ -766,6 +813,7 @@ async fn spd_cost_function_queue_auto_holds_a_free_request_until_room() {
         Duration::from_secs(5),
         (queue, true),
         None,
+        0,
     )
     .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -905,6 +953,7 @@ async fn spd_cost_function_any_holder_pulls_from_a_d_role_holder() {
             Duration::from_secs(5),
             (queue_cfg, false),
             Some(flag),
+            0,
         )
         .await;
         f.send("from-d", 20_000, None).await;
@@ -971,6 +1020,7 @@ async fn spd_cost_function_any_holder_skips_unregistered_and_breaker_open_holder
         Duration::from_secs(5),
         (None, false),
         Some(true),
+        0,
     )
     .await;
     let p3 = f.registry.get(&WorkerId(f.ps[2].url.clone())).unwrap();
@@ -992,4 +1042,61 @@ async fn spd_cost_function_any_holder_skips_unregistered_and_breaker_open_holder
             .any(|e| e["event"] == "finished" && e["entry"]["rid"] == "healthy-only")
     })
     .await;
+}
+
+/// DP-attention P workers (`--kv-worker-map` with each rank's `dp_rank`):
+/// the cost function chooses a (worker, DP rank) slot, and on the
+/// completions and the chat route the P-leg goes to that worker with the
+/// slot's rank as `routed_dp_rank`. The D-leg names no rank, also when the
+/// client named one (`routed_dp_rank`, `data_parallel_rank`): the engine
+/// runs a D-leg on its import rank and refuses one that names another.
+#[tokio::test]
+async fn spd_cost_function_sends_the_slot_s_rank_with_the_p_leg_and_none_with_the_d_leg() {
+    let f = fixture_full(
+        2,
+        PlacementCostParams::default(),
+        512,
+        json!({"instances": {}}),
+        60,
+        Duration::from_secs(5),
+        (None, false),
+        None,
+        2,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let requests = [
+        (
+            "/v1/completions",
+            json!({"model": "tiny", "prompt": vec![11; 600], "max_tokens": 1,
+                "rid": "dp-completions", "routed_dp_rank": 1, "data_parallel_rank": 1}),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({"model": "tiny", "messages": [{"role": "user", "content": "hello there"}],
+                "max_tokens": 1, "rid": "dp-chat", "routed_dp_rank": 1, "data_parallel_rank": 1}),
+        ),
+    ];
+    for (path, body) in requests {
+        let rid = body["rid"].as_str().unwrap().to_string();
+        assert_eq!(f.post(path, &body).await, StatusCode::OK, "{path}");
+        let chosen = f.decision(&rid)["chosen"].as_str().unwrap().to_string();
+        let (url, rank) = chosen
+            .rsplit_once("#dp")
+            .unwrap_or_else(|| panic!("{rid}: the slot {chosen} names no rank"));
+        let (i, p) = f.landed_on(&rid).await;
+        assert_eq!(f.ps[i].url, url, "{rid}");
+        assert_eq!(
+            p["routed_dp_rank"],
+            rank.parse::<u64>().unwrap(),
+            "{rid}: {p}"
+        );
+        assert!(p.get("kv_export").is_some(), "{rid}: {p}");
+        let d = f.d.body(&rid).unwrap_or_else(|| panic!("{rid}: no D-leg"));
+        assert!(d.get("kv_import").is_some(), "{rid}: {d}");
+        assert!(
+            d.get("routed_dp_rank").is_none() && d.get("data_parallel_rank").is_none(),
+            "{rid}: the D-leg names no rank: {d}"
+        );
+    }
 }

@@ -52,6 +52,9 @@ class CacheInitParams:
 
     attn_cp_rank: int = 0
     attn_cp_size: int = 1
+    # DP attention: the ranks of this scheduler's worker; a hinted peer pull
+    # reads the FULL KV only when it is above 1 (UnifiedRadixCache).
+    attn_dp_size: int = 1
 
     chunked_prefill_size: Optional[int] = None
 

@@ -71,6 +71,9 @@ pub struct ServerInfo {
     pub chunk_tokens: Option<u64>,
     /// `/server_info` `late_d` block (late D engines); `None` when absent.
     pub late_d: Option<crate::workers::LateDWorkerInfo>,
+    /// The peer KV pulls the worker's ranks take (internal states'
+    /// `peer_kv_pull`); `None` when no rank reports one.
+    pub peer_kv_pull: Option<crate::workers::PeerKvPull>,
     /// `/server_info` answered with a JSON body. `false` when every attempt
     /// failed: then nothing above that comes from `/server_info` is known
     /// (late-D choose mode does not let such a worker take traffic).
@@ -227,6 +230,8 @@ impl WorkerIntrospector {
         }
 
         let chunk_tokens = capacity(&parsed.chunked_prefill_size);
+        let peer_kv_pull =
+            peer_kv_pull_from_states(parsed.internal_states.as_deref().unwrap_or_default());
         ServerInfo {
             served_model_name,
             event_config,
@@ -235,6 +240,7 @@ impl WorkerIntrospector {
             kv_capacity_tokens,
             chunk_tokens,
             late_d,
+            peer_kv_pull,
             server_info_read,
         }
     }
@@ -526,6 +532,29 @@ struct SchedulerState {
     symmetric_pd: Option<serde_json::Value>,
     #[serde(default)]
     max_total_num_tokens: Option<serde_json::Value>,
+    /// The rank's `peer_kv_pull` (`UnifiedRadixCache.peer_pull_info`). Raw for
+    /// leniency.
+    #[serde(default)]
+    peer_kv_pull: Option<serde_json::Value>,
+}
+
+/// The worker's peer KV pull report from its ranks' internal states: it takes
+/// a pull only if every reporting rank does, and replays the most any rank
+/// replays. None when no rank reports one.
+fn peer_kv_pull_from_states(states: &[SchedulerState]) -> Option<crate::workers::PeerKvPull> {
+    states
+        .iter()
+        .filter_map(|state| {
+            let report = state.peer_kv_pull.as_ref()?;
+            Some(crate::workers::PeerKvPull {
+                takes: report.get("takes")?.as_bool()?,
+                replay_tokens: report.get("replay_tokens")?.as_u64()?,
+            })
+        })
+        .reduce(|a, b| crate::workers::PeerKvPull {
+            takes: a.takes && b.takes,
+            replay_tokens: a.replay_tokens.max(b.replay_tokens),
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -819,6 +848,36 @@ mod tests {
             let got = fast_introspector().fetch(&url).await;
             assert!(got.server_info_read);
             assert_eq!(got.late_d, None);
+        }
+    }
+
+    /// The ranks' `peer_kv_pull` reports: the worker takes a pull only if every
+    /// reporting rank does, and replays the most any rank replays; no report
+    /// gives none.
+    #[tokio::test]
+    async fn fetch_reads_the_ranks_peer_kv_pull_report() {
+        use crate::workers::PeerKvPull;
+        let report = |takes: bool, replay: u64| json!({"peer_kv_pull": {"takes": takes, "replay_tokens": replay}});
+        for (states, want) in [
+            (
+                vec![report(true, 256), report(true, 256)],
+                Some(PeerKvPull {
+                    takes: true,
+                    replay_tokens: 256,
+                }),
+            ),
+            (
+                vec![report(true, 0), report(false, 0)],
+                Some(PeerKvPull {
+                    takes: false,
+                    replay_tokens: 0,
+                }),
+            ),
+            (vec![json!({}), json!({})], None),
+        ] {
+            let body = json!({"served_model_name": "m", "internal_states": states});
+            let (url, _shutdown) = spawn_fake_worker(body).await;
+            assert_eq!(fast_introspector().fetch(&url).await.peer_kv_pull, want);
         }
     }
 

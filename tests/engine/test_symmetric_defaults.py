@@ -250,14 +250,17 @@ def test_paper_features_keep_what_the_user_set_and_skip_what_cannot_run():
     assert "disaggregation_late_d" not in f and "disaggregation_late_d_control_port" not in f
     f = sd.plan_features(bare(enable_dp_attention=True), DSA, free_port=lambda: 1)
     assert "disaggregation_late_d" not in f and "enable_dsa_hicache_host_dedup" not in f
-    # Every DP rank is attention-TP rank 0: the servicer's per-rank ports would collide.
-    assert "enable_peer_kv_servicer" not in f and "hicache_storage_backend" not in f
     assert f["enable_hierarchical_cache"] and f["enable_prefill_work_snapshot"]
     # The scheduler refuses KV session retention under DP attention, with DP > 1 or PP > 1. At resolution a DP4
     # attention worker (--dp-size 4 --enable-dp-attention) reads attn_dp_size 4 and dp_size 1.
     assert "enable_kv_session_retention" not in f
     for kw in ({"attn_dp_size": 4}, {"dp_size": 2}, {"pp_size": 2}):
         assert "enable_kv_session_retention" not in sd.plan_features(bare(**kw), DSA, free_port=lambda: 1), kw
+    # Pipeline and context parallel ranks, and data-parallel replicas without DP
+    # attention, have no servicer of their own.
+    for other in (dict(pp_size=2), dict(attn_cp_size=2), dict(dp_size=2)):
+        f = sd.plan_features(bare(**other), DSA, free_port=lambda: 1)
+        assert "enable_peer_kv_servicer" not in f and "hicache_storage_backend" not in f, other
     # A model the preset gives retention (DeepSeek-V4 here), and one it does not.
     f = sd.plan_features(bare(), {"dedup": "enable_dsv4_hicache_host_dedup", "retention": True},
                          free_port=lambda: 1, ratio_unset=True)
@@ -266,6 +269,38 @@ def test_paper_features_keep_what_the_user_set_and_skip_what_cannot_run():
     assert "enable_kv_session_retention" not in f
     f = sd.plan_features(bare(), None, free_port=lambda: 1)
     assert "enable_kv_session_retention" not in f and "hicache_ratio" not in f
+
+
+def test_dp_attention_ranks_each_get_a_peer_kv_servicer():
+    # One servicer per DP rank: its ranks bind the port base + TP rank, so a pull can
+    # name any (worker, DP rank). Both spellings of DP attention: the flags as given
+    # (--dp-size 4 --enable-dp-attention) and as the parallel hook rewrites them.
+    for cfg in (bare(enable_dp_attention=True, dp_size=4),
+                bare(attn_dp_size=4, dp_size=1, enable_dp_attention=False)):
+        f = sd.plan_features(cfg, DSA, free_port=lambda: 1)
+        assert f["enable_peer_kv_servicer"] and f["hicache_storage_backend"] == "dynamic"
+        assert sd.json.loads(f["hicache_storage_backend_extra_config"])["backend_name"] == "peer_kv"
+        assert "enable_dsa_hicache_host_dedup" not in f, "host dedup stays single-engine"
+
+
+def test_a_worker_without_peer_kv_runs_no_servicer_and_no_reader():
+    # --disable-peer-kv (the launcher's flag for a static split's decode worker under DP attention):
+    # the preset turns on neither the servicer nor the peer_kv reader, nor their lease budget and host ratio,
+    # and leaves the rest of the paper configuration as before.
+    layout = dict(hicache_io_backend="kernel", hicache_mem_layout="page_first")
+    for cfg in (bare(enable_dp_attention=True, dp_size=4, **layout), bare(attn_dp_size=24, dp_size=1, **layout),
+                bare(**layout)):
+        on = sd.plan_features(cfg, DSA, free_port=lambda: 1, ratio_unset=True)
+        cfg.disable_peer_kv = True
+        off = sd.plan_features(cfg, DSA, free_port=lambda: 1, ratio_unset=True)
+        peer = {"enable_peer_kv_servicer", "hicache_storage_backend", "hicache_storage_backend_extra_config",
+                "peer_kv_servicer_max_leased_gb"}
+        assert peer <= set(on) and not peer & set(off)
+        assert {k: v for k, v in on.items() if k not in peer | {"hicache_ratio"}} == {
+            k: v for k, v in off.items() if k != "hicache_ratio"}
+        assert off.get("hicache_ratio", 4.0) == 4.0, "no 10 % withheld for pulls"
+        env, _ = sd.plan(sd._Overlay(cfg, off), {})
+        assert "SGLANG_PEER_KV_PUSH_FAST" not in env
 
 
 def test_ib_devices():

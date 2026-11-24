@@ -603,11 +603,15 @@ class SchedulerSymmetricMixin:
             self.tree_cache, "dsv4_uniform_cache_lifecycle", False
         ):
             from decoupled_engine.srt.disaggregation.symmetric.planes import advertised_host
+            from decoupled_engine.srt.mem_cache.peer_kv_servicer import servicer_group_port
 
-            owner_peer_kv_addr = (
-                f"{advertised_host(self.server_args)}:"
-                f"{self.server_args.peer_kv_servicer_port}"
+            # This DP rank's own servicer (its attention-TP rank 0's port).
+            port = servicer_group_port(
+                self.server_args.peer_kv_servicer_port,
+                get_parallel().tp_rank,
+                get_parallel().attn_tp_rank,
             )
+            owner_peer_kv_addr = f"{advertised_host(self.server_args)}:{port}"
         late_d_mode = getattr(get_disagg(), "disaggregation_late_d", LATE_D_OFF)
         self.export_table = ExportTable(
             owner_plane,
@@ -918,6 +922,18 @@ class SchedulerSymmetricMixin:
                 )
                 return export_mark, import_mark, None
             if export_mark is None:
+                # The DP controller sends a D-leg to its import rank whatever
+                # rank it names: one that names another rank is refused here.
+                routed = recv_req.routed_dp_rank
+                if import_mark is not None and routed is not None:
+                    home = import_dp_rank(import_mark.transfer_id, parallel.attn_dp_size)
+                    if routed != home:
+                        return (
+                            None,
+                            None,
+                            f"Invalid request: routed_dp_rank {routed} of a decode leg is not "
+                            f"its import rank {home}",
+                        )
                 return export_mark, import_mark, None
         if export_mark is not None and export_mark.candidates:
             # Late D stage 2: every candidate reader, before any bind.

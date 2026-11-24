@@ -53,4 +53,18 @@ roles:
       SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK: 16384  # smaller MegaMoE buffers, more KV
 router_args:
   - --pd-late-decode=off                   # late decode choice needs single-engine workers (no DP attention)
-  - --symmetric-pd-p-select=cache-first    # the cost function reads single-DP-rank load snapshots
+  # P placement: the preset's cost function, one candidate per (worker, DP rank), each rank with its own
+  # servicer, so a rank fetches a prefix another rank holds. The paper runs' token-count wait without the
+  # global queue (the forecast keeps its state per worker, so the router refuses it with DP ranks); the copy
+  # price and the rate R come from the router's own measurements (the copy price from the sessions in flight
+  # when requests carry an agent identity, else its fallback, 4.6).
+  - --prefill-wait=tokens
+  - --global-queue=false
+  - --copy-price=auto
+  - --prefill-rate-tokens-per-s=auto
+  # A pull's time, measured on GB300 with this config (2 P + 1 D serving 64 CC sessions) on random-token prompts
+  # that no trace sends: from the prefetch's start to the scheduler seeing it done, 8k-131k tokens, across workers
+  # and across the ranks of one worker, 3 repeats each. Least squares over the 24 pulls (the mean, which a cost
+  # charges): 24 ms + 106 ms per 100k tokens, median residual 12 ms, largest 102 ms (Theil-Sen: 10 + 124).
+  - --fetch-fixed-ms=24
+  - --fetch-ms-per-100k-tokens=106

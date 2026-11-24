@@ -42,6 +42,21 @@
 //! P-role pool's, but the pull source may be any holder of the indexer answer
 //! that is a registered worker of any role (breaker allowing when the
 //! breaker is on), also a D-role worker (a former P after a P->D role switch).
+//!
+//! DP attention: a worker whose `--kv-worker-map` entries name its DP ranks is
+//! one candidate per rank, a prefill slot ([`crate::kv_hint::slot_key`]). The
+//! work book, the copy price and rate `auto` and the queue keep each slot as
+//! they keep a worker: its backlog is its own rank's queue, and one progress
+//! query of the worker gives each rank's row to its slot. The forecast keeps
+//! its state per worker, so the CLI refuses it with DP slots. The chosen rank
+//! goes to the engine as the P leg's `routed_dp_rank`. Among the holders a DP
+//! rank's slot may pull from, the source is the one that saves the most
+//! prefill time net of its pull time, at the decision's rate, which counts the
+//! pulls still in their priced pull time on that source's servicer
+//! ([`PrefillWorkBook::pull_queue`]); a whole worker pulls from the longest
+//! holder ([`KvHintInjector::pick`]). A worker that reports that its ranks
+//! take no pull (`/server_info` `peer_kv_pull`) gets no hint, and a pull is
+//! credited net of the tokens the reader replays after it.
 
 mod forecast;
 mod queue;
@@ -55,12 +70,47 @@ use serde_json::Value;
 use super::placement_cost::{fetch_tokens, PrefillWait, MIN_FETCH_TOKENS};
 use super::{PlaceInput, SymmetricPdError};
 use crate::config::SymmetricPdCostFunctionConfig;
-use crate::kv_hint::{HintCandidate, IndexerAnswer, KvHintConfig, KvHintInjector};
+use crate::kv_hint::{slot_key, HintCandidate, IndexerAnswer, KvHintConfig, KvHintInjector};
 use crate::load_refresh::{fetch_progress_poll, include_rejected};
 use crate::load_refresh::{LoadRefresh, Query};
 use crate::prefill_work::{Candidate, PrefillWorkBook, Reservation};
 use crate::workers::Worker;
 use tokio::task::JoinHandle;
+
+/// One prefill slot of the P pool: a worker, or one DP rank of a worker
+/// placed per rank. `key` is [`slot_key`] of the worker and the rank.
+#[derive(Debug, Clone)]
+pub(crate) struct Slot {
+    pub(crate) key: String,
+    pub(crate) worker: Arc<Worker>,
+}
+
+impl Slot {
+    /// The engine chunk one slot runs per pass: the worker's reported chunk.
+    /// Under DP attention the engine divides `--chunked-prefill-size` by its
+    /// DP ranks at start-up and `/server_info` reports that per-rank chunk,
+    /// so every rank's slot runs the reported value.
+    pub(crate) fn chunk(&self) -> (u64, &'static str) {
+        queue::chunk_of(&self.worker)
+    }
+}
+
+/// The slot a pull would go to ([`CostFunction::best_source`]): its key, its
+/// own hit, and the tokens it replays at the end of a pulled prefix.
+struct PullTarget<'a> {
+    key: &'a str,
+    local_hit: u64,
+    replay: u64,
+}
+
+/// The prefix a target matches after pulling from `source`: the source's hit
+/// up to the prompt, less the `replay` tokens the target recomputes at the end
+/// of a pulled prefix (the SWA branch replay window after a FULL-only pull).
+fn matched_after_pull(source: &HintCandidate, tokens: u64, replay: u64) -> u64 {
+    u64::from(source.expected_hit_tokens)
+        .min(tokens)
+        .saturating_sub(replay)
+}
 
 /// The `policy` label of every row of the cost-function trace.
 pub const TRACE_POLICY: &str = "symmetric_pd_cost_function";
@@ -80,6 +130,9 @@ pub const PLACE_REFUSAL: &str =
 pub struct CostFunction {
     cfg: SymmetricPdCostFunctionConfig,
     book: Arc<PrefillWorkBook>,
+    /// The DP ranks of each worker placed per rank (URL without a trailing
+    /// `/`), from `--kv-worker-map`.
+    ranks_by_url: HashMap<String, Vec<u32>>,
     /// The cost-function pull floor: max(`--kv-pull-hint-min-incremental-tokens`, 512).
     fetch_floor: u64,
     /// The progress poll client: 500 ms connect, 800 ms in total.
@@ -152,6 +205,7 @@ impl CostFunction {
         let this = Arc::new(Self {
             cfg,
             book,
+            ranks_by_url: crate::kv_hint::ranks_by_url(&kv.worker_map),
             fetch_floor,
             poll_client,
             progress_refresh: Arc::new(LoadRefresh::default()),
@@ -279,6 +333,24 @@ impl CostFunction {
         self.is_auto() && self.book.auto_price_end_session(session)
     }
 
+    /// The prefill slots of `pool`, in pool order and rank order: one per DP
+    /// rank of a worker placed per rank, else the worker itself.
+    pub(crate) fn slots(&self, pool: &[Arc<Worker>]) -> Vec<Slot> {
+        pool.iter()
+            .flat_map(|worker| {
+                let ranks: Vec<Option<u32>> =
+                    match self.ranks_by_url.get(worker.url.trim_end_matches('/')) {
+                        Some(ranks) => ranks.iter().copied().map(Some).collect(),
+                        None => vec![None],
+                    };
+                ranks.into_iter().map(move |dp_rank| Slot {
+                    key: slot_key(&worker.url, dp_rank),
+                    worker: Arc::clone(worker),
+                })
+            })
+            .collect()
+    }
+
     /// The cost-function candidates of one request: the cost function's rule on the
     /// P-role pool.
     ///
@@ -288,9 +360,9 @@ impl CostFunction {
     /// length; `pool`: the healthy P-role workers.
     ///
     /// # Outputs
-    /// One candidate per pool worker, in pool order. The answer is first
+    /// One candidate per prefill slot of the pool ([`Self::slots`]). The answer is first
     /// restricted to the pool, so every hit and every pull source is a
-    /// P-role worker. A hint whose gain is below the pull floor is dropped:
+    /// P-role slot. A hint whose gain is below the pull floor is dropped:
     /// the P then recomputes those tokens and pays no transfer.
     pub(crate) fn candidates(
         &self,
@@ -300,42 +372,11 @@ impl CostFunction {
         pool: &[Arc<Worker>],
     ) -> Vec<Candidate> {
         let answer = answer.map(|a| restrict_to_pool(a, pool));
-        pool.iter()
-            .map(|worker| {
-                let local_hit = answer
-                    .as_ref()
-                    .map_or(0, |a| {
-                        u64::from(KvHintInjector::target_hit_tokens(a, &worker.url))
-                    })
-                    .min(tokens);
-                let mut hint = answer.as_ref().and_then(|a| ix.pick(a, &worker.url));
-                let mut remote_hit = hint
-                    .as_ref()
-                    .and_then(|h| h.get("expected_hit_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                if fetch_tokens(local_hit, remote_hit, tokens, self.fetch_floor) == 0 {
-                    hint = None;
-                    remote_hit = 0;
-                }
-                Candidate {
-                    worker_url: worker.url.clone(),
-                    local_hit,
-                    gpu_hit: answer
-                        .as_ref()
-                        .and_then(|a| a.observed_gpu_hits.get(&worker.url))
-                        .copied()
-                        .map(u64::from),
-                    expected_hit: local_hit.max(remote_hit).min(tokens),
-                    hint,
-                }
-            })
-            .collect()
+        self.slot_candidates(ix, answer.as_ref(), answer.as_ref(), tokens, pool)
     }
 
     /// `--symmetric-pd-pull-from-any-holder`: the candidates of
-    /// [`Self::candidates`] with a wider pull source. Kept apart so that the
-    /// default path stays the unchanged function above.
+    /// [`Self::candidates`] with a wider pull source.
     ///
     /// # Inputs
     /// As [`Self::candidates`]; `answer` is the whole indexer answer;
@@ -344,8 +385,8 @@ impl CostFunction {
     /// besides `pool`.
     ///
     /// # Outputs
-    /// One candidate per pool worker, in pool order. The local and GPU hits
-    /// are the pool worker's own (the answer restricted to the pool); the
+    /// One candidate per prefill slot of the pool. The local and GPU hits
+    /// are the slot's own (the answer restricted to the pool); the
     /// hint is picked from the holders of the answer that are in `pool` or
     /// `donors`, also a worker outside the P-role pool (a D-role worker). A
     /// holder in neither (removed from the registry, only in
@@ -365,37 +406,131 @@ impl CostFunction {
         let targets = answer.map(|a| restrict_to_pool(a, pool));
         let sources: Vec<Arc<Worker>> = pool.iter().chain(donors).cloned().collect();
         let holders = answer.map(|a| restrict_to_pool(a, &sources));
-        pool.iter()
-            .map(|worker| {
+        self.slot_candidates(ix, targets.as_ref(), holders.as_ref(), tokens, pool)
+    }
+
+    /// One candidate per slot of `pool`: its own hit and GPU hit from
+    /// `targets`, and its pull from a source among `holders`. A DP rank's
+    /// slot pulls from the best source ([`Self::best_source`]); a whole
+    /// worker pulls from the holder with the longest prefix, as without DP
+    /// slots ([`KvHintInjector::pick`]), when it gains at least the pull
+    /// floor. A slot whose worker reports that its ranks take no pull
+    /// (`/server_info` `peer_kv_pull`) gets none; a pull is credited with the
+    /// prefix the reader then matches, the pulled prefix less the tokens the
+    /// reader replays.
+    fn slot_candidates(
+        &self,
+        ix: &KvHintInjector,
+        targets: Option<&IndexerAnswer>,
+        holders: Option<&IndexerAnswer>,
+        tokens: u64,
+        pool: &[Arc<Worker>],
+    ) -> Vec<Candidate> {
+        let slots = self.slots(pool);
+        // DP slots: the pulls priced and not yet served, per source servicer,
+        // and the cost parameters of this decision (copy price and rate auto
+        // resolved, as the reservation resolves them): read once.
+        let dp_slots = slots
+            .iter()
+            .any(|slot| crate::kv_hint::split_slot(&slot.key).1.is_some());
+        let (queued, params) = match holders {
+            Some(_) if dp_slots => {
+                let urls: Vec<&str> = slots.iter().map(|slot| slot.key.as_str()).collect();
+                self.book.pull_pricing(self.cfg.cost_params, &urls)
+            }
+            _ => (HashMap::new(), self.cfg.cost_params),
+        };
+        slots
+            .into_iter()
+            .map(|slot| {
                 let local_hit = targets
-                    .as_ref()
                     .map_or(0, |a| {
-                        u64::from(KvHintInjector::target_hit_tokens(a, &worker.url))
+                        u64::from(KvHintInjector::target_hit_tokens(a, &slot.key))
                     })
                     .min(tokens);
-                let mut hint = holders.as_ref().and_then(|a| ix.pick(a, &worker.url));
-                let mut remote_hit = hint
-                    .as_ref()
-                    .and_then(|h| h.get("expected_hit_tokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                if fetch_tokens(local_hit, remote_hit, tokens, self.fetch_floor) == 0 {
-                    hint = None;
-                    remote_hit = 0;
-                }
+                let pull = slot.worker.peer_kv_pull();
+                let replay = pull.map_or(0, |p| p.replay_tokens);
+                let source = holders
+                    .filter(|_| pull.is_none_or(|p| p.takes))
+                    .and_then(|a| {
+                        if crate::kv_hint::split_slot(&slot.key).1.is_none() {
+                            // A whole worker: the longest holder, no pull queue.
+                            let source = ix.sources(a, &slot.key).into_iter().next()?;
+                            let remote_hit = matched_after_pull(source, tokens, replay);
+                            let gain =
+                                fetch_tokens(local_hit, remote_hit, tokens, self.fetch_floor);
+                            return (gain > 0).then_some((source, 0));
+                        }
+                        let target = PullTarget {
+                            key: &slot.key,
+                            local_hit,
+                            replay,
+                        };
+                        self.best_source(ix, a, &target, tokens, &queued, &params)
+                    });
+                let (hint, remote_hit, pull_queued) = match source {
+                    Some((source, queued)) => (
+                        Some(ix.hint(source)),
+                        matched_after_pull(source, tokens, replay),
+                        queued,
+                    ),
+                    None => (None, 0, 0),
+                };
                 Candidate {
-                    worker_url: worker.url.clone(),
+                    worker_url: slot.key.clone(),
                     local_hit,
                     gpu_hit: targets
-                        .as_ref()
-                        .and_then(|a| a.observed_gpu_hits.get(&worker.url))
+                        .and_then(|a| a.observed_gpu_hits.get(&slot.key))
                         .copied()
                         .map(u64::from),
                     expected_hit: local_hit.max(remote_hit).min(tokens),
                     hint,
+                    pull_queued,
                 }
             })
             .collect()
+    }
+
+    /// The pull source of a DP rank's slot `target` among the holders of
+    /// `answer` that pass the pull gates ([`KvHintInjector::sources`]) and
+    /// save at least the pull floor: the one with the largest `gain / R -
+    /// pull_s(gain + replay + queued)`, the prefill time its tokens save net
+    /// of the time to read them. `gain` is what the target then does not compute: the source's
+    /// hit less the target's replay ([`matched_after_pull`]), less its own
+    /// hit. `queued` is the pull work still in its priced pull time on that
+    /// source's servicer (a hot source rank serves its pulls one after
+    /// another) and R is the decision's rate (`params`, auto resolved). Ties
+    /// go to the larger hit, then the answer's order. Returns the source and
+    /// its queued tokens; `None` without one.
+    fn best_source<'a>(
+        &self,
+        ix: &KvHintInjector,
+        answer: &'a IndexerAnswer,
+        target: &PullTarget<'_>,
+        tokens: u64,
+        queued: &HashMap<String, u64>,
+        params: &super::placement_cost::PlacementCostParams,
+    ) -> Option<(&'a HintCandidate, u64)> {
+        let rate = params.prefill_rate_tokens_per_s;
+        let mut best: Option<(&HintCandidate, u64, f64)> = None;
+        for source in ix.sources(answer, target.key) {
+            let gain = fetch_tokens(
+                target.local_hit,
+                matched_after_pull(source, tokens, target.replay),
+                tokens,
+                self.fetch_floor,
+            );
+            if gain == 0 {
+                continue;
+            }
+            let ahead = queued.get(&source.servicer_addr).copied().unwrap_or(0);
+            let read = gain.saturating_add(target.replay).saturating_add(ahead);
+            let value = gain as f64 / rate - params.pull_seconds(read);
+            if best.is_none_or(|(_, _, v)| value > v) {
+                best = Some((source, ahead, value));
+            }
+        }
+        best.map(|(source, ahead, _)| (source, ahead))
     }
 
     /// Select and reserve the P-leg of one request (one work-book
@@ -526,9 +661,44 @@ impl CostFunction {
             .collect()
     }
 
+    /// Give each row of one progress poll of `worker` to its slot: the one row
+    /// of a worker placed as a whole, or each DP rank's row to that rank's
+    /// slot. A worker with several ranks that the map does not name
+    /// is refused: its ranks are separate schedulers and their rows cannot be
+    /// merged into one worker's progress.
+    fn slot_rows(
+        &self,
+        worker: &Worker,
+        rows: Vec<crate::load_refresh::ProgressRow>,
+    ) -> anyhow::Result<Vec<(String, crate::load_refresh::ProgressRow)>> {
+        let ranks = self.ranks_by_url.get(worker.url.trim_end_matches('/'));
+        let Some(ranks) = ranks else {
+            anyhow::ensure!(
+                rows.len() == 1,
+                "{} DP ranks report progress, but --kv-worker-map names no dp_rank for this \
+                 worker: each rank needs its own entry with its dp_rank",
+                rows.len()
+            );
+            return Ok(rows
+                .into_iter()
+                .map(|row| (worker.url.clone(), row))
+                .collect());
+        };
+        rows.into_iter()
+            .map(|row| match row.dp_rank {
+                Some(rank) if ranks.contains(&rank) => Ok((slot_key(&worker.url, Some(rank)), row)),
+                rank => Err(anyhow::anyhow!(
+                    "progress row of DP rank {rank:?} is not a rank of this worker in \
+                     --kv-worker-map ({ranks:?})"
+                )),
+            })
+            .collect()
+    }
+
     /// One progress query of `worker`, with the `prefill_routing` section
     /// when the forecast state wants it. The reply updates the work book
-    /// (and the forecast state). Returns the engine cursor it applied.
+    /// (and the forecast state) of each of the worker's slots. Returns the
+    /// engine cursor it applied ([`crate::load_refresh::rows_cursor`]).
     async fn poll_progress(&self, worker: &Worker, query: &Query) -> anyhow::Result<(String, u64)> {
         let mut routing = self
             .forecast
@@ -549,20 +719,23 @@ impl CostFunction {
             }
         };
         let received = Instant::now();
-        let (progress, load, routing_raw) = fetched?;
+        let rows = fetched?;
         if routing {
             if let Some(forecast) = &self.forecast {
                 forecast.note_routing_accepted(&worker.url);
             }
         }
-        query.check(&progress.epoch, progress.sequence)?;
-        let cursor = (progress.epoch.clone(), progress.sequence);
-        self.book
-            .apply_progress_received(&worker.url, progress, load, query.sent_at, received)
-            .map_err(anyhow::Error::msg)?;
-        if let (Some(forecast), Some(raw)) = (&self.forecast, routing_raw) {
-            // Parsed here, off the work-book lock.
-            forecast.observe(&worker.url, &raw, query.sent_at, received);
+        let cursor = crate::load_refresh::rows_cursor(&rows);
+        query.check(&cursor.0, cursor.1)?;
+        for (slot, row) in self.slot_rows(worker, rows)? {
+            self.book
+                .apply_progress_received(&slot, row.progress, row.load, query.sent_at, received)
+                .map_err(anyhow::Error::msg)?;
+            if let (Some(forecast), Some(raw)) = (&self.forecast, row.routing) {
+                // Parsed here, off the work-book lock: each rank's snapshot is
+                // its own scheduler's, a one-rank view of its slot.
+                forecast.observe(&slot, &raw, query.sent_at, received);
+            }
         }
         // An applied view can give room: a release pass.
         self.queue_wake_poll();
@@ -571,8 +744,8 @@ impl CostFunction {
 }
 
 /// The answer of the P-role pool: the candidates and the GPU observations
-/// of the pool's workers, keyed by their registry URLs (a trailing `/` is
-/// ignored), in the answer's order (best hit first).
+/// of the pool's workers (all their slots), keyed by their registry URLs (a
+/// trailing `/` is ignored), in the answer's order (best hit first).
 fn restrict_to_pool(answer: &IndexerAnswer, pool: &[Arc<Worker>]) -> IndexerAnswer {
     let by_norm: HashMap<&str, &str> = pool
         .iter()
@@ -590,6 +763,7 @@ fn restrict_to_pool(answer: &IndexerAnswer, pool: &[Arc<Worker>]) -> IndexerAnsw
             .filter_map(|c| {
                 url_of(c.worker_url.as_str()).map(|worker_url| HintCandidate {
                     worker_url,
+                    dp_rank: c.dp_rank,
                     servicer_addr: c.servicer_addr.clone(),
                     expected_hit_tokens: c.expected_hit_tokens,
                 })
@@ -598,7 +772,10 @@ fn restrict_to_pool(answer: &IndexerAnswer, pool: &[Arc<Worker>]) -> IndexerAnsw
         observed_gpu_hits: answer
             .observed_gpu_hits
             .iter()
-            .filter_map(|(url, hit)| url_of(url.as_str()).map(|url| (url, *hit)))
+            .filter_map(|(slot, hit)| {
+                let (url, dp_rank) = crate::kv_hint::split_slot(slot);
+                url_of(url).map(|url| (slot_key(&url, dp_rank), *hit))
+            })
             .collect(),
         indexer_ms: answer.indexer_ms,
     }
@@ -619,6 +796,15 @@ fn hint_source_worker(selected: &Candidate) -> String {
 fn log_decision_line(input: &PlaceInput, selected: &Candidate, decision: &Value) {
     // `Value` inside the macro would resolve to tracing's field trait.
     let source_worker = hint_source_worker(selected);
+    // The chosen candidate's priced pull time (0 without a pull).
+    let chosen = &decision["chosen"];
+    let pull_s = decision["candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| &row["worker_url"] == chosen)
+        .and_then(|row| row["pull_s"].as_f64())
+        .unwrap_or(0.0);
     tracing::info!(
         target: "symmetric_pd",
         rid = input.rid.as_deref().unwrap_or("-"),
@@ -626,6 +812,7 @@ fn log_decision_line(input: &PlaceInput, selected: &Candidate, decision: &Value)
         owner = decision["owner"].as_str().unwrap_or(""),
         detour = decision["detour"].as_bool().unwrap_or(false),
         pulled_tokens = decision["pulled_tokens"].as_u64().unwrap_or(0),
+        pull_s,
         source_worker = %source_worker,
         expected_hit_tokens = selected.expected_hit,
         local_hit_tokens = selected.local_hit,
@@ -977,6 +1164,7 @@ mod tests {
                     id: i as u64 + 1,
                     url: url.to_string(),
                     servicer: format!("servicer-{i}:8000"),
+                    dp_rank: None,
                 })
                 .collect(),
         }
@@ -1020,6 +1208,7 @@ mod tests {
                 .iter()
                 .map(|(url, tokens)| HintCandidate {
                     worker_url: url.to_string(),
+                    dp_rank: None,
                     servicer_addr: format!("{url}/servicer"),
                     expected_hit_tokens: *tokens,
                 })
@@ -1230,6 +1419,511 @@ mod tests {
         }
     }
 
+    // ---- DP-attention workers: one slot per DP rank ----
+
+    /// The launcher's map of DP-attention workers: worker `w` of `urls` has
+    /// `ranks` DP ranks, instance `20001 + w + 1000 * rank` and the servicer
+    /// `p<w>:<18100 + rank>` of each rank.
+    fn dp_kv(urls: &[&str], ranks: u32) -> KvHintConfig {
+        let mut kv = kv(512, &[]);
+        for (w, url) in urls.iter().enumerate() {
+            for rank in 0..ranks {
+                kv.worker_map.push(KvWorkerMapEntry {
+                    id: 20001 + w as u64 + 1000 * u64::from(rank),
+                    url: url.to_string(),
+                    servicer: format!("p{w}:{}", 18100 + rank),
+                    dp_rank: Some(rank),
+                });
+            }
+        }
+        kv
+    }
+
+    /// `(worker index, rank, tokens)` rows as a reply of the DP map of [`dp_kv`].
+    fn dp_reply(rows: &[(u64, u64, u32)]) -> Value {
+        let mut instances = serde_json::Map::new();
+        for (w, rank, tokens) in rows {
+            instances.insert(
+                (20001 + w + 1000 * rank).to_string(),
+                serde_json::json!({"cpu": tokens, "gpu": tokens}),
+            );
+        }
+        serde_json::json!({ "instances": instances })
+    }
+
+    /// A worker whose map names its DP ranks is one candidate per rank, with
+    /// that rank's own hit; a rank pulls from the rank that holds the prefix,
+    /// also a sibling rank of its own worker, at that rank's servicer.
+    #[test]
+    fn dp_ranks_are_candidates_with_their_own_hits_and_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = dp_kv(&[P1, P2], 2);
+        let ix = KvHintInjector::new(&kv);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        let pool = vec![worker(P1), worker(P2)];
+        let answer = ix.answer_from_reply(&dp_reply(&[(0, 1, 30_000), (1, 0, 2_000)]), 1.0);
+        let c = cf.candidates(&ix, Some(&answer), 40_000, &pool);
+        type Row = (String, u64, u64, Option<String>);
+        let got: Vec<Row> = c
+            .iter()
+            .map(|c| {
+                let servicer = c
+                    .hint
+                    .as_ref()
+                    .map(|h| h["source_servicer_addr"].as_str().unwrap().to_string());
+                (c.worker_url.clone(), c.local_hit, c.expected_hit, servicer)
+            })
+            .collect();
+        let rows =
+            |s: &str, l: u64, e: u64, h: Option<&str>| (s.to_string(), l, e, h.map(str::to_string));
+        assert_eq!(
+            got,
+            [
+                rows("http://p1:30000#dp0", 0, 30_000, Some("p0:18101")),
+                rows("http://p1:30000#dp1", 30_000, 30_000, None),
+                rows("http://p2:30000#dp0", 2_000, 30_000, Some("p0:18101")),
+                rows("http://p2:30000#dp1", 0, 30_000, Some("p0:18101")),
+            ]
+        );
+        assert_eq!(cf.slots(&pool[..1]).len(), 2);
+    }
+
+    /// Cold requests on idle DP slots tie exactly on cost; they go to the slot
+    /// with the fewest outstanding requests, then to the next slot in turn,
+    /// so they spread over the ranks instead of all taking the smallest slot
+    /// key. Each request is rolled back, so every slot is idle again.
+    #[test]
+    fn cold_requests_on_idle_dp_slots_spread_over_the_ranks() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = dp_kv(&[P1, P2], 2);
+        let ix = KvHintInjector::new(&kv);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        let pool = vec![worker(P1), worker(P2)];
+        let place = |rid: &str| {
+            let input = PlaceInput {
+                rid: Some(rid.into()),
+                ..PlaceInput::default()
+            };
+            let (selected, reservation, _) = cf
+                .reserve(&ix, &input, 4_000, None, 0.0, &pool, &[])
+                .unwrap();
+            drop(reservation);
+            selected.worker_url
+        };
+        let got: Vec<String> = (0..5).map(|i| place(&format!("r{i}"))).collect();
+        let slot = |url: &str, rank: u32| slot_key(url, Some(rank));
+        assert_eq!(
+            got,
+            [
+                slot(P1, 0),
+                slot(P1, 1),
+                slot(P2, 0),
+                slot(P2, 1),
+                slot(P1, 0)
+            ]
+        );
+        // P1 rank 1, next in turn, has an outstanding request with no work
+        // left (its prefill ended, its response is not back): it still ties
+        // on cost, and the next cold request skips it for an idle rank.
+        let held = Candidate {
+            worker_url: slot(P1, 1),
+            ..cand("", 0)
+        };
+        let (_, mut held, _) = cf
+            .book
+            .reserve_cost(4_000, Some("held".into()), vec![held], cf.cfg.cost_params)
+            .unwrap();
+        held.mark_dispatched().unwrap();
+        let progress = crate::prefill_work::PrefillProgress {
+            epoch: "e".into(),
+            sequence: 1,
+            remaining: [("held".to_string(), 0)].into_iter().collect(),
+            truncated: false,
+        };
+        cf.book
+            .apply_progress(&slot(P1, 1), progress, Value::Null, Instant::now())
+            .unwrap();
+        assert_eq!(place("r5"), slot(P2, 0));
+    }
+
+    /// The DP tie rule stays among the DP slots of a pool that also has whole
+    /// workers: when the cost's own order chooses a whole worker, the choice
+    /// stands; when it chooses a DP slot, cold requests rotate over the DP
+    /// slots only. Each request is rolled back, so every slot is idle again.
+    #[test]
+    fn a_whole_worker_keeps_its_tie_order_beside_dp_slots() {
+        fn place3(cf: &CostFunction, ix: &KvHintInjector, pool: &[Arc<Worker>]) -> Vec<String> {
+            (0..3)
+                .map(|i| {
+                    let input = PlaceInput {
+                        rid: Some(format!("r{i}")),
+                        ..PlaceInput::default()
+                    };
+                    let (selected, reservation, _) =
+                        cf.reserve(ix, &input, 4_000, None, 0.0, pool, &[]).unwrap();
+                    drop(reservation);
+                    selected.worker_url
+                })
+                .collect()
+        }
+        let whole = |kv: &mut KvHintConfig, url: &str| {
+            kv.worker_map.push(KvWorkerMapEntry {
+                id: 30_001,
+                url: url.to_string(),
+                servicer: "whole:18100".into(),
+                dp_rank: None,
+            });
+        };
+        // P1 whole and first in the cost's order: it keeps every cold request.
+        let dir = tempfile::tempdir().unwrap();
+        let mut kv = dp_kv(&[P2], 2);
+        whole(&mut kv, P1);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        let got = place3(&cf, &KvHintInjector::new(&kv), &[worker(P1), worker(P2)]);
+        assert_eq!(got, [P1, P1, P1]);
+        // P1 with two ranks, P3 whole: the rotation stays on P1's ranks.
+        let dir = tempfile::tempdir().unwrap();
+        let mut kv = dp_kv(&[P1], 2);
+        whole(&mut kv, P3);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        let got = place3(&cf, &KvHintInjector::new(&kv), &[worker(P1), worker(P3)]);
+        let slot = |rank: u32| slot_key(P1, Some(rank));
+        assert_eq!(got, [slot(0), slot(1), slot(0)]);
+    }
+
+    /// A whole worker (no DP ranks in the map) pulls from the holder with the
+    /// longest prefix, as without DP slots: the pulls queued on that
+    /// holder's servicer neither move the source nor enter the cost.
+    #[test]
+    fn a_whole_worker_pulls_from_the_longest_holder_whatever_its_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = kv(512, &[P1, P2, P3]);
+        let ix = KvHintInjector::new(&kv);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        // P1 holds 30,000 tokens, P2 29,000.
+        let a = answer(&[(P1, 30_000), (P2, 29_000)], &[]);
+        // A reserved pull of 400,000 tokens from P1's servicer.
+        let servicer = format!("{P1}/servicer");
+        let earlier = Candidate {
+            worker_url: P2.into(),
+            local_hit: 0,
+            gpu_hit: None,
+            expected_hit: 400_000,
+            hint: Some(serde_json::json!({
+                "source_worker_id": P1, "source_servicer_addr": servicer,
+                "expected_hit_tokens": 400_000,
+            })),
+            pull_queued: 0,
+        };
+        let (_, earlier, _) = cf
+            .book
+            .reserve_cost(
+                500_000,
+                Some("earlier".into()),
+                vec![earlier],
+                cf.cfg.cost_params,
+            )
+            .unwrap();
+        assert_eq!(cf.book.pull_queue().get(&servicer), Some(&400_000));
+        let c = cf.candidates(&ix, Some(&a), 40_000, &pool());
+        let p3 = c.iter().find(|c| c.worker_url == P3).unwrap();
+        assert_eq!(
+            (source(p3), p3.expected_hit, p3.pull_queued),
+            (Some(P1), 30_000, 0)
+        );
+        drop(earlier);
+    }
+
+    /// A DP-attention worker's `/server_info` reports its per-rank chunk (the
+    /// engine divides `--chunked-prefill-size` 32,768 by its 4 DP ranks), and
+    /// every rank's slot runs that chunk, not a share of it.
+    #[tokio::test]
+    async fn a_dp_rank_slot_runs_the_chunk_its_worker_reports() {
+        use axum::{routing::get, Json, Router};
+        let server_info = serde_json::json!({
+            "served_model_name": "m",
+            "disaggregation_mode": "symmetric",
+            "tp_size": 4,
+            "dp_size": 4,
+            "enable_dp_attention": true,
+            "chunked_prefill_size": 8192,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/server_info",
+            get(move || {
+                let body = server_info.clone();
+                async move { Json(body) }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let info = crate::workers::introspect::WorkerIntrospector::new(Duration::from_millis(500))
+            .fetch(&url)
+            .await;
+        server.abort();
+        assert_eq!(info.chunk_tokens, Some(8192));
+        let dir = tempfile::tempdir().unwrap();
+        let kv = dp_kv(&[url.as_str()], 4);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        let p = worker(&url);
+        p.set_chunk_tokens(info.chunk_tokens.unwrap());
+        let chunks = cf.slot_chunks(&[p]);
+        assert_eq!(chunks.len(), 4);
+        for (rank, (slot, chunk)) in chunks.iter().enumerate() {
+            assert_eq!(*slot, slot_key(&url, Some(rank as u32)));
+            assert_eq!(*chunk, (8192, "server_info"), "{slot}");
+        }
+    }
+
+    /// The rank that holds a prompt's prefix is busy, so the cost function
+    /// sends the P-leg to another rank of the same worker, which fetches the
+    /// prefix from the holder rank instead of recomputing it.
+    #[test]
+    fn a_p_leg_on_a_non_holder_rank_fetches_from_the_holder_rank() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = dp_kv(&[P1, P2], 2);
+        let ix = KvHintInjector::new(&kv);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        let pool = vec![worker(P1), worker(P2)];
+        // 400,000 uncached tokens queued on P1 rank 1, which holds the prefix.
+        let busy = Candidate {
+            worker_url: slot_key(P1, Some(1)),
+            ..cand("", 0)
+        };
+        let (_, _busy, _) = cf
+            .book
+            .reserve_cost(400_000, Some("busy".into()), vec![busy], cf.cfg.cost_params)
+            .unwrap();
+        let reply = dp_reply(&[(0, 1, 30_000)]);
+        let input = PlaceInput {
+            rid: Some("r".into()),
+            ..PlaceInput::default()
+        };
+        let (selected, _reservation, decision) = cf
+            .reserve(&ix, &input, 40_000, Some(&reply), 1.0, &pool, &[])
+            .unwrap();
+        // Every other rank is idle: the smallest slot key, P1's rank 0.
+        assert_eq!(selected.worker_url, slot_key(P1, Some(0)));
+        let hint = selected.hint.as_ref().expect("a fetch, not a recompute");
+        assert_eq!(hint["source_worker_id"], P1);
+        assert_eq!(hint["source_servicer_addr"], "p0:18101");
+        assert_eq!((selected.local_hit, selected.expected_hit), (0, 30_000));
+        assert_eq!(decision["pulled_tokens"], 30_000);
+    }
+
+    /// Source pricing: two ranks hold the same prefix; one already serves a
+    /// pull of 400,000 tokens that its P has not read yet, so a new pull goes
+    /// to the other holder. Once the P's progress shows the earlier request
+    /// (its pull is done), the queue is empty again. A 60 s fixed pull time
+    /// keeps the earlier pull inside its priced time for the whole test.
+    #[test]
+    fn a_pull_goes_to_the_holder_rank_with_less_queued_pull_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = dp_kv(&[P1, P2], 2);
+        let ix = KvHintInjector::new(&kv);
+        let params = PlacementCostParams {
+            fetch_fixed_ms: 60_000.0,
+            ..PlacementCostParams::default()
+        };
+        let cf = cost_function(&dir, params, &kv);
+        let pool = vec![worker(P1), worker(P2)];
+        // P1 rank 0 and P2 rank 1 hold the same 30,000 tokens; P1 rank 0 is first.
+        let answer = ix.answer_from_reply(&dp_reply(&[(0, 0, 30_000), (1, 1, 30_000)]), 1.0);
+        let first = |c: &[Candidate]| {
+            c.iter()
+                .find(|c| c.worker_url == slot_key(P2, Some(0)))
+                .and_then(|c| c.hint.as_ref())
+                .map(|h| h["source_servicer_addr"].as_str().unwrap().to_string())
+        };
+        let c = cf.candidates(&ix, Some(&answer), 40_000, &pool);
+        assert_eq!(first(&c).as_deref(), Some("p0:18100"));
+        // A reserved pull of 400,000 tokens from P1 rank 0's servicer.
+        let earlier = Candidate {
+            worker_url: slot_key(P1, Some(1)),
+            local_hit: 0,
+            gpu_hit: None,
+            expected_hit: 400_000,
+            hint: Some(serde_json::json!({
+                "source_worker_id": P1, "source_servicer_addr": "p0:18100",
+                "expected_hit_tokens": 400_000,
+            })),
+            pull_queued: 0,
+        };
+        let (_, mut earlier, _) = cf
+            .book
+            .reserve_cost(
+                500_000,
+                Some("earlier".into()),
+                vec![earlier],
+                cf.cfg.cost_params,
+            )
+            .unwrap();
+        assert_eq!(cf.book.pull_queue().get("p0:18100"), Some(&400_000));
+        let c = cf.candidates(&ix, Some(&answer), 40_000, &pool);
+        assert_eq!(first(&c).as_deref(), Some("p1:18101"));
+        let other = c
+            .iter()
+            .find(|c| c.worker_url == slot_key(P2, Some(0)))
+            .unwrap();
+        assert_eq!(other.pull_queued, 0);
+        // Its P lists it: the pull is done and the queue empties.
+        earlier.mark_dispatched().unwrap();
+        let progress = crate::prefill_work::PrefillProgress {
+            epoch: "e".into(),
+            sequence: 1,
+            remaining: [("earlier".to_string(), 100_000)].into_iter().collect(),
+            truncated: false,
+        };
+        cf.book
+            .apply_progress(
+                &slot_key(P1, Some(1)),
+                progress,
+                Value::Null,
+                Instant::now(),
+            )
+            .unwrap();
+        assert!(cf.book.pull_queue().is_empty());
+        let c = cf.candidates(&ix, Some(&answer), 40_000, &pool);
+        assert_eq!(first(&c).as_deref(), Some("p0:18100"));
+    }
+
+    /// The pull source is priced at the rate it is given (the decision's R,
+    /// [`PrefillWorkBook::pull_pricing`]): a larger hit behind a queue of
+    /// 400,000 tokens wins at 13,500 tokens/s and loses to a smaller idle
+    /// holder at 30,000 tokens/s, where recomputing the difference is cheap.
+    #[test]
+    fn the_pull_source_is_priced_at_the_decisions_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = dp_kv(&[P1, P2], 2);
+        let ix = KvHintInjector::new(&kv);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        // P1 rank 0 holds 30,000 tokens, P2 rank 1 holds 20,000.
+        let answer = ix.answer_from_reply(&dp_reply(&[(0, 0, 30_000), (1, 1, 20_000)]), 1.0);
+        let queued: HashMap<String, u64> =
+            [("p0:18100".to_string(), 400_000)].into_iter().collect();
+        let key = slot_key(P2, Some(0));
+        let target = PullTarget {
+            key: &key,
+            local_hit: 0,
+            replay: 0,
+        };
+        let source = |rate: f64| {
+            let params = PlacementCostParams {
+                prefill_rate_tokens_per_s: rate,
+                ..PlacementCostParams::default()
+            };
+            cf.best_source(&ix, &answer, &target, 40_000, &queued, &params)
+                .map(|(s, ahead)| (s.servicer_addr.clone(), ahead))
+        };
+        assert_eq!(source(13_500.0), Some(("p0:18100".to_string(), 400_000)));
+        assert_eq!(source(30_000.0), Some(("p1:18101".to_string(), 0)));
+    }
+
+    /// A worker whose ranks take no pull (`/server_info` `peer_kv_pull`, e.g.
+    /// a hybrid cache without SWA branch replay under DP attention) gets no
+    /// hint on any rank, so no pull is priced for it: its slots keep their
+    /// own hit. A worker that does not report keeps its hints.
+    #[test]
+    fn a_worker_whose_ranks_take_no_pull_gets_no_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = dp_kv(&[P1, P2], 2);
+        let ix = KvHintInjector::new(&kv);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        let pool = vec![worker(P1), worker(P2)];
+        pool[1].set_peer_kv_pull(Some(crate::workers::PeerKvPull {
+            takes: false,
+            replay_tokens: 0,
+        }));
+        // P1 rank 1 holds 30,000 tokens; P2 rank 0 holds 2,000.
+        let answer = ix.answer_from_reply(&dp_reply(&[(0, 1, 30_000), (1, 0, 2_000)]), 1.0);
+        let c = cf.candidates(&ix, Some(&answer), 40_000, &pool);
+        let row = |key: &str| {
+            let c = c.iter().find(|c| c.worker_url == key).unwrap();
+            (c.local_hit, c.expected_hit, c.hint.is_some())
+        };
+        assert_eq!(row(&slot_key(P1, Some(0))), (0, 30_000, true));
+        assert_eq!(row(&slot_key(P2, Some(0))), (2_000, 2_000, false));
+        assert_eq!(row(&slot_key(P2, Some(1))), (0, 0, false));
+    }
+
+    /// A reader that replays the last 256 tokens of a pulled prefix (SWA branch
+    /// replay after a FULL-only pull) is credited with the prefix it then
+    /// matches, the source's hit less 256, while the hint still names the
+    /// source's whole hit; a pull that would save less than the floor once the
+    /// replay is taken off is not made.
+    #[test]
+    fn a_pull_is_credited_net_of_the_readers_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = dp_kv(&[P1, P2], 2);
+        let ix = KvHintInjector::new(&kv);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        let pool = vec![worker(P1), worker(P2)];
+        pool[1].set_peer_kv_pull(Some(crate::workers::PeerKvPull {
+            takes: true,
+            replay_tokens: 256,
+        }));
+        // P1 rank 1 holds 30,000 tokens; P2 rank 1 holds 29,440 of them (560
+        // short: 304 tokens saved after the replay, below the 512 floor).
+        let answer = ix.answer_from_reply(&dp_reply(&[(0, 1, 30_000), (1, 1, 29_440)]), 1.0);
+        let c = cf.candidates(&ix, Some(&answer), 40_000, &pool);
+        let row = |key: &str| {
+            let c = c.iter().find(|c| c.worker_url == key).unwrap();
+            let pulled = c
+                .hint
+                .as_ref()
+                .map(|h| h["expected_hit_tokens"].as_u64().unwrap());
+            (c.local_hit, c.expected_hit, pulled)
+        };
+        assert_eq!(row(&slot_key(P2, Some(0))), (0, 29_744, Some(30_000)));
+        assert_eq!(row(&slot_key(P2, Some(1))), (29_440, 29_440, None));
+        // A reader that reports no replay is credited with the whole hit.
+        assert_eq!(row(&slot_key(P1, Some(0))), (0, 30_000, Some(30_000)));
+    }
+
+    /// One progress poll of a DP worker gives each rank's row to its slot; a
+    /// worker with several rows and no ranks in the map is refused, as is a
+    /// row of a rank the map does not name.
+    #[test]
+    fn progress_rows_go_to_their_rank_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = dp_kv(&[P1], 2);
+        let cf = cost_function(&dir, PlacementCostParams::default(), &kv);
+        let row = |dp_rank: Option<u32>, sequence: u64| crate::load_refresh::ProgressRow {
+            dp_rank,
+            progress: crate::prefill_work::PrefillProgress {
+                epoch: format!("e{}", dp_rank.unwrap_or(9)),
+                sequence,
+                remaining: Default::default(),
+                truncated: false,
+            },
+            load: Value::Null,
+            routing: None,
+        };
+        let slots: Vec<String> = cf
+            .slot_rows(&worker(P1), vec![row(Some(1), 5), row(Some(0), 7)])
+            .unwrap()
+            .into_iter()
+            .map(|(slot, _)| slot)
+            .collect();
+        assert_eq!(slots, [slot_key(P1, Some(1)), slot_key(P1, Some(0))]);
+        assert!(cf.slot_rows(&worker(P1), vec![row(Some(2), 1)]).is_err());
+        assert!(cf
+            .slot_rows(&worker(P2), vec![row(Some(0), 1), row(Some(1), 1)])
+            .is_err());
+        let whole = cf.slot_rows(&worker(P2), vec![row(None, 1)]).unwrap();
+        assert_eq!(whole[0].0, P2);
+        let rows = [row(Some(0), 7), row(Some(1), 5)];
+        assert_eq!(
+            crate::load_refresh::rows_cursor(&rows),
+            ("e0|e1".to_string(), 12)
+        );
+        assert_eq!(
+            crate::load_refresh::rows_cursor(&rows[..1]),
+            ("e0".to_string(), 7)
+        );
+    }
+
     /// The indexer reply of `rows` (`(worker id, cpu, gpu)`).
     fn reply(rows: &[(u64, u32, u32)]) -> Value {
         let mut instances = serde_json::Map::new();
@@ -1387,7 +2081,15 @@ mod tests {
             gpu_hit: None,
             expected_hit: hit,
             hint: None,
+            pull_queued: 0,
         }
+    }
+
+    /// Each worker of `pool` as one slot with its engine chunk.
+    fn chunks(pool: &[Arc<Worker>]) -> Vec<(String, (u64, &'static str))> {
+        pool.iter()
+            .map(|w| (w.url.clone(), queue::chunk_of(w)))
+            .collect()
     }
 
     /// Hold-free classification: bound iff h1 - h2 >= C, with C the engine
@@ -1397,21 +2099,21 @@ mod tests {
     fn queue_classify_uses_the_owner_chunk() {
         let pool = pool();
         let c = [cand(P1, 20_000), cand(P2, 5_000), cand(P3, 0)];
-        let (bound, h1, h2, chunk, source, owner) = queue::classify(&c, &pool, 40_000);
+        let (bound, h1, h2, chunk, source, owner) = queue::classify(&c, &chunks(&pool), 40_000);
         assert!(bound, "15,000 >= 8,192");
         assert_eq!((h1, h2, chunk, source), (20_000, 5_000, 8192, "default"));
         assert_eq!(owner.as_deref(), Some(P1));
         pool[0].set_chunk_tokens(16_384);
-        let (bound, _, _, chunk, source, _) = queue::classify(&c, &pool, 40_000);
+        let (bound, _, _, chunk, source, _) = queue::classify(&c, &chunks(&pool), 40_000);
         assert!(!bound, "15,000 < 16,384");
         assert_eq!((chunk, source), (16_384, "server_info"));
         // The hits are clamped to the prompt: 12,000 - 5,000 < 8,192.
         pool[0].set_chunk_tokens(0);
-        assert!(!queue::classify(&c, &pool, 12_000).0);
+        assert!(!queue::classify(&c, &chunks(&pool), 12_000).0);
         let tie = [cand(P1, 20_000), cand(P2, 20_000), cand(P3, 0)];
-        assert!(!queue::classify(&tie, &pool, 40_000).0);
+        assert!(!queue::classify(&tie, &chunks(&pool), 40_000).0);
         let cold = [cand(P1, 0), cand(P2, 0), cand(P3, 0)];
-        let (bound, h1, _, _, _, owner) = queue::classify(&cold, &pool, 40_000);
+        let (bound, h1, _, _, _, owner) = queue::classify(&cold, &chunks(&pool), 40_000);
         assert!(!bound && h1 == 0 && owner.is_none());
     }
 

@@ -296,7 +296,7 @@ def _validate_prepared_plan(plan: Any, prepared: Mapping[str, Any]) -> None:
             leg = plan[name]
             required = {"target", mark_name}
             allowed = required | {"kv_session"} | (
-                {"pull_hint"} if name == "prefill" else set()
+                {"pull_hint", "routed_dp_rank"} if name == "prefill" else set()
             )
             if late and name == "prefill":
                 required, allowed = required | {"late_d"}, allowed | {"late_d"}
@@ -314,6 +314,9 @@ def _validate_prepared_plan(plan: Any, prepared: Mapping[str, Any]) -> None:
                 or type(session["version"]) is not int
                 or not 0 < session["version"] < 2**63
             ):
+                raise invalid
+            rank = leg.get("routed_dp_rank")
+            if rank is not None and (type(rank) is not int or rank < 0):
                 raise invalid
             endpoints.append(_leg_endpoint(leg, mark_name, prepared["config_id"], transfer))
         if late:

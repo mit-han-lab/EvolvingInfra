@@ -914,13 +914,24 @@ class DataParallelController:
         )
 
     def symmetric_dp_scheduler(self, req: Req):
-        if self.maybe_external_dp_rank_routing(req):
-            return
         now = time.perf_counter()
         if now - self._last_refresh_time >= 0.02:
             self._last_refresh_time = now
             self.symmetric_dp.update_loads(self.load_snapshot_reader.read_all())
-        rank = self.symmetric_dp.place(req.input_ids, req.kv_export, req.kv_import)
+        # A leg that names its rank (the router's P-leg placement) goes there
+        # and is recorded as this rule's own choice (dp_placement.py). A
+        # decode leg goes to its import rank whatever it names; that rank's
+        # scheduler refuses one that names another rank (symmetric_parse_marks),
+        # so a client's rank cannot stop this loop.
+        routed = req.routed_dp_rank
+        decode_leg = req.kv_import is not None and req.kv_export is None
+        if routed is not None and not decode_leg and (
+            routed not in self._active_workers or self.workers[routed] is None
+        ):
+            raise ValueError(f"DP rank {routed} is not active.")
+        rank = self.symmetric_dp.place(
+            req.input_ids, req.kv_export, req.kv_import, rank=routed
+        )
         if rank not in self._active_workers or self.workers[rank] is None:
             raise RuntimeError(f"DP rank {rank} of a symmetric P/D leg is not active.")
         sock_send(self.workers[rank], req)

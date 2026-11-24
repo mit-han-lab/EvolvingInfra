@@ -126,6 +126,11 @@ pub struct Decision {
     pub prompt_len: u64,
     /// Peer-kv pull hint for the P-leg (`SymmetricPdConfig::pull_hint`).
     pub pull_hint: Option<Value>,
+    /// The DP rank of the P worker that runs the P-leg, when the cost
+    /// function placed it on one rank of a worker placed per rank: the P-leg
+    /// carries it as `routed_dp_rank`, and the worker's DP controller sends
+    /// the leg there. None: the worker's DP controller chooses.
+    pub p_dp_rank: Option<u32>,
     /// `--symmetric-pd-p-select cost-function`: the request's unique work-book
     /// reservation. The route moves it into the detached P-leg task, which
     /// marks it dispatched before the send, finished on the P answer and
@@ -1123,6 +1128,7 @@ impl SymmetricPdRuntime {
             pull_hint,
             forced,
             cost_reservation,
+            p_dp_rank,
         ) = loop {
             let (weights, index) = self.candidates();
             if weights.workers.is_empty() {
@@ -1191,7 +1197,9 @@ impl SymmetricPdRuntime {
                             }
                             let (now_weights, now_index) = self.candidates();
                             let now_pool = prefill_pool(&self.cfg, &now_weights, &now_index);
-                            if now_pool.iter().any(|w| w.url == selected.worker_url) {
+                            let (selected_url, _) =
+                                crate::kv_hint::split_slot(&selected.worker_url);
+                            if now_pool.iter().any(|w| w.url == selected_url) {
                                 break (selected, reservation, now_weights, now_index);
                             }
                             attempt += 1;
@@ -1227,11 +1235,15 @@ impl SymmetricPdRuntime {
                         )?;
                         (selected, reservation, weights, index)
                     };
+                    // The candidate is a prefill slot: the worker and, for a
+                    // worker placed per rank, the DP rank the P-leg goes to.
+                    let (p_url, p_rank) = crate::kv_hint::split_slot(&selected.worker_url);
+                    let (p_url, p_rank) = (p_url.to_string(), p_rank);
                     // The Backend ledger charges prompt - cost-function expected hit.
                     hits.expected_after_pull
-                        .insert(selected.worker_url.clone(), selected.expected_hit);
-                    let weights = narrow_prefill(weights, &selected.worker_url);
-                    (weights, Some((selected, reservation)), index)
+                        .insert(p_url.clone(), selected.expected_hit);
+                    let weights = narrow_prefill(weights, &p_url);
+                    (weights, Some((selected, reservation, p_url, p_rank)), index)
                 }
                 None => (weights, None, index),
             };
@@ -1273,8 +1285,8 @@ impl SymmetricPdRuntime {
                         self.policy
                             .place(&req, &hits, &loads, &weights, &self.cfg.placement)?;
                     validate_placement(&placement, &req, &weights, &self.cfg.placement)?;
-                    if let Some((selected, _)) = &cost {
-                        if placement.p_leg != selected.worker_url {
+                    if let Some((selected, _, p_url, _)) = &cost {
+                        if placement.p_leg != *p_url {
                             let reason = format!(
                                 "cost_function chose {} but the placement took {}",
                                 selected.worker_url, placement.p_leg
@@ -1297,9 +1309,10 @@ impl SymmetricPdRuntime {
                     // concurrent placements see it.
                     let d_reservation = state.reserve_decode(&d.url);
                     let pull_hint = match &cost {
-                        Some((selected, _)) => selected.hint.clone(),
+                        Some((selected, ..)) => selected.hint.clone(),
                         None => pull_hints.get(&p.url).cloned(),
                     };
+                    let p_dp_rank = cost.as_ref().and_then(|(_, _, _, rank)| *rank);
                     Some((
                         placement,
                         Arc::clone(p),
@@ -1309,7 +1322,8 @@ impl SymmetricPdRuntime {
                         Some(d_reservation),
                         pull_hint,
                         !has_capacity,
-                        cost.map(|(_, reservation)| reservation),
+                        cost.map(|(_, reservation, ..)| reservation),
+                        p_dp_rank,
                     ))
                 }
             };
@@ -1351,6 +1365,7 @@ impl SymmetricPdRuntime {
             indexer_ms,
             "dispatch",
             replay,
+            p_dp_rank,
         );
         Ok(Decision {
             placement,
@@ -1364,6 +1379,7 @@ impl SymmetricPdRuntime {
             indexer_ms,
             prompt_len,
             pull_hint,
+            p_dp_rank,
             cost_reservation,
         })
     }
@@ -1671,7 +1687,9 @@ impl SymmetricPdRuntime {
             .map(|w| (w.clone(), state.view(w)))
             .collect();
         drop(state);
-        log_decision(&placement, &input, 0, false, indexer_ms, "http", "off");
+        log_decision(
+            &placement, &input, 0, false, indexer_ms, "http", "off", None,
+        );
 
         let route = req.route.unwrap_or_else(|| "/generate".to_string());
         let endpoint = |w: &Arc<Worker>| format!("{}{}", w.url.trim_end_matches('/'), route);
@@ -1756,11 +1774,13 @@ impl SymmetricPdRuntime {
 /// # Inputs
 /// `placement`: selected pair and score terms; `input`: request identity/size/ingress timing;
 /// `queue_wait_ms`: elapsed admission time; `forced`: HOLD bypass flag; `indexer_ms`: lookup
-/// time; `via`/`replay`: path and replay outcome labels.
+/// time; `via`/`replay`: path and replay outcome labels; `p_dp_rank`: the P-leg's
+/// `routed_dp_rank` (-1 when the worker's DP controller chooses).
 ///
 /// # Outputs
 /// No return value; emits a `symmetric_pd` tracing event containing selection, cache, load, and
 /// timing diagnostics.
+#[allow(clippy::too_many_arguments)]
 fn log_decision(
     placement: &Placement,
     input: &PlaceInput,
@@ -1769,6 +1789,7 @@ fn log_decision(
     indexer_ms: f64,
     via: &'static str,
     replay: &'static str,
+    p_dp_rank: Option<u32>,
 ) {
     let t = |name: &str| placement.term(name).unwrap_or(0.0);
     info!(
@@ -1782,6 +1803,7 @@ fn log_decision(
         branch = if placement.is_local() { "local" } else { "split" },
         forced,
         p_leg = %placement.p_leg,
+        p_dp_rank = p_dp_rank.map_or(-1, i64::from),
         d_leg = %placement.d_leg,
         prompt_len = input.prompt_len,
         hit_tokens = t(TERM_HIT_TOKENS),
@@ -2164,11 +2186,13 @@ mod tests {
                     id: 1,
                     url: "http://a".into(),
                     servicer: String::new(),
+                    dp_rank: None,
                 },
                 KvWorkerMapEntry {
                     id: 2,
                     url: "http://b".into(),
                     servicer: String::new(),
+                    dp_rank: None,
                 },
             ],
         }
@@ -2928,8 +2952,15 @@ mod tests {
             kv_export: Some(json!({"transfer_id": 1})),
             kv_import: Some(json!({"transfer_id": 1})),
         };
-        let (p, d) =
-            build_leg_bodies(&body, Some(value.clone()), Some(&[7, 8]), &marks, None).unwrap();
+        let (p, d) = build_leg_bodies(
+            &body,
+            Some(value.clone()),
+            Some(&[7, 8]),
+            &marks,
+            None,
+            None,
+        )
+        .unwrap();
         let p: Value = serde_json::from_slice(&p).unwrap();
         let d: Value = serde_json::from_slice(&d).unwrap();
         assert_eq!(p["input_ids"], json!([7, 8]));
@@ -2937,25 +2968,50 @@ mod tests {
         assert!(d.get(KV_IMPORT_KEY).is_some() && d.get(KV_EXPORT_KEY).is_none());
         assert!(p.get("bootstrap_room").is_none() && d.get("bootstrap_room").is_none());
         assert!(p.get(KV_PULL_HINT_KEY).is_none() && d.get(KV_PULL_HINT_KEY).is_none());
+        assert!(p.get("routed_dp_rank").is_none() && d.get("routed_dp_rank").is_none());
 
         // Local, nothing to inject: original bytes for both legs.
-        let (p, d) =
-            build_leg_bodies(&body, Some(value.clone()), None, &Marks::default(), None).unwrap();
+        let (p, d) = build_leg_bodies(
+            &body,
+            Some(value.clone()),
+            None,
+            &Marks::default(),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(p, body);
         assert_eq!(d, body);
 
-        // Pull hint: Split -> P-leg only; Local -> the single executing body.
+        // Pull hint and rank: Split -> P-leg only; Local -> the single executing body.
         let hint = json!({"source_worker_id": "http://o:38000", "source_servicer_addr": "o:28000", "expected_hit_tokens": 4096});
-        let (p, d) =
-            build_leg_bodies(&body, Some(value.clone()), None, &marks, Some(&hint)).unwrap();
+        let (p, d) = build_leg_bodies(
+            &body,
+            Some(value.clone()),
+            None,
+            &marks,
+            Some(&hint),
+            Some(3),
+        )
+        .unwrap();
         let p: Value = serde_json::from_slice(&p).unwrap();
         let d: Value = serde_json::from_slice(&d).unwrap();
         assert_eq!(p[KV_PULL_HINT_KEY], hint);
+        assert_eq!(p["routed_dp_rank"], 3);
         assert!(d.get(KV_PULL_HINT_KEY).is_none() && p.get(KV_EXPORT_KEY).is_some());
-        let (p, _) =
-            build_leg_bodies(&body, Some(value), None, &Marks::default(), Some(&hint)).unwrap();
+        assert!(d.get("routed_dp_rank").is_none());
+        let (p, _) = build_leg_bodies(
+            &body,
+            Some(value),
+            None,
+            &Marks::default(),
+            Some(&hint),
+            Some(1),
+        )
+        .unwrap();
         let p: Value = serde_json::from_slice(&p).unwrap();
         assert_eq!(p[KV_PULL_HINT_KEY], hint);
+        assert_eq!(p["routed_dp_rank"], 1);
     }
 
     #[tokio::test]
@@ -3619,6 +3675,7 @@ mod tests {
                     id: i as u64 + 1,
                     url: url.to_string(),
                     servicer: format!("10.0.0.{}:8000", i + 1),
+                    dp_rank: None,
                 })
                 .collect(),
         };
@@ -3887,6 +3944,7 @@ mod tests {
                     id: i as u64 + 1,
                     url: url.to_string(),
                     servicer: format!("10.0.0.{}:8000", i + 1),
+                    dp_rank: None,
                 })
                 .collect(),
         };
@@ -3950,6 +4008,7 @@ mod tests {
                     id: i as u64 + 1,
                     url: url.to_string(),
                     servicer: format!("10.0.0.{}:8000", i + 1),
+                    dp_rank: None,
                 })
                 .collect(),
         };
@@ -4083,13 +4142,7 @@ mod tests {
         url: &str,
         rid: &str,
     ) -> crate::prefill_work::Reservation {
-        let candidate = crate::prefill_work::Candidate {
-            worker_url: url.into(),
-            local_hit: 0,
-            gpu_hit: None,
-            expected_hit: 0,
-            hint: None,
-        };
+        let candidate = crate::prefill_work::queue_probe_candidate(url);
         let (_, mut reservation, _) = book
             .reserve_cost(
                 100_000,

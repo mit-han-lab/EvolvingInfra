@@ -880,6 +880,10 @@ impl Executions {
             "prefill":{"target":prepared_target(&d.p_worker.url, config_id),"kv_export":d.marks.kv_export,"pull_hint":d.pull_hint},
             "decode":{"target":prepared_target(&d.d_worker.url, config_id),"kv_import":d.marks.kv_import},
             "callback":{"endpoint":cfg.callback_url,"token":token}});
+        if let Some(rank) = d.p_dp_rank {
+            // The P worker's DP rank that the placement priced (`routed_dp_rank`).
+            plan["prefill"]["routed_dp_rank"] = json!(rank);
+        }
         // Late D choose: the P-leg exports to every candidate and carries the
         // symmetric `late_d` field; the tokenizer sends one D-leg per
         // candidate (`decode_candidates`, each with its own `kv_import` and
@@ -1435,13 +1439,7 @@ mod tests {
     ) {
         let (e, s) = fixture();
         let book = crate::prefill_work::PrefillWorkBook::new(None, "test", None).unwrap();
-        let candidate = crate::prefill_work::Candidate {
-            worker_url: "http://p".into(),
-            local_hit: 0,
-            gpu_hit: None,
-            expected_hit: 0,
-            hint: None,
-        };
+        let candidate = crate::prefill_work::queue_probe_candidate("http://p");
         let (_, reservation, _) = book
             .reserve_cost(
                 4096,

@@ -476,6 +476,8 @@ class PDForward:
             p = {"stream": False, "kv_export": self.plan.prefill.kv_export}
             if self.plan.prefill.pull_hint is not None:
                 p["kv_pull_hint"] = self.plan.prefill.pull_hint
+            if self.plan.prefill.routed_dp_rank is not None:
+                p["routed_dp_rank"] = self.plan.prefill.routed_dp_rank
             if self.plan.prefill.late_d is not None:
                 p["late_d"] = self.plan.prefill.late_d
             if self.plan.prefill.kv_session is not None:

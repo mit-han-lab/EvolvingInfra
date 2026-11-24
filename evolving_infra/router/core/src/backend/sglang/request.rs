@@ -159,8 +159,10 @@ pub async fn cancel_engines(client: reqwest::Client, targets: Vec<(String, Strin
 ///
 /// # Outputs
 /// Returns `(p_body, d_body)`, removing opposite-leg and legacy bootstrap
-/// fields for a split request. Returns cloned input when either mark is
-/// absent, or an error if a split request body is not a JSON object.
+/// fields for a split request, and the DP-rank fields ([`DP_RANK_KEYS`]) from
+/// the D body: the engine runs a D-leg on its import rank. Returns cloned
+/// input when either mark is absent, or an error if a split request body is
+/// not a JSON object.
 pub fn inject_marks(body: &Value, marks: &Marks) -> Result<(Value, Value), String> {
     let (Some(export), Some(import)) = (&marks.kv_export, &marks.kv_import) else {
         return Ok((body.clone(), body.clone()));
@@ -177,7 +179,11 @@ pub fn inject_marks(body: &Value, marks: &Marks) -> Result<(Value, Value), Strin
     let d_obj = d_body
         .as_object_mut()
         .ok_or_else(|| "Request must be a JSON object".to_string())?;
-    for k in BOOTSTRAP_KEYS.iter().chain([KV_EXPORT_KEY].iter()) {
+    for k in BOOTSTRAP_KEYS
+        .iter()
+        .chain([KV_EXPORT_KEY].iter())
+        .chain(DP_RANK_KEYS.iter())
+    {
         d_obj.remove(*k);
     }
     d_obj.insert(KV_IMPORT_KEY.to_string(), import.clone());
@@ -186,20 +192,21 @@ pub fn inject_marks(body: &Value, marks: &Marks) -> Result<(Value, Value), Strin
 
 /// Serialized leg bodies for the routes: `(p_body, d_body)`. Parses `body`
 /// once (or reuses `value`), injects router `input_ids` when given, the
-/// peer-kv `kv_pull_hint` (P-leg only), then the marks. For Local (no
-/// marks) both are the same bytes and, when nothing is injected, the
-/// original buffer.
+/// peer-kv `kv_pull_hint` and the `routed_dp_rank` (P-leg only), then the
+/// marks. For Local (no marks) both are the same bytes and, when nothing is
+/// injected, the original buffer.
 /// Serialize engine request bodies with prepared tokens and transfer metadata.
 ///
 /// # Inputs
 /// `body` is the original wire body; `value` optionally supplies its parsed
 /// JSON. `input_ids` overrides token input, `marks` defines split execution,
-/// and `pull_hint` supplies optional P-side peer-cache metadata.
+/// `pull_hint` supplies optional P-side peer-cache metadata, and
+/// `routed_dp_rank` the DP rank of the P worker that runs the P-leg.
 ///
 /// # Outputs
 /// Returns `(P bytes, D bytes)`, sharing the original buffer when no
 /// changes are needed. Local execution reuses one body; split execution
-/// adds the pull hint only to P. Invalid JSON/object bodies yield a bad-request
+/// adds the pull hint and the rank only to P. Invalid JSON/object bodies yield a bad-request
 /// error; serialization failure yields an internal error. No upload occurs.
 pub fn build_leg_bodies(
     body: &Bytes,
@@ -207,11 +214,13 @@ pub fn build_leg_bodies(
     input_ids: Option<&[u32]>,
     marks: &Marks,
     pull_hint: Option<&Value>,
+    routed_dp_rank: Option<u32>,
 ) -> Result<(Bytes, Bytes), ApiError> {
     let split = marks.kv_export.is_some() && marks.kv_import.is_some();
     if !split
         && input_ids.is_none()
         && pull_hint.is_none()
+        && routed_dp_rank.is_none()
         && value.as_ref().is_none_or(|v| v.get("kv_session").is_none())
     {
         return Ok((body.clone(), body.clone()));
@@ -237,17 +246,24 @@ pub fn build_leg_bodies(
             .map_err(|e| ApiError::Internal(anyhow::Error::new(e).context("serialize leg body")))
     };
     if !split {
-        // Local: the single executing engine is the P-leg; the hint rides on it.
+        // Local: the single executing engine is the P-leg; the hint and the
+        // rank ride on it.
         if let Some(h) = pull_hint {
             obj.insert(KV_PULL_HINT_KEY.to_string(), h.clone());
+        }
+        if let Some(rank) = routed_dp_rank {
+            obj.insert(ROUTED_DP_RANK_KEY.to_string(), Value::from(rank));
         }
         let b = to_bytes(&parsed)?;
         return Ok((b.clone(), b));
     }
     let (mut p, d) = inject_marks(&parsed, marks).map_err(ApiError::BadRequest)?;
-    if let Some(h) = pull_hint {
-        if let Some(o) = p.as_object_mut() {
+    if let Some(o) = p.as_object_mut() {
+        if let Some(h) = pull_hint {
             o.insert(KV_PULL_HINT_KEY.to_string(), h.clone());
+        }
+        if let Some(rank) = routed_dp_rank {
+            o.insert(ROUTED_DP_RANK_KEY.to_string(), Value::from(rank));
         }
     }
     Ok((to_bytes(&p)?, to_bytes(&d)?))
@@ -255,6 +271,15 @@ pub fn build_leg_bodies(
 
 /// Engine contract for the peer-kv pull hint (same key the PD routes inject).
 pub const KV_PULL_HINT_KEY: &str = "kv_pull_hint";
+
+/// Engine contract for the DP rank a request runs on (`GenerateReqInput.routed_dp_rank`):
+/// the worker's DP controller sends a request that names one to that rank.
+pub const ROUTED_DP_RANK_KEY: &str = "routed_dp_rank";
+
+/// The fields that name a request's DP rank: [`ROUTED_DP_RANK_KEY`] and its
+/// deprecated alias. No D-leg body carries them: the engine runs a D-leg on
+/// its import rank and refuses one that names another rank.
+pub(crate) const DP_RANK_KEYS: [&str; 2] = [ROUTED_DP_RANK_KEY, "data_parallel_rank"];
 
 /// Best-effort prompt length of a raw generate/completions/chat body.
 /// Estimate prompt tokens for relative scheduling and transfer costs.
@@ -320,7 +345,7 @@ mod tests {
             kv_export: Some(json!({"transfer_id":1})),
             kv_import: Some(json!({"transfer_id":1})),
         };
-        let (p, d) = build_leg_bodies(&bytes, value.clone(), None, &marks, None).unwrap();
+        let (p, d) = build_leg_bodies(&bytes, value.clone(), None, &marks, None, None).unwrap();
         let p: Value = serde_json::from_slice(&p).unwrap();
         let d: Value = serde_json::from_slice(&d).unwrap();
         assert_eq!(p["kv_session"], d["kv_session"]);
@@ -329,7 +354,7 @@ mod tests {
             kv_export: None,
             kv_import: None,
         };
-        let (p, _) = build_leg_bodies(&bytes, value, None, &local, None).unwrap();
+        let (p, _) = build_leg_bodies(&bytes, value, None, &local, None, None).unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&p).unwrap()["kv_session"],
             d["kv_session"]
@@ -358,7 +383,7 @@ mod tests {
             kv_export: Some(json!({"transfer_id":1})),
             kv_import: Some(json!({"transfer_id":1})),
         };
-        let (p, d) = build_leg_bodies(&bytes, value, None, &marks, None).unwrap();
+        let (p, d) = build_leg_bodies(&bytes, value, None, &marks, None, None).unwrap();
         let p: Value = serde_json::from_slice(&p).unwrap();
         let d: Value = serde_json::from_slice(&d).unwrap();
         assert_eq!(p["rid"], "client-rid");
@@ -394,6 +419,33 @@ mod tests {
             late_kv_session(Some(&sessions), &bad, "p", Some(&json!({}))),
             Err(ApiError::BadRequest(_))
         ));
+    }
+
+    /// A D-leg runs on its import rank, so a client's `routed_dp_rank` and its
+    /// deprecated alias `data_parallel_rank` stay off the D body; the P body
+    /// keeps them (the router's own rank, when it names one, replaces them
+    /// there), and a Local body is unchanged.
+    #[test]
+    fn a_client_dp_rank_stays_off_the_d_leg() {
+        let body = json!({"prompt": [1, 2], "routed_dp_rank": 3, "data_parallel_rank": 3});
+        let marks = Marks {
+            kv_export: Some(json!({"transfer_id": 1})),
+            kv_import: Some(json!({"transfer_id": 1})),
+        };
+        let (p, d) = inject_marks(&body, &marks).unwrap();
+        assert_eq!(p["routed_dp_rank"], 3);
+        assert_eq!(p["data_parallel_rank"], 3);
+        assert!(
+            d.get("routed_dp_rank").is_none() && d.get("data_parallel_rank").is_none(),
+            "the D body names no rank: {d}"
+        );
+        assert_eq!(d["kv_import"]["transfer_id"], 1);
+        let local = Marks {
+            kv_export: None,
+            kv_import: None,
+        };
+        let (p, d) = inject_marks(&body, &local).unwrap();
+        assert_eq!((p, d), (body.clone(), body));
     }
 
     /// Late D: only the P registers; the tag is returned, not inserted; a

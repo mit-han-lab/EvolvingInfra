@@ -5,11 +5,12 @@ With ``--disaggregation-mode symmetric`` and ``--symmetric-preset paper`` (the
 default), resolution first turns on the features of the paper's configuration
 that the other flags leave off (:func:`plan_features`): the host KV tier, the
 prefill work snapshot, late decode choice computing before the decode is
-bound, the peer KV servicer and pulls (when the RDMA devices are known; not
-under DP attention), KV session retention (FULL-only models and DeepSeek-V4;
-one DP rank, no DP attention), SWA branch replay (DeepSeek-V4.1, where
-retention stays off) and host dedup for the model's attention kind
-(single-node TP). ``--symmetric-preset none`` leaves the flags as given.
+bound, the peer KV servicer and pulls (when the RDMA devices are known; one
+servicer per DP rank under DP attention; not with ``--disable-peer-kv``), KV
+session retention (FULL-only models and DeepSeek-V4; one DP rank, no DP
+attention), SWA branch replay (DeepSeek-V4.1, where retention stays off) and
+host dedup for the model's attention kind (single-node TP).
+``--symmetric-preset none`` leaves the flags as given.
 
 Each switch below is an environment variable that is off on its own. When the
 server arguments select the feature it belongs to, resolution turns it on,
@@ -270,11 +271,25 @@ def plan_features(
         if getattr(cfg, "disaggregation_late_d_allocation_trigger", "lead") == "lead":
             fields["disaggregation_late_d_allocation_trigger"] = "first_chunk"
     devices = ib_devices(getattr(cfg, "disaggregation_ib_device", None))
-    # The servicer listens on one port per attention-TP rank and its clients
-    # dial that rank: under DP attention every rank is attention-TP rank 0.
+    # The servicer listens on one port per GPU (its TP rank) and a reader dials
+    # the port a hint names plus its own attention-TP rank: one servicer per
+    # (DP rank, attention-TP rank) under DP attention. Data-parallel replicas
+    # without DP attention repeat the TP ranks, and pipeline or context
+    # parallel ranks have no servicer of their own. A worker that never
+    # prefills a P-leg (--disable-peer-kv, a static split's decode worker)
+    # neither serves nor takes pulls, and runs neither part.
+    attention_dp = bool(getattr(cfg, "enable_dp_attention", False)) or (
+        (getattr(cfg, "attn_dp_size", 1) or 1) > 1
+    )
+    servicer_ranks = (
+        getattr(cfg, "pp_size", 1) == 1
+        and getattr(cfg, "attn_cp_size", 1) == 1
+        and (getattr(cfg, "dp_size", 1) == 1 or attention_dp)
+    )
     if (
         devices
-        and single_engine
+        and servicer_ranks
+        and not getattr(cfg, "disable_peer_kv", False)
         and not getattr(cfg, "enable_peer_kv_servicer", False)
         and getattr(cfg, "hicache_storage_backend", None) is None
     ):

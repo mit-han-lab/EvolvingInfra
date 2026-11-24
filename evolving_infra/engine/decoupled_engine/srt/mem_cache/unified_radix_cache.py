@@ -456,6 +456,9 @@ class UnifiedRadixCache(BasePrefixCache):
                     labels=dict(self.metrics_collector.labels)
                 )
         self.tree_components = tuple(params.tree_components)
+        # DP attention: a hinted peer pull must read the FULL KV only
+        # (peer_pull_reads_full_only).
+        self.attn_dp_size = params.attn_dp_size
         self.enable_session_radix_cache = params.enable_session_radix_cache
         self.enable_kv_session_retention = getattr(
             params, "enable_kv_session_retention", False
@@ -4420,6 +4423,52 @@ class UnifiedRadixCache(BasePrefixCache):
         storage_hit_count -= storage_hit_count % self.page_size
         return storage_hit_count
 
+    def peer_pull_reads_full_only(self) -> bool:
+        """Whether this tree takes a hinted peer pull. Under DP attention
+        (``attn_dp_size`` above 1) a pull reads the FULL KV only: the tree is
+        FULL-only, or FULL + SWA with SWA branch replay (``swa_branch_replay``),
+        whose request rebuilds the window by replaying it. A pull of another
+        component (SWA without the replay, mamba or state pools) would read it
+        through the complete-endpoint path, which fails on a DP-attention
+        reader. Without DP attention every tree takes a pull."""
+        if getattr(self, "attn_dp_size", 1) <= 1:
+            return True
+        others = {ct for ct in self.tree_components if ct != BASE_COMPONENT_TYPE}
+        if getattr(self, "swa_branch_replay", False):
+            others.discard(ComponentType.SWA)
+        return not others
+
+    def peer_pull_info(self) -> dict:
+        """What a hinted peer pull gives this rank, for the router (the
+        `/server_info` internal state `peer_kv_pull`). `takes`: whether the
+        rank takes a pull at all (a peer KV backend, and
+        peer_pull_reads_full_only). `replay_tokens`: the tokens a request
+        recomputes at the end of a pulled prefix (the SWA branch replay window
+        after a FULL-only pull; 0 when the pull is exact)."""
+        controller = self.cache_controller
+        backend = getattr(controller, "storage_backend", None) if controller is not None else None
+        takes = bool(
+            self.enable_storage
+            and getattr(backend, "requires_kv_pull_hint", False) is True
+            and self.peer_pull_reads_full_only()
+        )
+        replay = 0
+        if takes and getattr(self, "swa_branch_replay", False):
+            replay = int(getattr(self, "_swa_branch_replay_len", 0))
+        return {"takes": takes, "replay_tokens": replay}
+
+    def _note_peer_pull_dropped(self) -> None:
+        """Log once that this tree drops pull hints (peer_pull_reads_full_only)."""
+        if getattr(self, "_peer_pull_drop_logged", False):
+            return
+        self._peer_pull_drop_logged = True
+        logger.warning(
+            "Peer KV pull hints are dropped: under DP attention a pull reads the "
+            "FULL KV only, and this tree's components %s need another one (SWA "
+            "branch replay off or unsupported); requests compute their prefix.",
+            [str(ct) for ct in self.tree_components],
+        )
+
     @rank_consensus(same_params=["request.rid", "len(new_input_tokens)"])
     def prefetch_from_storage(
         self,
@@ -4437,6 +4486,18 @@ class UnifiedRadixCache(BasePrefixCache):
     ) -> Optional[bool]:
         if not self.enable_storage or self.cache_controller is None:
             return
+        if kv_pull_hint is not None and not self.peer_pull_reads_full_only():
+            # The pull would read another component than the FULL KV through
+            # the complete-endpoint path, which fails on a DP-attention reader:
+            # drop the hint, so the request computes the prefix and no owner
+            # pins pages for it. The decision is the same on every rank.
+            self._note_peer_pull_dropped()
+            kv_pull_hint = None
+            if (
+                getattr(self.cache_controller.storage_backend, "requires_kv_pull_hint", False)
+                is True
+            ):
+                return
 
         req_id = request.rid
         self.storage_prefetch_retries.cancel(req_id)
@@ -4513,8 +4574,19 @@ class UnifiedRadixCache(BasePrefixCache):
             else self.inc_host_lock_ref(last_host_node_id).to_dec_params()
         )
         comp_xfers: dict[ComponentType, list[PoolTransfer]] = {}
+        # A peer pull under SWA branch replay (`swa_branch_replay`, the
+        # --enable-swa-branch-replay match) reads FULL only: the owner keeps a
+        # prompt's SWA window only at its tail, so a prefix that ends inside a
+        # prompt has none, and the request's match rebuilds the window by
+        # replaying one window before the pulled prefix's end. Without the
+        # replay the pull asks for the owner's deepest complete SWA endpoint.
+        full_only_pull = kv_pull_hint is not None and getattr(
+            self, "swa_branch_replay", False
+        )
         for ct in self.tree_components:
             if ct == BASE_COMPONENT_TYPE:
+                continue
+            if full_only_pull and ct == ComponentType.SWA:
                 continue
             # Size the component's staging now; it is allocated at hit time,
             # next to the KV staging, so the query holds no host memory.

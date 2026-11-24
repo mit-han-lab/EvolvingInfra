@@ -404,6 +404,8 @@ fn forecast_decision_value<'a>(
 
 /// The caller applies the actual pull-hint gate before constructing a candidate.
 /// `expected_hit` includes a remote prefix only when `hint` will be forwarded.
+/// `worker_url` is the candidate's prefill slot: a worker URL, or
+/// [`crate::kv_hint::slot_key`] of one DP rank of a worker placed per rank.
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub worker_url: String,
@@ -412,6 +414,11 @@ pub struct Candidate {
     pub gpu_hit: Option<u64>,
     pub expected_hit: u64,
     pub hint: Option<Value>,
+    /// Pull tokens already reserved on the hint's source servicer and not yet
+    /// read ([`PrefillWorkBook::pull_queue`]): this pull reads after them, so
+    /// its predicted time counts them. 0 without a hint, and for a whole
+    /// worker (only a DP rank's slot prices the queue).
+    pub pull_queued: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -464,6 +471,11 @@ struct Entry {
     acknowledged: bool,
     cost: u128,
     hint: Option<Value>,
+    /// With a hint: the end of its priced pull (the decision time plus the
+    /// candidate's pull time, behind the pulls queued on its source). The
+    /// router sees no read, so the pull counts in its source's queue until
+    /// then ([`PrefillWorkBook::pull_queue`]); not in the trace.
+    pull_until: Option<Instant>,
     status: Status,
     assigned_unix_ms: u64,
     assigned_elapsed_ms: u64,
@@ -559,6 +571,9 @@ struct State {
     /// cost-function auto (copy price or rate `auto` only): the router's
     /// measurements, created at the first auto decision.
     auto_price: Option<crate::scheduler::placement_cost::AutoPriceState>,
+    /// DP slots: the slot of the last exact cost tie that the rotation broke
+    /// (the next tie starts after it).
+    cost_tie_last: Option<String>,
     /// The IDs of the unknown entries (the snapshot's `unknown_requests` is
     /// its size).
     unknown: BTreeSet<u64>,
@@ -707,23 +722,24 @@ fn queue_pool_candidates(
     urls.iter()
         .map(|url| {
             let Some(c) = candidates.iter().find(|c| &c.worker_url == url) else {
-                return Candidate {
-                    worker_url: url.clone(),
-                    local_hit: 0,
-                    gpu_hit: None,
-                    expected_hit: 0,
-                    hint: None,
-                };
+                return queue_probe_candidate(url);
             };
             let source = c
                 .hint
                 .as_ref()
                 .and_then(|h| h.get("source_worker_id"))
                 .and_then(Value::as_str);
-            if source.is_some_and(|s| !urls.iter().chain(sources).any(|u| u == s)) {
+            // A slot key names its worker's URL (`<url>#dp<rank>`).
+            let present = |s: &str| {
+                urls.iter()
+                    .chain(sources)
+                    .any(|u| crate::kv_hint::split_slot(u).0 == s)
+            };
+            if source.is_some_and(|s| !present(s)) {
                 Candidate {
                     hint: None,
                     expected_hit: c.local_hit,
+                    pull_queued: 0,
                     ..c.clone()
                 }
             } else {
@@ -992,6 +1008,7 @@ pub fn queue_probe_candidate(url: &str) -> Candidate {
         gpu_hit: None,
         expected_hit: 0,
         hint: None,
+        pull_queued: 0,
     }
 }
 
@@ -1087,6 +1104,7 @@ impl PrefillWorkBook {
                 progress: BTreeMap::new(),
                 wait_fallbacks: BTreeMap::new(),
                 auto_price: None,
+                cost_tie_last: None,
                 unknown: BTreeSet::new(),
                 prefill_reader_gone: 0,
                 expired_by_rid: BTreeMap::new(),
@@ -1685,6 +1703,13 @@ impl PrefillWorkBook {
         // --global-queue: the P of a tie-broken release, the next
         // rotation start once the reservation is recorded.
         let mut queue_tie_commit: Option<String> = None;
+        // DP slots: the slot of a tie-broken placement, the next rotation
+        // start once the reservation is recorded.
+        let mut cost_tie_commit: Option<String> = None;
+        // A hinted placement: the end of its priced pull (decision time plus
+        // the chosen candidate's pull time), until which the pull counts in
+        // its source's queue ([`PrefillWorkBook::pull_queue`]).
+        let mut pull_until: Option<Instant> = None;
         // The decision time of a cost-function placement (the entry's decided_at).
         let cost_decided_at: Option<Instant>;
         // forecast wait: the chosen P's (prefix, host) estimate, for the entry.
@@ -1783,6 +1808,7 @@ impl PrefillWorkBook {
                         local_hit: e.candidate.local_hit,
                         uncached: input_tokens - e.candidate.expected_hit,
                         pulled: e.candidate.expected_hit - e.candidate.local_hit,
+                        pull_queued: e.candidate.pull_queued,
                         // The terms of the forecast (None for the work book).
                         wait: forecast_probe.as_ref().and_then(|q| q.terms()),
                         bound_s: forecast_probe
@@ -1824,6 +1850,44 @@ impl PrefillWorkBook {
                     queue_tie_commit =
                         Some(evaluations[outcome.chosen].candidate.worker_url.clone());
                 }
+            }
+            let dp_slot = |e: &Evaluation| {
+                crate::kv_hint::split_slot(&e.candidate.worker_url)
+                    .1
+                    .is_some()
+            };
+            if queue.is_none() && dp_slot(&evaluations[selected.chosen]) {
+                // DP slots: an exact cost tie (a cold request on idle slots)
+                // goes to the slot with the fewest outstanding requests, then
+                // to the next slot in turn (the global queue's release
+                // tie-break with room for the DP slots only), so cold
+                // requests spread over the ranks instead of going to the
+                // smallest slot key. A whole worker keeps its tie order: the
+                // rule runs only when the cost's choice is a DP slot, and
+                // leaves it among the DP slots.
+                let room: Vec<bool> = evaluations.iter().map(dp_slot).collect();
+                let outstanding: Vec<u64> = evaluations.iter().map(|e| e.active_requests).collect();
+                let outcome = crate::scheduler::placement_cost::break_cost_tie(
+                    &selected,
+                    &inputs,
+                    &crate::scheduler::placement_cost::TieBreak {
+                        room: &room,
+                        outstanding: &outstanding,
+                        last: state.cost_tie_last.as_deref(),
+                    },
+                );
+                if outcome.tied >= 2 {
+                    selected.chosen = outcome.chosen;
+                    cost_tie_commit =
+                        Some(evaluations[outcome.chosen].candidate.worker_url.clone());
+                }
+            }
+            if evaluations[selected.chosen].candidate.hint.is_some() {
+                pull_until =
+                    std::time::Duration::try_from_secs_f64(selected.costs[selected.chosen].pull_s)
+                        .ok()
+                        .filter(|pull| !pull.is_zero())
+                        .map(|pull| decided_at + pull);
             }
             if let Some((_, record)) = queue.as_mut() {
                 // The step's walk chose this P with the same inputs under the
@@ -2094,6 +2158,7 @@ impl PrefillWorkBook {
             acknowledged: false,
             cost: winner.cost,
             hint: winner.candidate.hint.clone(),
+            pull_until,
             status: Status::Reserved,
             assigned_unix_ms: unix_ms(),
             assigned_elapsed_ms: self.started.elapsed().as_millis() as u64,
@@ -2143,6 +2208,9 @@ impl PrefillWorkBook {
         }
         if let (Some(url), Some(book)) = (queue_tie_commit, state.queue_lead.as_mut()) {
             book.tie_last = Some(url);
+        }
+        if cost_tie_commit.is_some() {
+            state.cost_tie_last = cost_tie_commit;
         }
         if let Some((sources, fallbacks)) = forecast_push_counts {
             state.forecast_push_sources = sources;
@@ -3087,7 +3155,10 @@ impl PrefillWorkBook {
             .map(|(h, cands)| {
                 cands
                     .iter()
-                    .map(|c| terms_of(c.local_hit, c.expected_hit, h.input_tokens))
+                    .map(|c| QueueTerms {
+                        pull_queued: c.pull_queued,
+                        ..terms_of(c.local_hit, c.expected_hit, h.input_tokens)
+                    })
                     .collect()
             })
             .collect();
@@ -3388,6 +3459,73 @@ impl PrefillWorkBook {
     pub fn set_terminal_hook(&self, hook: Box<dyn Fn() + Send + Sync>) {
         let _ = self.on_terminal.set(hook);
     }
+
+    /// The pull work queued on each source servicer (the hint's
+    /// `source_servicer_addr`): the pulled tokens of the reserved and
+    /// dispatched entries with a hint that are still inside their priced pull
+    /// (decision time plus the pull time the cost charged them, behind the
+    /// pulls queued before them) and whose first prefill chunk no progress
+    /// reply has shown yet. The router sees no read finish; a pull counts
+    /// while it would still be served, and a source rank serves its pulls one
+    /// after another.
+    pub fn pull_queue(&self) -> HashMap<String, u64> {
+        Self::pull_queue_locked(&self.state.lock(), Instant::now())
+    }
+
+    /// The pull queue and the cost parameters this decision resolves (copy
+    /// price and rate auto), read under one lock, for choosing a pull source.
+    pub fn pull_pricing(
+        &self,
+        configured: crate::scheduler::placement_cost::PlacementCostParams,
+        urls: &[&str],
+    ) -> (
+        HashMap<String, u64>,
+        crate::scheduler::placement_cost::PlacementCostParams,
+    ) {
+        self.pull_pricing_at(configured, urls, Instant::now())
+    }
+
+    /// [`Self::pull_pricing`] at the time `now`.
+    fn pull_pricing_at(
+        &self,
+        configured: crate::scheduler::placement_cost::PlacementCostParams,
+        urls: &[&str],
+        now: Instant,
+    ) -> (
+        HashMap<String, u64>,
+        crate::scheduler::placement_cost::PlacementCostParams,
+    ) {
+        let mut state = self.state.lock();
+        let params = Self::cost_ctx(&mut state, configured, urls, now).params;
+        (Self::pull_queue_locked(&state, now), params)
+    }
+
+    fn pull_queue_locked(state: &State, now: Instant) -> HashMap<String, u64> {
+        let mut queued: HashMap<String, u64> = HashMap::new();
+        for id in state.active_by_rid.values() {
+            let Some(entry) = state.entries.get(id) else {
+                continue;
+            };
+            if entry.acknowledged || !matches!(entry.status, Status::Reserved | Status::Dispatched)
+            {
+                continue;
+            }
+            if entry.pull_until.is_none_or(|until| now >= until) {
+                continue;
+            }
+            let Some(source) = entry
+                .hint
+                .as_ref()
+                .and_then(|h| h.get("source_servicer_addr"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let pulled = entry.expected_hit.saturating_sub(entry.local_hit);
+            *queued.entry(source.to_string()).or_default() += pulled;
+        }
+        queued
+    }
 }
 
 /// Unique task owner. Dropping before HTTP dispatch rolls back; dropping after
@@ -3567,6 +3705,7 @@ mod tests {
             gpu_hit: None,
             expected_hit: hit,
             hint: None,
+            pull_queued: 0,
         }
     }
 
@@ -3615,6 +3754,7 @@ mod tests {
             gpu_hit: None,
             expected_hit: remote,
             hint: Some(json!({"source_worker_id": "src", "expected_hit_tokens": remote})),
+            pull_queued: 0,
         }
     }
 
@@ -3977,6 +4117,7 @@ mod tests {
             gpu_hit: None,
             expected_hit: 8,
             hint: None,
+            pull_queued: 0,
         };
         assert!(res(&book, "r2", 10, vec![invalid]).is_err());
         let hinted = Candidate {
@@ -3985,6 +4126,7 @@ mod tests {
             gpu_hit: None,
             expected_hit: 8,
             hint: Some(json!({"expected_hit_tokens": 8})),
+            pull_queued: 0,
         };
         let (_, remote) = res(&book, "r3", 10, vec![hinted]).unwrap();
         assert_eq!(remote.debuginfo()["cost"], "2");
@@ -5845,6 +5987,91 @@ mod tests {
         assert!(lambda > 15.0 && lambda < 45.0, "{d}");
         let copy_b = d["candidates"][1]["copy_tokens"].as_f64().unwrap();
         assert!((copy_b - lambda * 100_000.0).abs() < 1e-6, "{d}");
+    }
+
+    /// A 10-minute auto history of P `a` and `b` from `t0`, no session: each
+    /// P runs eight requests 3 s of every 4 s, 3,750 prefill tokens each.
+    fn sessionless_history(t0: Instant) -> crate::scheduler::placement_cost::AutoPriceState {
+        let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
+        let mut auto = crate::scheduler::placement_cost::AutoPriceState::new(t0, 120.0);
+        auto.observe_pool(["a", "b"], t0);
+        let mut t = 0.0;
+        while t < 590.0 {
+            for p in ["a", "b"] {
+                for _ in 0..8 {
+                    auto.dispatched(p, at(t));
+                }
+                for _ in 0..8 {
+                    auto.prefill_done(p, Some(3_750), at(t + 3.0));
+                }
+            }
+            t += 4.0;
+        }
+        auto
+    }
+
+    /// The pull source is priced with the decision's parameters: with rate
+    /// auto, [`PrefillWorkBook::pull_pricing`] gives R_hat (about 10,000
+    /// tokens/s here), not the configured fallback of 13,500. The history runs
+    /// on the test's own clock (from now on, priced 10 minutes later), so the
+    /// test does not depend on how long the machine has been up.
+    #[test]
+    fn pull_pricing_resolves_the_rate_of_the_decision() {
+        use crate::scheduler::placement_cost::PrefillRateMode;
+        let book = PrefillWorkBook::new(None, "test", None).unwrap();
+        let configured = crate::scheduler::placement_cost::PlacementCostParams {
+            prefill_rate_mode: PrefillRateMode::Auto,
+            ..auto_params(18.4)
+        };
+        let (queue, params) = book.pull_pricing(configured, &["a", "b"]);
+        assert!(queue.is_empty());
+        assert_eq!(
+            params.prefill_rate_tokens_per_s, 13_500.0,
+            "start-up: the fallback"
+        );
+        let t0 = Instant::now();
+        book.state.lock().auto_price = Some(sessionless_history(t0));
+        let later = t0 + std::time::Duration::from_secs(600);
+        let (_, params) = book.pull_pricing_at(configured, &["a", "b"], later);
+        let rate = params.prefill_rate_tokens_per_s;
+        assert!((rate - 10_000.0).abs() < 500.0, "R_hat, not 13,500: {rate}");
+        // No request carries a session: lambda is the fallback.
+        assert_eq!(params.copy_price, 18.4, "{params:?}");
+    }
+
+    /// A pull counts in its source's queue from its decision until the end of
+    /// its priced pull time (450 ms + 100 ms per 100k tokens: 0.85 s for
+    /// 400,000 tokens), not until its P's first chunk: a finished pull no
+    /// longer delays the next one.
+    #[test]
+    fn a_pull_leaves_its_source_queue_after_its_priced_pull_time() {
+        let book = PrefillWorkBook::new(None, "test", None).unwrap();
+        let mut hinted = pulling("b", 0, 400_000);
+        hinted.hint = Some(json!({
+            "source_worker_id": "a", "source_servicer_addr": "a:18100",
+            "expected_hit_tokens": 400_000,
+        }));
+        let before = Instant::now();
+        let (selected, mut r, d) = book
+            .reserve_cost(500_000, Some("x".into()), vec![hinted], cost_params(0.0))
+            .unwrap();
+        let after = Instant::now();
+        assert!(selected.hint.is_some());
+        assert_eq!(d["candidates"][0]["pull_s"], 0.85, "{d}");
+        r.mark_dispatched().unwrap();
+        let at = |t: Instant, s: f64| {
+            let state = book.state.lock();
+            PrefillWorkBook::pull_queue_locked(&state, t + std::time::Duration::from_secs_f64(s))
+        };
+        // decided_at is between `before` and `after`.
+        assert_eq!(at(before, 0.0).get("a:18100"), Some(&400_000));
+        assert_eq!(
+            at(before, 0.84).get("a:18100"),
+            Some(&400_000),
+            "inside 0.85 s"
+        );
+        assert!(at(after, 0.85).is_empty(), "past its priced pull time");
+        drop(r);
     }
 
     /// Fixed cost-function creates no auto state, key or event. Auto adds the

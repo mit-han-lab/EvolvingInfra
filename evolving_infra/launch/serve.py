@@ -137,8 +137,33 @@ class Stack:
             argv += ["--disaggregation-ib-device", json.dumps({str(g): n for g, n in nics.items()})]
         if self.planner is not None:
             argv += ["--sched-trace-dir", str(self.dir / "traces" / w.name)]
+        extra = self.config_engine_args(w)
+        if not self.peer_kv(w) and "--disable-peer-kv" not in extra:
+            argv.append("--disable-peer-kv")
+        return argv + extra
+
+    def config_engine_args(self, w) -> list:
+        """The config's engine flags of every engine, then those of the worker's starting role."""
         role = self.roles.get(w.role) or {}
-        return argv + merge_args(list(cfg.get("engine_args", [])), list(role.get("engine_args", [])))
+        return merge_args(list(self.cfg.get("engine_args", [])), list(role.get("engine_args", [])))
+
+    def peer_kv(self, w) -> bool:
+        """Whether worker ``w`` runs the peer KV servicer and the peer_kv reader (the engine preset's default).
+        A decode worker with DP attention in a static split runs neither: its engine gets --disable-peer-kv and
+        the router's map names no servicer of its ranks. It never prefills a P-leg, so it takes no pull, and no
+        pull reads the turns it decoded (docs/placement.md); every rank would still do the servicer's work, and
+        every step of its ranks waits for the slowest one. Every other worker runs both: one that may prefill (a
+        prefill worker, any worker with the planner), a decode worker with decode host return (it serves the KV
+        it decoded) and a decode worker without DP attention (a pull from any holder reads it). The config's
+        engine flags decide when they give --disable-peer-kv or --enable-peer-kv-servicer."""
+        flags = {arg.split("=", 1)[0] for arg in self.config_engine_args(w)}
+        if "--disable-peer-kv" in flags:
+            return False
+        if "--enable-peer-kv-servicer" in flags:
+            return True
+        host_return = "--symmetric-pd-decode-host-return" in {
+            arg.split("=", 1)[0] for arg in self.cfg.get("router_args", [])}
+        return w.role == "prefill" or w.dp == 1 or self.planner is not None or host_return
 
     def engine_env(self, w) -> dict:
         """The variables of every engine, then those of the worker's starting role."""
@@ -150,6 +175,14 @@ class Stack:
         Without DP attention it is the worker's id 20001 + idx and bridge index idx."""
         return [(20001 + w.idx + 1000 * r, w, r, r * len(self.workers) + w.idx)
                 for r in range(max(w.dp for w in self.workers)) for w in self.workers if r < w.dp]
+
+    def kv_worker_map(self) -> list:
+        """The router's --kv-worker-map: each KV-directory instance with its worker, its DP rank and that
+        rank's peer KV servicer, so the router places, prices and pulls per (worker, DP rank). The ranks of a
+        worker without a servicer (``peer_kv``) are listed without one: no pull reads from them."""
+        return [{"id": iid, "url": w.url, "dp_rank": r,
+                 **({"servicer": f"{w.ip}:{w.rank_servicer_port(r)}"} if self.peer_kv(w) else {})}
+                for iid, w, r, _ in self.kv_instances()]
 
     def check_ports(self):
         busy = []
@@ -224,9 +257,7 @@ class Stack:
                 "--model-id", cfg["served_model_name"],
                 "--tokenizer-path", cfg.get("tokenizer") or f"{model}/tokenizer.json",
                 "--policy", "symmetric_pd", "--request-timeout-secs", "3600", "--stale-request-timeout-secs", "3600",
-                "--kv-indexer-url", query,
-                "--kv-worker-map", json.dumps([{"id": iid, "url": w.url, "servicer": f"{w.ip}:{w.servicer_port}"}
-                                               for iid, w, _, _ in self.kv_instances()])]
+                "--kv-indexer-url", query, "--kv-worker-map", json.dumps(self.kv_worker_map())]
         for w in ws:
             p = int(w.role == "prefill")
             argv += ["--symmetric-pd-worker", f"{w.url},{w.bootstrap_port},{p},{1 - p}"]
