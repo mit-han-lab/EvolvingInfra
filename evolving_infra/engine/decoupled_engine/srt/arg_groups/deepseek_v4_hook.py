@@ -308,6 +308,57 @@ def validate_deepseek_v41_encoder_replay_budget(server_args: ServerArgs) -> None
         )
 
 
+def resolve_swa_branch_replay(server_args: ServerArgs) -> None:
+    """--enable-swa-branch-replay on DeepSeek-V4.1 runs where the radix tree
+    owns paged SWA and every prefill attention path (paged, the sparse FlashMLA
+    prefill, the decoder tails) floors a request's SWA window at its
+    swa_valid_start. The floor covers every per-position state the tree drops
+    with SWA only when no layer keeps a compressor state in SWA pages (ratios 4
+    and 128 do). An explicit on elsewhere fails startup. Left unset, the option
+    is declared off where it cannot run, so the symmetric `paper` preset
+    (symmetric_defaults.plan_features), which resolves after this hook and
+    turns it on for DeepSeek-V4.1 where KV session retention stays off, leaves
+    it off there; elsewhere it stays unset, which the preset turns on and which
+    is off without it. The radix cache can still keep the mode off and log why
+    (UnifiedRadixCache._resolve_swa_branch_replay)."""
+    cfg = resolving_view(server_args)
+    model_config = model_config_of(server_args)
+    text_config = getattr(model_config, "hf_text_config", model_config.hf_config)
+    ratios = set(getattr(text_config, "compress_ratios", ()) or ())
+    incompatible = (
+        # The tree does not own a request window's SWA, so it never gates a match.
+        ("--enable-encoder-swa-bounded-replay", cfg.enable_encoder_swa_bounded_replay),
+        ("a radix cache that is disabled", cfg.disable_radix_cache),
+        # The ROCm backend builds its own SWA window metadata.
+        ("hardware other than CUDA", not get_platform().is_cuda),
+        # TRT-LLM's sparse MLA reads a fixed SWA length per row.
+        ("--dsv4-attn-backend trtllm", cfg.dsv4_attn_backend == "trtllm"),
+        ("context parallelism", cfg.enable_prefill_cp or cfg.attn_cp_size > 1),
+        # A PD decode server never prefills a matched prompt.
+        ("PD decode", cfg.disaggregation_mode == "decode"),
+        ("compress ratios 4 or 128", bool(ratios & {4, 128})),
+    )
+    if cfg.enable_swa_branch_replay:
+        for feature, enabled in incompatible:
+            if enabled:
+                raise ValueError(
+                    f"--enable-swa-branch-replay does not support {feature}"
+                )
+        return
+    if cfg.enable_swa_branch_replay is False:
+        return
+    unsupported = [feature for feature, enabled in incompatible if enabled]
+    if unsupported:
+        declare_resolution(
+            server_args,
+            "validate_deepseek_v41_features",
+            enable_swa_branch_replay=False,
+        )
+        logger.info(
+            "DeepSeek-V4.1 SWA branch replay is off: %s", ", ".join(unsupported)
+        )
+
+
 def validate_deepseek_v41_features(server_args: ServerArgs) -> None:
     from decoupled_engine.srt.layers.attention.dsv4.unified_kv_gate import (
         is_unified_kv_triton,
@@ -421,6 +472,8 @@ def validate_deepseek_v41_features(server_args: ServerArgs) -> None:
                 "DP attention is supported when "
                 "both servers use the same block size and target/draft KV layout."
             )
+
+    resolve_swa_branch_replay(server_args)
 
     incompatible = (
         (

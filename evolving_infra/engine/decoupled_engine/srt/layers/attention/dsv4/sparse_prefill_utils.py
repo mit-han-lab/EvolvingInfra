@@ -552,6 +552,10 @@ class SparsePrefillChunkCache:
     swa_win_starts: Optional[torch.Tensor] = None  # (num_qo_tokens,) int32
     swa_win_lens: Optional[torch.Tensor] = None  # (num_qo_tokens,) int32
     swa_win_max_len: Optional[int] = None
+    # EI: the first position each request's window reads, (num_reqs,) int32
+    # (SWA branch replay: Req.swa_valid_start). The union gather still spans
+    # [seq_len - extend - (W-1), seq_len); no row reads below its floor.
+    swa_floor: Optional[torch.Tensor] = None
 
     # EI: CPU copies of the per-request lengths (no device sync to plan groups).
     extend_seq_lens_cpu: Optional[List[int]] = None
@@ -583,6 +587,7 @@ class SparsePrefillChunkCache:
         swa_win_lens: Optional[torch.Tensor] = None,
         extend_seq_lens_cpu: Optional[Sequence[int]] = None,
         workspace_budget_rows: int = 0,
+        swa_floor: Optional[torch.Tensor] = None,
     ) -> "SparsePrefillChunkCache":
         """``query_lens`` / ``query_pos``: the rows this forward runs (the extend, or
         a CP rank's interleaved share of it); the SWA gather spans the whole extend.
@@ -590,9 +595,13 @@ class SparsePrefillChunkCache:
         EI: ``extend_seq_lens_cpu`` (with ``seq_lens_cpu``) plans request groups
         that each fit ``workspace_budget_rows``; pass it only when the query rows
         are the whole extend of each request (no CP share, no RequestWindow
-        layout). Without it the chunk runs as one group."""
+        layout). Without it the chunk runs as one group.
+
+        EI: ``swa_floor`` (num_reqs,) int32 floors each request's causal window
+        at that position (SWA branch replay); not with a RequestWindow layout."""
         device = seq_lens.device
         num_reqs = seq_lens.shape[0]
+        assert swa_floor is None or request_window_layout is None
 
         query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
         query_start_loc[1:] = torch.cumsum(query_lens, dim=0).to(torch.int32)
@@ -665,6 +674,7 @@ class SparsePrefillChunkCache:
             swa_win_starts=swa_win_starts,
             swa_win_lens=swa_win_lens,
             swa_win_max_len=swa_win_max_len,
+            swa_floor=swa_floor,
             extend_seq_lens_cpu=extend_seq_lens_cpu,
             swa_gather_lens_cpu=swa_gather_lens_cpu,
             workspace_budget_rows=int(workspace_budget_rows),
@@ -698,6 +708,7 @@ class SparsePrefillChunkCache:
             swa_win_starts=swa_win_starts,
             swa_win_lens=swa_win_lens,
             swa_win_max_len=swa_win_max_len,
+            swa_floor=swa_floor,
         )
         return cache
 
@@ -800,6 +811,7 @@ class SparsePrefillChunkCache:
             swa_win_starts=self.swa_win_starts,
             swa_win_lens=self.swa_win_lens,
             swa_win_max_len=self.swa_win_max_len,
+            swa_floor=self.swa_floor,
         )
 
         gather = CompressedGather(
@@ -934,6 +946,7 @@ class SparsePrefillChunkCache:
             swa_win_starts=self.swa_win_starts,
             swa_win_lens=self.swa_win_lens,
             swa_win_max_len=self.swa_win_max_len,
+            swa_floor=self.swa_floor,
         )
 
     def _compressed_counts(self, ratio: int) -> List[int]:

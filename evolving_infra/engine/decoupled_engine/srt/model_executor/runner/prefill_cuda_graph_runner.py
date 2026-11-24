@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+# Adapted from SGLang python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py (commit 297e54fd10), modified for evolving-infra.
 """PrefillCudaGraphRunner — runs the EXTEND phase under a pluggable backend.
 
 Backend selection comes from cuda_graph_config.prefill:
@@ -2058,6 +2059,8 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
         # compressor slots as an eager prefill.
         static_forward_batch.encoder_swa_replay = forward_batch.encoder_swa_replay
         static_forward_batch.encoder_swa_row_floor = forward_batch.encoder_swa_row_floor
+        # SWA branch replay: the sparse prefill's chunk cache reads it per request.
+        static_forward_batch.swa_valid_starts = forward_batch.swa_valid_starts
         static_forward_batch.encoder_swa_compress_rows = (
             forward_batch.encoder_swa_compress_rows
         )

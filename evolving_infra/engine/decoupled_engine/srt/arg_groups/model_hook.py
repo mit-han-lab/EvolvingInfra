@@ -1045,6 +1045,9 @@ def handle_model_capability_adjustments(server_args: Any):
         validate_deepseek_v41_encoder_replay_budget(server_args)
     elif cfg.enable_encoder_swa_bounded_replay:
         raise ValueError("--enable-encoder-swa-bounded-replay requires DeepSeek-V4.1")
+    elif cfg.enable_swa_branch_replay:
+        # Only the DeepSeek-V4.1 prefill attention floors the SWA window.
+        raise ValueError("--enable-swa-branch-replay requires DeepSeek-V4.1")
 
 
 def handle_mamba_radix_cache(server_args: Any, hf_config: Any):

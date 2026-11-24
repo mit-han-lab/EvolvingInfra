@@ -1786,10 +1786,16 @@ class PrefillAdder:
 
             if req.needs_host_load_back():
                 load_max_new = min(max_new, admission.max_new_tokens)
+                # An SWA branch replay also loads its branch node, past the match.
+                load_node = (
+                    req.swa_branch_node
+                    if req.swa_branch_node is not None
+                    else req.best_match_node
+                )
                 # Reclaim can write back device victims and evict host leaves.
                 # Pin the selected host/aux match until load-back owns its locks.
                 with (
-                    self._lock_node(req.best_match_node, lock_host=True)
+                    self._lock_node(load_node, lock_host=True)
                     if isinstance(self.tree_cache, UnifiedRadixCache)
                     else nullcontext()
                 ):
@@ -1808,7 +1814,7 @@ class PrefillAdder:
                         full_transfer = (
                             self.tree_cache.tree_core.build_hicache_transfers(
                                 ComponentType.FULL,
-                                req.best_match_node,
+                                load_node,
                                 CacheTransferPhase.LOAD_BACK,
                             )[0]
                         )

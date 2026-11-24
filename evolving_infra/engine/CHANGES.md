@@ -1,7 +1,7 @@
 # Changes from SGLang
 
 The engine is SGLang's `python/sglang` at upstream release v0.5.23 (commit `297e54fd10`), renamed to
-`decoupled_engine`. Of its 6149 files, 87 are new and 150 are modified upstream files; the
+`decoupled_engine`. Of its 6149 files, 87 are new and 153 are modified upstream files; the
 rest differ from upstream only by the rename. Paths below are relative to `decoupled_engine/`.
 [README.md](README.md#relation-to-sglang) says what the changes do.
 
@@ -33,7 +33,7 @@ git grep -l 'Adapted from SGLang' -- evolving_infra/engine/decoupled_engine
 | `srt/sampling/` | `token_blacklist.py` |
 | `srt/speculative/dspark_components/` | `dspark_synthetic_oracle.py` |
 
-## Modified upstream files (150)
+## Modified upstream files (153)
 
 Each carries the header `Adapted from SGLang <upstream path> (commit 297e54fd10)`.
 
@@ -47,8 +47,8 @@ Each carries the header `Adapted from SGLang <upstream path> (commit 297e54fd10)
 | `kernels/ops/speculative/dspark/` | `dspark_accept.py`, `dspark_verify_window.py` |
 | `multimodal_gen/runtime/utils/` | `hf_diffusers_utils.py` |
 | `srt/` | `environ.py`, `server_args.py` |
-| `srt/arg_groups/` | `argparse_actions.py`, `attention_hook.py`, `deepseek_v4_hook.py`, `hicache_hook.py`, `kv_cache_hook.py`, `mega_moe_hook.py`, `model_hook.py`, `overrides.py`, `pd_disaggregation_hook.py`, `pipeline.py`, `serving_hook.py`, `speculative_hook.py` |
-| `srt/arg_groups/fields/` | `spec.py` |
+| `srt/arg_groups/` | `argparse_actions.py`, `attention_hook.py`, `deepseek_v4_hook.py`, `field_order.py`, `hicache_hook.py`, `kv_cache_hook.py`, `mega_moe_hook.py`, `model_hook.py`, `overrides.py`, `pd_disaggregation_hook.py`, `pipeline.py`, `serving_hook.py`, `speculative_hook.py` |
+| `srt/arg_groups/fields/` | `exec_.py`, `spec.py` |
 | `srt/batch_overlap/` | `two_batch_overlap.py` |
 | `srt/configs/` | `model_config.py` |
 | `srt/distributed/` | `bootstrap.py` |
@@ -80,6 +80,7 @@ Each carries the header `Adapted from SGLang <upstream path> (commit 297e54fd10)
 | `srt/mem_cache/unified_cache/` | `cache_action.py`, `session_ref_tracker.py`, `storage_attachment.py`, `unified_tree_core.py`, `unified_tree_core_interface.py` |
 | `srt/mem_cache/unified_cache/components/` | `__init__.py`, `base.py`, `full.py`, `swa.py` |
 | `srt/model_executor/` | `forward_batch_info.py`, `model_runner.py`, `pool_configurator.py` |
+| `srt/model_executor/runner/` | `prefill_cuda_graph_runner.py` |
 | `srt/models/` | `deepseek_v2.py`, `deepseek_v4.py`, `deepseek_v4_dspark.py`, `deepseek_v4_replay_tail.py`, `kimi_k25.py` |
 | `srt/multimodal/processors/` | `kimi_k25.py` |
 | `srt/observability/` | `metrics_collector.py`, `req_time_stats.py` |

@@ -35,6 +35,7 @@ them in one `Symmetric features:` line at startup.
 | Late decode choice | `--disaggregation-late-d choose`, `--disaggregation-late-d-lead-mode need`, `--disaggregation-late-d-allocation-trigger first_chunk` | The router-link port is a free port, reported in `/server_info` |
 | Prefill work snapshot | `--enable-prefill-work-snapshot` | Read by the router's cost function |
 | KV session retention | `--enable-kv-session-retention` | On models with a FULL-only cache tree and on DeepSeek-V4: GLM-5.2, Kimi-K2.6, DeepSeek-V4-Flash; not under DP attention or with DP or PP above 1, which the engine refuses. Without it the engine ignores the router's session tags |
+| SWA branch replay | `--enable-swa-branch-replay` | On DeepSeek-V4.1 where every prefill attention path floors the SWA window: not on a PD decode server, with context parallelism, `--dsv4-attn-backend trtllm`, `--enable-encoder-swa-bounded-replay` or a disabled radix cache (see the flag below). Not where KV session retention is on (the row above): the two have not run together. The repository's DeepSeek-V4.1 configs run DP attention, which keeps retention off |
 
 ### Other flags
 
@@ -42,6 +43,7 @@ them in one `Symmetric features:` line at startup.
 |---|---|
 | `--sched-trace-dir DIR` | Write scheduler step traces for the [planner](dynamic-pd.md). |
 | `--hicache-ratio R` | Host tier size as a multiple of the GPU cache. |
+| `--enable-swa-branch-replay`, `--no-enable-swa-branch-replay` | DeepSeek-V4.1 prefix reuse at a branch inside an earlier prompt. The radix tree keeps a prompt's SWA (sliding-window) KV only at its tail and at its own branch point, and a hit must end at a cached SWA window. When a prompt's cached full KV runs past that window, the match reuses the full KV up to one window, rounded up to pages, before its end (256 tokens at window 128 and page 256), on the GPU or loaded from the host tier; the request recomputes the rest from an empty window (no prefill attention path, paged or sparse, reads SWA below its first recomputed row) and caches its window at the branch point for the next request, on the tree's own full KV there, which the request holds on the GPU until then (loaded from the host tier with its reused prefix when needed). Without it the hit backs off to the last cached window, often to 0. `cached_tokens` counts the reused tokens only. Not numerically equivalent to full prefill. The `paper` preset turns it on (above); otherwise off unless set. DeepSeek-V4.1 only, with paged SWA on CUDA; refused on a PD decode server, with context parallelism, `--dsv4-attn-backend trtllm`, `--enable-encoder-swa-bounded-replay` or a disabled radix cache. The server can report it on while the radix cache keeps it off and logs why: with the Rust TreeCore, `--dsv4-uniform-cache-lifecycle`, `--enable-session-radix-cache` or `--enable-unified-cache-external-linker`. |
 
 ### Environment
 

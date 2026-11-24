@@ -101,6 +101,14 @@ class InsertParams:
     # A new leaf adopts the part it needs (InsertResult.swa_host_adopted).
     swa_host_segments: Optional[list] = None
     swa_branching_seqlen: Optional[int] = None
+    # SWA branch replay: the inserting request recomputed its KV from here on
+    # from an empty SWA window (Req.swa_valid_start); 0 otherwise. An existing
+    # node from here on keeps its own FULL KV and takes only the request's SWA.
+    swa_replay_start: int = 0
+    # Set when such an insert stops at the request's reused prefix (a node on
+    # its path has FULL on the host tier only): the key length of what the
+    # request has computed, where its own SWA window slides to instead.
+    swa_window_key_len: Optional[int] = None
 
     # General
     component_evicted_seqlens: dict[ComponentType, int] = dataclasses.field(
@@ -346,6 +354,16 @@ class MatchResult(NamedTuple):
                                 exists a mamba state.
         full_kv_hit_length: Longest Full-KV prefix available on either device or
                             host, independent of other components.
+        swa_branch_replay:  The prefix ends where the tree holds FULL but no SWA
+                            window (SWA branch replay): the request's attention
+                            reads no SWA below its first extend start, and a
+                            load-back of this match restores FULL only.
+        swa_branch_node:    With swa_branch_replay, the node ending at the branch
+                            point when its FULL is not on the device: the request's
+                            load-back restores FULL down to it, past the reused
+                            prefix, and the request then anchors (locks) there
+                            until its insert. None when last_device_node already
+                            ends at the branch point.
     """
 
     device_prefix_len: int
@@ -366,6 +384,8 @@ class MatchResult(NamedTuple):
     # Reusable prefix length in FULL's device-value scan, before node-boundary
     # or auxiliary constraints. None means no shorter prefix was reported.
     full_device_match_len: Optional[int] = None
+    swa_branch_replay: bool = False
+    swa_branch_node: Any = None
 
 
 def zero_match_result(
@@ -387,6 +407,8 @@ def zero_match_result(
         full_kv_hit_length=0,
         last_visited_node_id=None,
         full_device_match_len=None,
+        swa_branch_replay=False,
+        swa_branch_node=None,
     )
 
 

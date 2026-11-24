@@ -391,6 +391,11 @@ class UnifiedRadixCache(BasePrefixCache):
     _deferred_chunk_backups: Optional[list] = None
     kv_sessions = None
     enable_kv_session_retention = False
+    # SWA branch replay (_match_swa_branch_replay): off, or the replay length
+    # and the components of its FULL-only match.
+    swa_branch_replay = False
+    _swa_branch_replay_len = 0
+    _swa_branch_replay_components: tuple[ComponentType, ...] = ()
 
     def __init__(
         self,
@@ -516,6 +521,7 @@ class UnifiedRadixCache(BasePrefixCache):
         # Components execute boundary actions through the tree core.
         for component in self.components.values():
             component.tree_core = self.tree_core
+        self.swa_branch_replay = self._resolve_swa_branch_replay(params)
 
         if (
             page_interleave_shard_size(params.token_to_kv_pool_allocator) > 1
@@ -672,6 +678,46 @@ class UnifiedRadixCache(BasePrefixCache):
             for component in self._components_tuple
             if component.component_type in requested_set
         )
+
+    def _resolve_swa_branch_replay(self, params: CacheInitParams) -> bool:
+        """Whether matches use SWA branch replay (_match_swa_branch_replay).
+
+        Its second match is FULL-only, so the tree holds exactly FULL and SWA
+        and its core supports a partial-component match. Under the uniform
+        lifecycle every cached page keeps SWA, so a match has no branch point.
+        """
+        if not params.swa_branch_replay or self.disable:
+            return False
+        swa = self.components.get(ComponentType.SWA)
+        reason = None
+        if set(self.tree_components) != {BASE_COMPONENT_TYPE, ComponentType.SWA}:
+            reason = "the tree holds components other than FULL and SWA"
+        elif swa.uniform_lifecycle:
+            reason = "the uniform cache lifecycle keeps SWA for every cached page"
+        elif not swa.gates_prefix_match:
+            reason = "the tree does not own the SWA state"
+        elif self.enable_session_radix_cache:
+            reason = "--enable-session-radix-cache matches every component"
+        elif not getattr(self.tree_core, "supports_partial_component_match", False):
+            reason = f"{type(self.tree_core).__name__} has no FULL-only match"
+        if reason is not None:
+            logger.info("SWA branch replay is off: %s", reason)
+            return False
+        page_size = self.tree_core.page_size
+        # Replays start on a page boundary, since a request cannot write into
+        # a page of the tree, and recompute a whole window before the branch
+        # point, so the window the request then caches there serves the next
+        # match: ceil_page(window). 256 for DeepSeek-V4.1 (window 128, page 256).
+        self._swa_branch_replay_len = (
+            (self._sliding_window_size + page_size - 1) // page_size * page_size
+        )
+        self._swa_branch_replay_components = (BASE_COMPONENT_TYPE,)
+        logger.info(
+            "SWA branch replay: a FULL hit past the last SWA window is reused up "
+            "to %d tokens before its end",
+            self._swa_branch_replay_len,
+        )
+        return True
 
     def _all_reduce_attn_groups(self, tensor: torch.Tensor, op):
         # The HiCache lockstep all-reduces run in admission and control
@@ -2326,7 +2372,79 @@ class UnifiedRadixCache(BasePrefixCache):
         # Apply the walk's actions (e.g. a pending write-through relocation on
         # a split) before the finalizers, which can evict or raise.
         self._apply_cache_actions(result.cache_actions)
+        params, result = self._match_swa_branch_replay(params, result)
         return self._finalize_match_result(params, result)
+
+    def _match_swa_branch_replay(
+        self, params: MatchPrefixParams, result: MatchResult
+    ) -> tuple[MatchPrefixParams, MatchResult]:
+        """SWA branch replay: reuse FULL up to one window before a branch point.
+
+        A FULL hit F (swa_branching_seqlen) that runs past the deepest reusable
+        SWA window ends inside an earlier prompt, whose SWA the tree keeps only
+        at that prompt's tail. The match then ends at F - R
+        (R = _swa_branch_replay_len) instead of at the window: a FULL-only match
+        of that prefix, on device or host. The request recomputes the rest from
+        an empty window (Req.swa_valid_start), and its insert at F caches its
+        window there on the tree's own FULL (InsertParams.swa_replay_start),
+        which the request holds on the device until then: it anchors on the
+        node ending at F (loaded back with the prefix when host-only). A match
+        that ends at a reusable window, or within R of the branch point, is
+        unchanged.
+
+        Adapted from DeepInfer doc/inference_deployment_qa.md (the hit backs off
+        one recomputation window when the SWA cache misses) and
+        csrc/engine/input_metadata/prepare_tensor_input_v4.cpp (swa_valid_start)
+        @a679bb8.
+        """
+        branch = result.swa_branching_seqlen
+        if (
+            not self.swa_branch_replay
+            or branch is None
+            or params.active_components is not None
+            or self.linker is not None
+        ):
+            return params, result
+        reused = result.device_prefix_len + result.host_hit_length
+        start = branch - self._swa_branch_replay_len
+        if start <= reused:
+            return params, result
+        key = params.key
+        replay_params = replace(
+            params,
+            # An EAGLE bigram key of n bigrams spans n + 1 raw tokens.
+            key=RadixKey(
+                key.token_ids,
+                key.extra_key,
+                is_bigram=key.is_bigram,
+                limit=start + int(key.is_bigram),
+                cache_salt=key.cache_salt,
+            ),
+            active_components=self._swa_branch_replay_components,
+        )
+        replay = self.tree_core.match_prefix(replay_params)
+        self._apply_cache_actions(replay.cache_actions)
+        if replay.device_prefix_len + replay.host_hit_length <= reused:
+            return params, result
+        # The request reuses [0, F') but anchors on the node ending at F: the
+        # first walk's last node, whose id the replay walk's split at F' leaves
+        # on [F', F). Its lock then holds the earlier prompt's FULL there on the
+        # device until its insert, which keeps that FULL and adopts only the
+        # request's window (SWAComponent, keep_full). A node on the host tier
+        # only is restored with the reused prefix (init_load_back).
+        anchor = {}
+        branch_node = result.last_visited_node_id
+        if (
+            branch_node is not None
+            and replay.device_prefix_len + replay.host_hit_length == start
+        ):
+            if self.tree_core.is_full_device_evicted(branch_node):
+                anchor = dict(swa_branch_node=branch_node)
+            elif replay.host_hit_length == 0:
+                anchor = dict(last_device_node=branch_node, best_match_node=branch_node)
+        return replay_params, replay._replace(
+            swa_branching_seqlen=branch, swa_branch_replay=True, **anchor
+        )
 
     def _finalize_match_result(
         self, params: MatchPrefixParams, result: MatchResult
@@ -3962,6 +4080,10 @@ class UnifiedRadixCache(BasePrefixCache):
         if self.cache_controller is None:
             return False
 
+        if active_components is None and getattr(req, "swa_branch_replay", False):
+            # An SWA branch replay matched FULL only: the request rebuilds its
+            # window, and the matched path holds no SWA to restore.
+            active_components = self._swa_branch_replay_components
         active_component_drivers = self._resolve_active_components(
             active_components, for_match=True
         )
@@ -6373,6 +6495,25 @@ class UnifiedRadixCache(BasePrefixCache):
         if self.linker is not None and self.linker.has_hit(req.rid):
             return self.linker.load_back(req)
         last_best_match_device_node_id = req.last_node
+
+        branch_node_id = getattr(req, "swa_branch_node", None)
+        if branch_node_id is not None:
+            # SWA branch replay: restore FULL down to the branch point, one node
+            # past the reused prefix, and anchor the request there; its lock
+            # holds that node on the device until the request's insert. The
+            # count stays the reused prefix's. If this load fails, the plain
+            # load below restores the reused prefix only.
+            req.swa_branch_node = None
+            if self.load_back(
+                branch_node_id,
+                mem_quota,
+                req=req,
+                active_components=params.active_components,
+            ):
+                new_indices = self.tree_core.collect_full_device_indices(
+                    best_match_node_id, last_best_match_device_node_id
+                )
+                return len(new_indices), branch_node_id
 
         if (
             self.tree_core.is_full_device_evicted(best_match_node_id)

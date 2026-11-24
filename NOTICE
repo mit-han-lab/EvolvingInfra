@@ -30,6 +30,17 @@ SGLang and keep their own license terms:
   THIRDPARTYNOTICES.txt for the third-party code it includes.
 - Other files keep the copyright and license headers they were imported with.
 
+Parts of evolving_infra/engine/decoupled_engine/ are adapted from DeepInfer, DeepSeek's inference
+framework, licensed under the Apache License, Version 2.0, at commit
+a679bb86ce36e883a98a97733492b686e5b9a08e. Each adapted part says so where it is ("Adapted from
+DeepInfer <path>@a679bb8"):
+
+- The SWA branch replay of a prefix match (srt/mem_cache/unified_radix_cache.py,
+  srt/managers/schedule_batch.py): a hit without an SWA window backs off one
+  recomputation window and the request's SWA window starts at the hit, from
+  doc/inference_deployment_qa.md and the swa_valid_start floor of
+  csrc/engine/input_metadata/prepare_tensor_input_v4.cpp.
+
 docker/patches/mooncake-rdma-polling-only.patch modifies Mooncake
 (https://github.com/kvcache-ai/Mooncake, Apache License 2.0), which the runtime
 image downloads and builds; no Mooncake source is included.

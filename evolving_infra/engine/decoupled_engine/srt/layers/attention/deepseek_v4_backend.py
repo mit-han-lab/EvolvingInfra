@@ -3127,6 +3127,17 @@ class DeepseekV4AttnBackend(
             and not is_cp_active(forward_batch)
             and not self.mega_attn
         )
+        # SWA branch replay: a request reads no SWA below its swa_valid_start.
+        swa_floor = None
+        floors = getattr(forward_batch, "swa_valid_starts", None)
+        if floors is not None and request_layout is None:
+            # DP padding may add requests past the real ones; they get 0.
+            padding = [0] * (forward_batch.seq_lens.shape[0] - len(floors))
+            swa_floor = async_h2d(
+                list(floors) + padding,
+                dtype=torch.int32,
+                device=forward_batch.seq_lens.device,
+            )
         return SparsePrefillChunkCache.build(
             seq_lens=forward_batch.seq_lens.to(torch.int32),
             extend_seq_lens=extend_seq_lens.to(torch.int32),
@@ -3148,6 +3159,7 @@ class DeepseekV4AttnBackend(
             workspace_budget_rows=getattr(
                 self.sparse_prefill_kv_buffer, "budget_rows", 0
             ),
+            swa_floor=swa_floor,
         )
 
     @staticmethod
@@ -3163,6 +3175,18 @@ class DeepseekV4AttnBackend(
         if keep is None:
             return loc.clone() if own_buffer else loc
         return torch.zeros_like(loc).index_copy_(0, keep, loc[keep])
+
+    def _paged_swa_row_floor(
+        self, forward_batch: ForwardBatch
+    ) -> Optional[torch.Tensor]:
+        """An extend's per-row floor of the paged SWA window (SWA branch replay:
+        Req.swa_valid_start), padded with 0 to the extend's padded rows; None
+        without one. The request window reads the encoder replay fold's floor
+        in make_core_attn_metadata instead."""
+        floor = forward_batch.encoder_swa_row_floor
+        if floor is None or self.token_to_kv_pool.request_window is not None:
+            return None
+        return _pad_rows(floor, num_rows=forward_batch.out_cache_loc.shape[0])
 
     def _build_forward_metadata(
         self,
@@ -3277,6 +3301,7 @@ class DeepseekV4AttnBackend(
                 need_compress=True,
                 use_prefill_cuda_graph=use_prefill_cuda_graph,
                 forward_batch=forward_batch,
+                swa_replay_start=self._paged_swa_row_floor(forward_batch),
             )
             self._snapshot_low_ratio_k_slots(
                 forward_batch, metadata, publish_rows=not use_prefill_cuda_graph
