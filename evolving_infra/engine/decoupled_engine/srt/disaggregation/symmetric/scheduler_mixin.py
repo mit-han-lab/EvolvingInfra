@@ -959,38 +959,45 @@ class SchedulerSymmetricMixin:
             return
         if req.export_mark is not None and not req.finished():
             late = late_cfg is not None
-            began = (
-                self.export_table.begin_export(
-                    req, late=True, arrival_seq=req.sym_arrival_seq
-                )
-                if late
-                else self.export_table.begin_export(req)
-            )
-            if not began:
+            if not late:
+                if not self.export_table.begin_or_wait(req):
+                    # Every aux slot is taken: the P-leg waits for one, in
+                    # arrival order; symmetric_pre_schedule queues it.
+                    return
+            elif not self.export_table.begin_export(
+                req, late=True, arrival_seq=req.sym_arrival_seq
+            ):
                 self.symmetric_reject(
                     req, "No free export aux slot; retry later (symmetric-pd ExportTable)"
                 )
                 return
-            if self.export_table.compute_before_allocation:
-                # Fixed reader identity was broadcast with this request. It
-                # permits P compute, but does not allocate any reader pages.
-                req.late_d_need = True
-                req.pending_bootstrap = True
-                req.late_d_start_ok = True
-                req.late_d_entry_pass = self.forward_ct
-            elif self.export_table.await_reader:
-                # F-C, reader-first: queued by symmetric_pre_schedule once the
-                # reader admitted the import (ExportTable.poll_begun). Late D:
-                # the binder sends the ADMIT; the storage prefetch runs while
-                # the P-leg is held.
-                if late:
-                    self._prefetch_kvcache(req)
-                    req.time_stats.late_d_hold_time = time.perf_counter()
-                self.export_table.hold(req)
+            if self._symmetric_hold_export(req, late):
                 return
         self._prefetch_kvcache(req)
         self.waiting_queue.append(req)
         req.time_stats.set_wait_queue_entry_time()
+
+    def _symmetric_hold_export(self: Scheduler, req: Req, late: bool) -> bool:
+        """After its export began: True when the P-leg is held for its reader
+        instead of queued for prefill."""
+        if self.export_table.compute_before_allocation:
+            # Fixed reader identity was broadcast with this request. It
+            # permits P compute, but does not allocate any reader pages.
+            req.late_d_need = True
+            req.pending_bootstrap = True
+            req.late_d_start_ok = True
+            req.late_d_entry_pass = self.forward_ct
+        elif self.export_table.await_reader:
+            # F-C, reader-first: queued by symmetric_pre_schedule once the
+            # reader admitted the import (ExportTable.poll_begun). Late D:
+            # the binder sends the ADMIT; the storage prefetch runs while
+            # the P-leg is held.
+            if late:
+                self._prefetch_kvcache(req)
+                req.time_stats.late_d_hold_time = time.perf_counter()
+            self.export_table.hold(req)
+            return True
+        return False
 
     def init_symmetric_bootstrap_prefetch(self: Scheduler):
         """SGLANG_SYMMETRIC_BWP: the bootstrap prefetcher of a symmetric
@@ -1071,6 +1078,11 @@ class SchedulerSymmetricMixin:
         with phase("sym.export.poll_released"):
             for req, reason in self.export_table.poll_released():
                 self._symmetric_free_exported(req, reason)
+        # P-legs that waited for an aux slot, in arrival order, now that the
+        # releases freed slots.
+        for req in self.export_table.begin_waiting():
+            if not self._symmetric_hold_export(req, False):
+                _queue_for_prefill(self, req)
         if getattr(self.export_table, "compute_before_allocation", False) is True:
             for entry in list(self.export_table.entries.values()):
                 if entry.compute_before_allocation and entry.abort_reason is not None:
@@ -1486,6 +1498,11 @@ class SchedulerSymmetricMixin:
                 # A held P-leg has no KV: no cache_finished_req follows.
                 forget_kv_session_request(self, req)
                 logger.debug("Abort held export request. rid=%s", req.rid)
+        # A P-leg waiting for an aux slot is in no queue and holds no slot.
+        for req in self.export_table.abort_waiting(recv_req.rid, recv_req.abort_all):
+            self.ipc_channels.send_to_tokenizer.send_output(_make_abort_req(req), req)
+            forget_kv_session_request(self, req)
+            logger.debug("Abort export request waiting for an aux slot. rid=%s", req.rid)
         for req in self.import_queue.abort_matching(recv_req.rid, recv_req.abort_all):
             self.ipc_channels.send_to_tokenizer.send_output(_make_abort_req(req), req)
             # A pending import holds no KV (no cache_finished_req); for an
@@ -1496,7 +1513,7 @@ class SchedulerSymmetricMixin:
     def symmetric_is_idle(self: Scheduler, for_health_check: bool = False) -> bool:
         idle = len(self.import_queue) == 0
         if not for_health_check:
-            idle &= len(self.export_table) == 0
+            idle &= len(self.export_table) == 0 and self.export_table.aux_waiting == 0
             # DSv4 window residency: unacked spills own
             # detached device SWA and host slots, and pending backfills own
             # host slots a read may still write. Flush and the idle leak check
@@ -1584,6 +1601,13 @@ class SchedulerSymmetricMixin:
                     table.stats_held_released if table is not None else 0
                 ),
                 "held_max_s": table.stats_held_max_s if table is not None else 0.0,
+                # P-legs that found every aux slot taken: waiting now, in
+                # total, and the longest wait.
+                "aux_waiting": table.aux_waiting if table is not None else 0,
+                "aux_waited": table.stats_aux_waited if table is not None else 0,
+                "aux_wait_max_s": (
+                    table.stats_aux_wait_max_s if table is not None else 0.0
+                ),
             },
             "import_queue": {
                 "pending": len(queue.pending) if queue is not None else 0,
