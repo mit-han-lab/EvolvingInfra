@@ -11,12 +11,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from decoupled_engine.srt.disaggregation.pull.api import ExportMark
-from decoupled_engine.srt.disaggregation.symmetric.export_table import ExportTable
-from decoupled_engine.srt.disaggregation.symmetric.fake_planes import FakeOwnerPlane
-from decoupled_engine.srt.disaggregation.symmetric.scheduler_mixin import SchedulerSymmetricMixin
-from decoupled_engine.srt.disaggregation.utils import ReqToMetadataIdxAllocator
-from decoupled_engine.srt.managers.io_struct import AbortReq
+pytest.importorskip("torch", reason="needs the engine (decoupled-engine)")
+pytest.importorskip("decoupled_engine", reason="needs the engine (decoupled-engine)")
+
+from decoupled_engine.srt.disaggregation.pull.api import ExportMark  # noqa: E402
+from decoupled_engine.srt.disaggregation.symmetric.export_table import ExportTable  # noqa: E402
+from decoupled_engine.srt.disaggregation.symmetric.fake_planes import FakeOwnerPlane  # noqa: E402
+from decoupled_engine.srt.disaggregation.symmetric.scheduler_mixin import SchedulerSymmetricMixin  # noqa: E402
+from decoupled_engine.srt.disaggregation.utils import ReqToMetadataIdxAllocator  # noqa: E402
+from decoupled_engine.srt.managers.io_struct import AbortReq  # noqa: E402
 
 
 class _Req:
