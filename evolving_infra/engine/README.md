@@ -22,7 +22,7 @@ The engine is SGLang's `python/sglang` at upstream release v0.5.23, commit
 [`297e54fd10`](https://github.com/sgl-project/sglang/commit/297e54fd105e974cdf401e5b4d20253a22c16f90),
 renamed to `decoupled_engine` and substantially modified. Each modified upstream file says
 so in its header ("Adapted from SGLang ..."); files without that line are new or differ
-only by the rename. [CHANGES.md](CHANGES.md) lists the 85 new files, the 146 modified
+only by the rename. [CHANGES.md](CHANGES.md) lists the 87 new files, the 150 modified
 ones and the upstream fixes backported after v0.5.23. The main changes:
 
 - **Symmetric P/D workers** (`srt/disaggregation/symmetric/`): any worker can run the

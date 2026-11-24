@@ -8,7 +8,11 @@ the reader's own indices from ``dst_pages``, issue one blocking batch_read per
 chunk on a transfer thread, verify generations on FINAL, read the owner's aux +
 state slots (FinalMeta) into the reader's slots the scheduler pre-allocated on
 the ImportMark (``local_aux_index`` / ``local_state_indices``), send DONE, set
-READY. Homogeneous TP only: rank i reads rank i.
+READY. Homogeneous TP: rank i reads rank i. Under DP attention
+(``owner_ranks`` > 1) the import's owner may be any DP rank of the prefill
+worker: ImportMark.owner_addr starts as that worker's rank-0 channel, the
+first publication's ``owner_addr`` names the owner rank and the import moves
+to it, and an ABORT before any publication goes to every owner rank.
 
 Threading: the scheduler thread calls begin_import / poll / final_meta /
 failure_reason / abort_import. One daemon IO thread owns the ZMQ sockets and
@@ -100,6 +104,7 @@ class _Import:
         "finished",
         "lock",
         "timeline",
+        "owner_known",
     )
 
     def __init__(
@@ -109,8 +114,11 @@ class _Import:
         req_id: str,
         dst_pages: Callable[[ChunkReady], Dict[str, Sequence[int]]],
         deadline_mono: float,
+        owner_known: bool = True,
     ) -> None:
         self.mark = mark
+        # False under DP attention until a publication names the owner rank.
+        self.owner_known = owner_known
         self.req_id = req_id
         self.dst_pages = dst_pages
         self.state = TransferState.WAITING
@@ -170,9 +178,13 @@ class ReaderPlane:
         num_transfer_threads: int = 4,
         worker_name: str = "",
         send_begin: Optional[bool] = None,
+        owner_ranks: int = 1,
     ) -> None:
         self._registration = registration
         self._engine = read_engine
+        # DP attention: the owner of an import is one of `owner_ranks` ranks of
+        # the prefill worker, named by its first publication (module docstring).
+        self._owner_ranks = max(1, int(owner_ranks))
         # Reader-first exports (SGLANG_SYMMETRIC_PD_EXPORT_AWAIT_READER): tell the
         # owner when the scheduler admitted the import (wire BEGIN).
         self._send_begin = (
@@ -268,6 +280,7 @@ class ReaderPlane:
             req_id=req_id,
             dst_pages=dst_pages,
             deadline_mono=time.monotonic() + self._timeout_s,
+            owner_known=self._owner_ranks == 1,
         )
         with self._mutex:
             self._bind_mark_attempt(mark)
@@ -366,6 +379,7 @@ class ReaderPlane:
             req_id=f"pending:{mark.transfer_id}",
             dst_pages=lambda chunk: {},
             deadline_mono=time.monotonic(),
+            owner_known=self._owner_ranks == 1,
         )
         # Install a terminal record before late publications can be admitted.
         self._request_terminal(
@@ -489,16 +503,41 @@ class ReaderPlane:
             if notify_owner:
                 with self._mutex:
                     attempt = self._gate.attempt_of(imp.mark.transfer_id)
-                self._send(
-                    imp.mark.owner_addr,
-                    wire.make_abort(
-                        transfer_id=imp.mark.transfer_id,
-                        attempt_id=attempt or 0,
-                        reason=reason,
-                    ),
+                    owners = self._owner_addrs(imp)
+                abort = wire.make_abort(
+                    transfer_id=imp.mark.transfer_id,
+                    attempt_id=attempt or 0,
+                    reason=reason,
                 )
+                for addr in owners:
+                    self._send(addr, abort)
             imp.finished.set()
         return True
+
+    def _owner_addrs(self, imp: _Import) -> List[str]:
+        """Where a reader -> owner notice goes: the owner channel, or, while no
+        publication has named the owner rank (DP attention), every rank's
+        channel of the prefill worker (the others drop the unknown transfer).
+        Caller holds _mutex."""
+        if imp.owner_known:
+            return [imp.mark.owner_addr]
+        return [wire.rank_channel(imp.mark.owner_addr, r) for r in range(self._owner_ranks)]
+
+    def _learn_owner(self, imp: _Import, msg: wire.Message) -> None:
+        """DP attention: bind the import to the owner rank its first
+        publication names; later REGISTER, DONE and ABORT go there. Caller
+        holds _mutex."""
+        if imp.owner_known:
+            return
+        addr = msg.owner_addr
+        if not addr:
+            return
+        imp.owner_known = True
+        if addr != imp.mark.owner_addr:
+            imp.mark.owner_addr = addr
+            imp.timeline["owner_addr"] = addr
+        if addr not in self._owners:
+            self._owners[addr] = None
 
     def _read_finished(self, imp: _Import) -> None:
         with imp.lock:
@@ -1026,6 +1065,8 @@ class ReaderPlane:
             if self._gate.attempt_of(msg.transfer_id) is None:
                 self._gate.bind(transfer_id=msg.transfer_id, attempt_id=msg.attempt_id)
             verdict = self._gate.check(msg)
+            if verdict == AttemptGate.ACCEPT:
+                self._learn_owner(imp, msg)
             owner_reg = self._owners.get(imp.mark.owner_addr)
         if verdict != AttemptGate.ACCEPT:
             logger.debug(

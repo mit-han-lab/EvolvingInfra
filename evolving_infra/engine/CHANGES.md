@@ -1,7 +1,7 @@
 # Changes from SGLang
 
 The engine is SGLang's `python/sglang` at upstream release v0.5.23 (commit `297e54fd10`), renamed to
-`decoupled_engine`. Of its 6147 files, 85 are new and 146 are modified upstream files; the
+`decoupled_engine`. Of its 6149 files, 87 are new and 150 are modified upstream files; the
 rest differ from upstream only by the rename. Paths below are relative to `decoupled_engine/`.
 [README.md](README.md#relation-to-sglang) says what the changes do.
 
@@ -11,7 +11,7 @@ To list the modified files again:
 git grep -l 'Adapted from SGLang' -- evolving_infra/engine/decoupled_engine
 ```
 
-## New files (85)
+## New files (87)
 
 | Directory | Files |
 |---|---|
@@ -19,7 +19,7 @@ git grep -l 'Adapted from SGLang' -- evolving_infra/engine/decoupled_engine
 | `srt/arg_groups/` | `symmetric_defaults.py` |
 | `srt/disaggregation/` | `bootstrap_prefetch.py`, `decode_hicache_restore_log.py`, `decode_selection.py`, `jit_pull.py`, `late_d.py`, `late_d_link.py`, `late_d_need.py`, `lookahead_plan.py`, `native_eagle3_cache_layout.py`, `prebuilt_h2d.py`, `prefill_launch_thread.py`, `prefill_loop_unserialize.py`, `prefill_result_first.py`, `queued_prefix_guard.py` |
 | `srt/disaggregation/pull/` | `__init__.py`, `api.py`, `importer.py`, `owner.py`, `protocol.py`, `read_engine.py` |
-| `srt/disaggregation/symmetric/` | `README.md`, `__init__.py`, `admit_after_launch.py`, `consensus.py`, `export_table.py`, `fake_planes.py`, `import_queue.py`, `late_d_sym.py`, `launch_thread.py`, `marks.py`, `planes.py`, `publish_readback.py`, `scheduler_mixin.py` |
+| `srt/disaggregation/symmetric/` | `README.md`, `__init__.py`, `admit_after_launch.py`, `consensus.py`, `dp_placement.py`, `export_table.py`, `fake_planes.py`, `import_queue.py`, `late_d_sym.py`, `launch_thread.py`, `marks.py`, `planes.py`, `publish_readback.py`, `scheduler_mixin.py` |
 | `srt/entrypoints/openai/` | `encoding_dsv4.py` |
 | `srt/layers/attention/dsv4/` | `visible_window.py` |
 | `srt/managers/scheduler_components/` | `collective_guard.py`, `decode_load_consumer.py`, `deferred_write_submit.py`, `gate_pending_reorder.py`, `m2_lockstep_stats.py`, `next_batch_host_prefetch.py`, `phase_timers.py`, `prefill_routing_snapshot.py`, `prefill_state_push.py`, `prefill_timeline.py`, `prefill_work.py`, `sched_tracer.py` |
@@ -30,9 +30,10 @@ git grep -l 'Adapted from SGLang' -- evolving_infra/engine/decoupled_engine
 | `srt/mem_cache/unified_cache/` | `retention_order.py`, `swa_ledger.py` |
 | `srt/models/` | `deepseek_v4_vit.py`, `deepseek_v4_vl.py`, `glm5v.py` |
 | `srt/multimodal/processors/` | `deepseek_v4_vl.py`, `glm5v.py` |
+| `srt/sampling/` | `token_blacklist.py` |
 | `srt/speculative/dspark_components/` | `dspark_synthetic_oracle.py` |
 
-## Modified upstream files (146)
+## Modified upstream files (150)
 
 Each carries the header `Adapted from SGLang <upstream path> (commit 297e54fd10)`.
 
@@ -51,7 +52,7 @@ Each carries the header `Adapted from SGLang <upstream path> (commit 297e54fd10)
 | `srt/batch_overlap/` | `two_batch_overlap.py` |
 | `srt/configs/` | `model_config.py` |
 | `srt/distributed/` | `bootstrap.py` |
-| `srt/eplb/` | `expert_distribution.py` |
+| `srt/eplb/` | `eplb_manager.py`, `expert_distribution.py` |
 | `srt/disaggregation/` | `decode.py`, `decode_hicache_mixin.py`, `decode_schedule_batch_mixin.py`, `kv_events.py`, `prefill.py`, `utils.py` |
 | `srt/disaggregation/base/` | `conn.py` |
 | `srt/disaggregation/common/` | `conn.py` |
@@ -62,13 +63,14 @@ Each carries the header `Adapted from SGLang <upstream path> (commit 297e54fd10)
 | `srt/entrypoints/openai/` | `protocol.py`, `serving_chat.py`, `serving_completions.py`, `utils.py` |
 | `srt/function_call/` | `glm47_moe_detector.py`, `glm4_moe_detector.py`, `utils.py` |
 | `srt/hardware_backend/npu/dsv4/` | `dsv4_memory_pool.py` |
+| `srt/layers/` | `logits_processor.py` |
 | `srt/layers/attention/` | `deepseek_v4_backend.py`, `dsa_backend.py` |
 | `srt/layers/attention/dsa/` | `dsa_indexer.py` |
 | `srt/layers/attention/dsv4/` | `sparse_prefill_utils.py` |
 | `srt/layers/moe/` | `hash_topk.py`, `mega_moe.py`, `topk.py` |
-| `srt/managers/` | `cache_controller.py`, `detokenizer_manager.py`, `io_struct.py`, `load_snapshot.py`, `multi_tokenizer_mixin.py`, `schedule_batch.py`, `schedule_policy.py`, `scheduler.py`, `tokenizer_control_mixin.py`, `tokenizer_manager.py`, `tp_worker.py`, `utils.py` |
+| `srt/managers/` | `cache_controller.py`, `data_parallel_controller.py`, `detokenizer_manager.py`, `io_struct.py`, `load_snapshot.py`, `multi_tokenizer_mixin.py`, `schedule_batch.py`, `schedule_policy.py`, `scheduler.py`, `tokenizer_control_mixin.py`, `tokenizer_manager.py`, `tp_worker.py`, `utils.py` |
 | `srt/managers/scheduler_components/` | `batch_result_processor.py`, `dp_attn.py`, `invariant_checker.py`, `kv_events_publisher.py`, `load_inquirer.py`, `metrics_reporter.py`, `output_streamer.py`, `request_receiver.py`, `weight_updater.py` |
-| `srt/mem_cache/` | `allocation.py`, `base_prefix_cache.py`, `cache_init_params.py`, `common.py`, `deepseek_v4_memory_pool.py`, `events.py`, `hicache_storage.py`, `index_key_cache.py`, `kv_cache_builder.py`, `kv_cache_configurator.py`, `l2_transfer.py`, `memory_pool.py`, `memory_pool_host.py`, `radix_cache.py`, `registry.py`, `unified_radix_cache.py`, `utils.py` |
+| `srt/mem_cache/` | `allocation.py`, `base_prefix_cache.py`, `cache_init_params.py`, `common.py`, `deepseek_v4_memory_pool.py`, `events.py`, `hicache_auto_size.py`, `hicache_storage.py`, `index_key_cache.py`, `kv_cache_builder.py`, `kv_cache_configurator.py`, `l2_transfer.py`, `memory_pool.py`, `memory_pool_host.py`, `radix_cache.py`, `registry.py`, `unified_radix_cache.py`, `utils.py` |
 | `srt/mem_cache/allocator/` | `paged.py`, `swa.py` |
 | `srt/mem_cache/buffer_mode/` | `pipeline.py` |
 | `srt/mem_cache/cpp_utils/` | `native_hash.py` |

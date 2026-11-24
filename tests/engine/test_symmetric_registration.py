@@ -41,9 +41,13 @@ def native():
         "ProtocolError", "PoolRegion", "ItemRegion", "PoolLayout", "Registration",
         "_pool_region_from_layout", "_contiguous_runs", "build_page_read_plan",
     }, ns)
-    ns.update(POOL_FULL="full", POOL_SWA="swa", POOL_C4="c4", POOL_C128="c128")
-    definitions(SRT / "disaggregation/symmetric/export_table.py",
-                {"_is_dsv4_pool", "registration_pools_for"}, ns)
+    ns.update(POOL_FULL="full", POOL_SWA="swa", POOL_C4="c4", POOL_C128="c128", POOL_C1="c1", POOL_C2="c2",
+              COMPRESSED_POOLS={4: "c4", 128: "c128", 1: "c1", 2: "c2"},
+              StateType=enum.Enum("StateType", "SWA DSA DSV4_REQUEST_STATE"))
+    export_table = SRT / "disaggregation/symmetric/export_table.py"
+    defined = {node.name for node in ast.parse(export_table.read_text()).body if isinstance(node, ast.FunctionDef)}
+    helpers = {"_is_unified_kv", "_dsv4_stage_ratios", "_dsv4_page_pools", "_dsv4_pool_entries"} & defined
+    definitions(export_table, {"_is_dsv4_pool", "registration_pools_for"} | helpers, ns)
     definitions(SRT / "disaggregation/pull/read_engine.py", {"FakeMemory", "FakeReadEngine"}, ns)
     return SimpleNamespace(**ns)
 
@@ -105,3 +109,38 @@ def test_registration_copies_pages_within_the_registered_span(
     finally:
         owner.close()
         reader.close()
+
+
+def dsv4_cache(kv_layers, index_buffers, ratios):
+    """A DeepSeek-V4 cache as registration reads it: per compression ratio (in the
+    pool's order) its KV buffers and its indexer's page-row buffers."""
+    cache = type("DeepSeekV4TokenToKVPool", (), {})()
+    cache.compression_ratios, cache._stage_start, cache._stage_end = ratios, 0, len(ratios)
+    cache._unified_kv, cache.c4_kv_pool = False, None
+    cache.kv_pools = {r: SimpleNamespace(kv_buffer=[object()] * n) if n else None for r, n in kv_layers.items()}
+    cache.index_pools = {r: SimpleNamespace(contiguous_page_row_buffers=lambda n=n: [object()] * n)
+                         for r, n in index_buffers.items()}
+    return cache
+
+
+@pytest.mark.parametrize(("kv_layers", "index_buffers", "ratios", "pools"), [
+    # DeepSeek-V4: the c4 KV and indexer buffers, then the c128 KV buffers.
+    ({4: 2, 128: 1}, {4: 2}, [0, 4, 128, 4], {"c4": [0, 1, 2, 3], "c128": [4]}),
+    # DeepSeek-V4.1: one ratio-1 and three ratio-2 layers with their indexers, no c4 or c128 layers.
+    ({4: 0, 128: 0, 1: 1, 2: 3}, {1: 1, 2: 3}, [0, 1, 2, 2, 2, 0],
+     {"c4": [], "c128": [], "c1": [0, 1], "c2": [2, 3, 4, 5, 6, 7]}),
+], ids=["v4", "v4.1"])
+def test_dsv4_registration_gives_each_compression_ratio_a_full_indexed_pool(
+        native, kv_layers, index_buffers, ratios, pools):
+    cache = dsv4_cache(kv_layers, index_buffers, ratios)
+    entries = sum(len(e) for e in pools.values())
+    args = SimpleNamespace(
+        page_size=256, kv_data_ptrs=[1000 * (e + 1) for e in range(entries)],
+        kv_item_lens=[64 * (e + 1) for e in range(entries)], kv_layer_ids=list(range(entries)),
+        aux_data_ptrs=[], aux_item_lens=[], state_types=[native.StateType.SWA],
+        state_data_ptrs=[[7]], state_item_lens=[[8]], engine_rank=0,
+    )
+    layouts, extra = native.registration_pools_for(kvcache=cache, kv_args=args)
+    assert {layout.name: list(layout.entry_indices) for layout in layouts} == {"full": [], **pools}
+    assert all(list(layout.page_nbytes) == [64 * (e + 1) for e in layout.entry_indices] for layout in layouts)
+    assert list(extra) == ["swa"]

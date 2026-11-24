@@ -28,6 +28,24 @@ def engine_python() -> str:
     return sys.executable if importlib.util.find_spec("decoupled_engine") else "python3"
 
 
+def _argument_groups(args: list[str]) -> list[list[str]]:
+    """Keep each option with its following values, including negative numbers."""
+    groups = []
+    for arg in args:
+        if not groups or arg.startswith("--") or (arg.startswith("-") and arg[1:2].isalpha()):
+            groups.append([arg])
+        else:
+            groups[-1].append(arg)
+    return groups
+
+
+def merge_args(base: list[str], overrides: list[str]) -> list[str]:
+    """Replace options together with their values, keeping untouched groups."""
+    replaced = {group[0].split("=", 1)[0] for group in _argument_groups(overrides)}
+    return [arg for group in _argument_groups(base)
+            if group[0].split("=", 1)[0] not in replaced for arg in group] + overrides
+
+
 class Stack:
     def __init__(self, cfg: dict, hosts: list, rank: int, work_dir: Path):
         self.cfg, self.rank = cfg, rank
@@ -41,7 +59,10 @@ class Stack:
         if per_worker > gpus:
             raise SystemExit(f"gpus_per_worker is {per_worker}, but this host has {gpus} GPUs")
         total = (gpus // per_worker) * len(hosts)
-        self.workers = workers(self.ips, gpus, per_worker, cfg.get("prefill_workers") or total // 2)
+        self.workers = workers(self.ips, gpus, per_worker, cfg.get("prefill_workers") or total // 2,
+                               dp_attention=bool(cfg.get("dp_attention")))
+        # Engine flags and variables per starting role (static P/D only, see config()).
+        self.roles = cfg.get("roles") or {}
         self.mine = [w for w in self.workers if w.host == rank]
         self.head = self.ips[0]
         self.planner = cfg.get("planner")  # None: off; a dict of planner arguments: on
@@ -106,15 +127,29 @@ class Stack:
                 "--peer-kv-servicer-port", str(w.servicer_port),
                 "--disaggregation-late-d-control-port", str(w.late_decode_port),
                 "--kv-events-config", json.dumps({"publisher": "zmq", "endpoint": f"tcp://*:{w.events_port}",
-                                                  "replay_endpoint": f"tcp://*:{w.events_port + 1}"}),
+                                                  "replay_endpoint": f"tcp://*:{w.replay_port}"}),
                 "--enable-metrics", "--enable-cache-report", "--incremental-streaming-output"]
+        if w.dp > 1:
+            argv += ["--dp-size", str(w.dp), "--enable-dp-attention"]
         if cfg.get("context_length"):
             argv += ["--context-length", str(cfg["context_length"])]
         if nics:
             argv += ["--disaggregation-ib-device", json.dumps({str(g): n for g, n in nics.items()})]
         if self.planner is not None:
             argv += ["--sched-trace-dir", str(self.dir / "traces" / w.name)]
-        return argv + list(cfg.get("engine_args", []))
+        role = self.roles.get(w.role) or {}
+        return argv + merge_args(list(cfg.get("engine_args", [])), list(role.get("engine_args", [])))
+
+    def engine_env(self, w) -> dict:
+        """The variables of every engine, then those of the worker's starting role."""
+        role = self.roles.get(w.role) or {}
+        return {k: str(v) for k, v in {**(self.cfg.get("engine_env") or {}), **(role.get("engine_env") or {})}.items()}
+
+    def kv_instances(self) -> list:
+        """One KV-directory instance per worker and DP rank: (instance id, worker, rank, bridge index).
+        Without DP attention it is the worker's id 20001 + idx and bridge index idx."""
+        return [(20001 + w.idx + 1000 * r, w, r, r * len(self.workers) + w.idx)
+                for r in range(max(w.dp for w in self.workers)) for w in self.workers if r < w.dp]
 
     def check_ports(self):
         busy = []
@@ -132,12 +167,11 @@ class Stack:
         self.check_ports()
         nics = hardware.nic_map()
         env = {"SGLANG_HOST_IP": self.ips[self.rank],
-               "WITH_NVIDIA_PEERMEM": "1" if hardware.peer_memory() else "0",
-               **{k: str(v) for k, v in (self.cfg.get("engine_env") or {}).items()}}
+               "WITH_NVIDIA_PEERMEM": "1" if hardware.peer_memory() else "0"}
         print(f"host {self.rank}: {self.ips[self.rank]}, RDMA {nics or 'none'}, "
               f"peer memory {env['WITH_NVIDIA_PEERMEM']}", flush=True)
         for w in self.mine:
-            self.start(f"engine-{w.name}", self.engine_argv(w, nics), env)
+            self.start(f"engine-{w.name}", self.engine_argv(w, nics), {**env, **self.engine_env(w)})
         if self.planner is not None:
             (self.dir / "traces").mkdir(exist_ok=True)
             self.start("trace-server", [sys.executable, "-m", "evolving_infra.planner", "serve-traces",
@@ -155,10 +189,10 @@ class Stack:
         indexer = self.write("indexer.json", {
             "model_name": cfg["served_model_name"], "block_size": page, "eagle": self.eagle,
             "indexer_port": INDEXER_PORT, "query_port": INDEXER_QUERY_PORT, "threads": 4,
-            "workers": [{"instance_id": 20001 + w.idx, "events_endpoint": f"tcp://{w.ip}:{w.events_port}",
-                         "replay_endpoint": f"tcp://{w.ip}:{w.events_port + 1}",
-                         "bridge_pub_port": 26100 + 2 * w.idx, "bridge_replay_port": 26101 + 2 * w.idx}
-                        for w in ws]})
+            "workers": [{"instance_id": iid, "events_endpoint": f"tcp://{w.ip}:{w.events_port + r}",
+                         "replay_endpoint": f"tcp://{w.ip}:{w.replay_port + r}",
+                         "bridge_pub_port": 26100 + 2 * k, "bridge_replay_port": 26101 + 2 * k}
+                        for iid, w, r, k in self.kv_instances()]})
         shutil.rmtree(self.dir / "indexer", ignore_errors=True)
         self.start("indexer", [sys.executable, "-m", "evolving_infra.router.indexer", "--config", indexer,
                                "--output", str(self.dir / "indexer")])
@@ -191,8 +225,8 @@ class Stack:
                 "--tokenizer-path", cfg.get("tokenizer") or f"{model}/tokenizer.json",
                 "--policy", "symmetric_pd", "--request-timeout-secs", "3600", "--stale-request-timeout-secs", "3600",
                 "--kv-indexer-url", query,
-                "--kv-worker-map", json.dumps([{"id": 20001 + w.idx, "url": w.url,
-                                                "servicer": f"{w.ip}:{w.servicer_port}"} for w in ws])]
+                "--kv-worker-map", json.dumps([{"id": iid, "url": w.url, "servicer": f"{w.ip}:{w.servicer_port}"}
+                                               for iid, w, _, _ in self.kv_instances()])]
         for w in ws:
             p = int(w.role == "prefill")
             argv += ["--symmetric-pd-worker", f"{w.url},{w.bootstrap_port},{p},{1 - p}"]

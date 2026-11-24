@@ -1,3 +1,4 @@
+# Adapted from SGLang python/sglang/srt/eplb/eplb_manager.py (commit 297e54fd10), modified for evolving-infra.
 from __future__ import annotations
 
 import logging
@@ -26,6 +27,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def first_rebalance_num_iterations(interval: int, window) -> int:
+    """Passes before the first rebalance with SGLANG_V41_EPLB_EARLY_FIRST_REBALANCE:
+    interval // 4, as DeepSeek's reference engine (DeepInfer) does, then every
+    interval. Never fewer passes than the statistics window, so the first rebalance
+    sees a full window (window -1/None: unbounded or unset)."""
+    first = interval // 4
+    if window is not None and window > 0:
+        first = max(first, window)
+    return max(1, min(first, interval))
+
+
 class EPLBManager:
     def __init__(
         self,
@@ -49,6 +61,9 @@ class EPLBManager:
             get_exec().moe.eplb_rebalance_layers_per_chunk
         )
         self._rebalance_num_iterations = get_exec().moe.eplb_rebalance_num_iterations
+        self._early_first_rebalance_pending = (
+            envs.SGLANG_V41_EPLB_EARLY_FIRST_REBALANCE.get()
+        )
         self._rebalance_disabled_reason = None
         self._rebalance_disabled_logged = False
 
@@ -64,7 +79,12 @@ class EPLBManager:
             get_global_expert_distribution_recorder().start_record()
 
         logger.info(
-            f"[EPLBManager] system started, will rebalance per {self._rebalance_num_iterations} iterations."
+            f"[EPLBManager] system started, will rebalance per {self._rebalance_num_iterations} iterations"
+            + (
+                f" (first after {first_rebalance_num_iterations(self._rebalance_num_iterations, get_exec().moe.expert_distribution_recorder_buffer_size)})."
+                if self._early_first_rebalance_pending
+                else "."
+            )
         )
 
         self._main_generator = self._entrypoint()
@@ -87,9 +107,18 @@ class EPLBManager:
 
     # can be more complex if needed
     def _entrypoint(self):
+        num_iterations = self._rebalance_num_iterations
+        if self._early_first_rebalance_pending:
+            # Only the engine's first rebalance; a generator reset keeps the interval.
+            self._early_first_rebalance_pending = False
+            num_iterations = first_rebalance_num_iterations(
+                self._rebalance_num_iterations,
+                get_exec().moe.expert_distribution_recorder_buffer_size,
+            )
         while True:
-            for _ in range(self._rebalance_num_iterations):
+            for _ in range(num_iterations):
                 yield
+            num_iterations = self._rebalance_num_iterations
 
             yield from self.rebalance()
 

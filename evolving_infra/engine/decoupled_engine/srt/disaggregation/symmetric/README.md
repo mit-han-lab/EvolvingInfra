@@ -45,6 +45,32 @@ marks does not provide this guarantee. Cancellation before the owner has
 registered its export remains a separate limitation. CPU protocol coverage
 does not replace real-load cleanup validation.
 
+## DP attention
+
+With `--enable-dp-attention` and attention TP 1 (for example `--tp-size 4 --dp-size 4`), each DP rank
+of a worker has its own requests, radix tree and host tier, and the router addresses the worker as
+a whole. The worker's DP controller places the legs (`dp_placement.py`):
+
+- A decode leg goes to `planes.import_dp_rank(transfer_id)`. The prefill leg's owner computes the
+  same rank and sends its CHUNK_READY, FINAL and ABORT to that reader rank.
+- A prefill leg goes where the router's cache-first prefill selection would send it among the
+  ranks, with the router's default thresholds. If the ranks are imbalanced by more than 32
+  requests and 1.1 times, it goes to the least-loaded rank. Else, if the ranks holding the longest
+  prefix of its prompt hold more than half of it, it goes to the least loaded of them; otherwise to
+  the least-loaded rank. Least loaded means fewest requests, then fewest queued uncached tokens,
+  then the lowest rank. The controller tracks what each rank holds from the prompts it sent there (a
+  chained hash per page). So the next turn of a conversation returns to the rank that holds the
+  previous one, even when that rank's queue is longer.
+- Ties go to the lowest rank. On an idle worker, sequential requests that no rank holds a prefix of
+  therefore all go to rank 0. Rank 0's radix tree and host tier then hold all of them while the other
+  ranks stay empty, so a few long prompts can push one another out of rank 0's host tier. A tie needs
+  equal request counts and equal queued uncached tokens.
+
+Every publication names the owner's channel (`owner_addr`); the reader moves the import to that
+owner rank on the first one, and until then sends an ABORT to every rank of the prefill worker.
+Owner and reader registrations match on `kv_shard` (the part of a request's KV a rank holds,
+0 for every rank here) instead of `tp_rank`. The peer KV servicer is off under DP attention.
+
 ## Known gaps (bookkept TODOs)
 
 - **Reader-side host-pool READ for Split is not implemented.** The intended path is a per-page-range fallback

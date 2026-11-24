@@ -18,7 +18,7 @@ The engine takes SGLang's server arguments. These are the ones Evolving Infra ad
 | `--disaggregation-transfer-backend mooncake` | Move KV between workers with Mooncake over RDMA. |
 | `--disaggregation-ib-device JSON` | RDMA device of every GPU, e.g. `{"0": "mlx5_0", ...}`. List all GPUs the worker uses. Peer KV pulls use the same devices. |
 | `--disaggregation-bootstrap-port N` | Base port of the worker's KV transfer side channel; it uses two ports per GPU from N, so engines on one node need ranges that do not overlap. Must match the router's `--symmetric-pd-worker`. |
-| `--kv-events-config JSON` | Publish KV store and remove events over ZMQ for the KV directory. |
+| `--kv-events-config JSON` | Publish KV store and remove events over ZMQ for the KV directory. Under DP attention DP rank r publishes on the endpoint's port + r and replays on the replay endpoint's port + r. |
 | `--enable-metrics`, `--enable-cache-report` | Prometheus metrics and per-request cached-token counts. The router and planner read both. |
 | `--incremental-streaming-output` | Required by the frontend. |
 
@@ -29,12 +29,12 @@ them in one `Symmetric features:` line at startup.
 
 | Feature | Flags it sets | Default |
 |---|---|---|
-| Host KV tier | `--enable-hierarchical-cache`, `--hicache-write-policy write_through` | Host tier 4× the GPU cache with host dedup (4.445× with the peer KV servicer, which keeps 10 % for pulls), with host-pool auto-sizing (`--hicache-host-memory-fraction`) off; `--hicache-ratio` sets it |
+| Host KV tier | `--enable-hierarchical-cache`, `--hicache-write-policy write_through` | Host tier 4× the GPU cache with host dedup (4.445× with the peer KV servicer, which keeps 10 % for pulls), with host-pool auto-sizing (`--hicache-host-memory-fraction`) off; `--hicache-ratio` sets it. Without host dedup (DP attention, several nodes) auto-sizing picks the ratio, at most `--hicache-ratio`, so the host pools fit the fraction of host memory; for DeepSeek-V4 from the device bytes of the page state its host tier mirrors |
 | Host dedup | `--enable-dsa-hicache-host-dedup` (GLM-5.2), `--enable-mla-hicache-host-dedup` (Kimi-K2.6), `--enable-dsv4-hicache-host-dedup` (DeepSeek-V4) | The model's attention kind, on single-node TP. Each node stores a host page once instead of once per GPU |
-| Peer KV pulls | `--enable-peer-kv-servicer`, `--hicache-storage-backend dynamic` with the peer KV backend | On when `--disaggregation-ib-device` is set. The servicer listens on `--peer-kv-servicer-port` (default 18100) and the next ports, one per GPU; give each engine on a node its own range |
+| Peer KV pulls | `--enable-peer-kv-servicer`, `--hicache-storage-backend dynamic` with the peer KV backend | On when `--disaggregation-ib-device` is set, except under DP attention (its ranks would share one servicer port). The servicer listens on `--peer-kv-servicer-port` (default 18100) and the next ports, one per GPU; give each engine on a node its own range |
 | Late decode choice | `--disaggregation-late-d choose`, `--disaggregation-late-d-lead-mode need`, `--disaggregation-late-d-allocation-trigger first_chunk` | The router-link port is a free port, reported in `/server_info` |
 | Prefill work snapshot | `--enable-prefill-work-snapshot` | Read by the router's cost function |
-| KV session retention | `--enable-kv-session-retention` | On models with a FULL-only cache tree and on DeepSeek-V4: GLM-5.2, Kimi-K2.6, DeepSeek-V4-Flash. Without it the engine ignores the router's session tags |
+| KV session retention | `--enable-kv-session-retention` | On models with a FULL-only cache tree and on DeepSeek-V4: GLM-5.2, Kimi-K2.6, DeepSeek-V4-Flash; not under DP attention or with DP or PP above 1, which the engine refuses. Without it the engine ignores the router's session tags |
 
 ### Other flags
 
@@ -51,6 +51,8 @@ The engine keeps SGLang's `SGLANG_*` variables. Set these yourself:
 |---|---|
 | `SGLANG_HOST_IP` | Address Mooncake and the KV events advertise. Set it when the default route is not reachable from the other workers. |
 | `WITH_NVIDIA_PEERMEM=0` | Register GPU memory with RDMA through dma-buf. Set it on hosts without the `nvidia_peermem` module, such as GB300 nodes and gVisor sandboxes. |
+| `SGLANG_V41_DECODE_TOKEN_BLACKLIST` | Comma-separated token ids that are never sampled: -inf on the target model's next-token logits before sampling and speculative verify, as DeepSeek's reference engine masks them. `1` masks DeepSeek-V4.1's EOS, so a trace replay runs every output to its recorded length. Empty (default): off. |
+| `SGLANG_V41_EPLB_EARLY_FIRST_REBALANCE` | `1`: the first EPLB rebalance after `--eplb-rebalance-num-iterations` / 4 forward passes (at least the statistics window), as DeepSeek's reference engine does; later ones keep the full interval. Default off. |
 | `SGLANG_KV_EVENTS_WIRE_FORMAT` | Encoding of the published KV events. `ei_array` (default): positional msgpack arrays, the format the router's KV directory (`sgl-kv-indexer`) decodes, and replay replies framed `[empty, sequence, payload]` as the router's KV-event bridge reads them. `upstream_map`: SGLang's tagged maps and its replay framing with the topic frame, for consumers that expect upstream SGLang's format. |
 
 The features turn on the variables they use, and the engine logs them in one
@@ -197,7 +199,9 @@ holds what it cannot detect.
 | `page_size` | KV block size of engine, router and KV directory | 64 |
 | `context_length` | maximum prompt length | 1048576 for the frontend |
 | `gpus_per_worker` | TP size of one worker | all GPUs of a host; half of them on a single host |
+| `dp_attention` | every GPU of a worker is one DP-attention rank (`--dp-size` = `gpus_per_worker`, `--enable-dp-attention`); each rank publishes its KV events to its own KV-directory instance | `false` |
 | `prefill_workers` | workers that start as prefill | half of the workers |
+| `roles` | `prefill` and `decode`, each with `engine_args` and `engine_env` added to the workers that start in that role (an option replaces the shared one of the same name); for a fixed P/D split only, so not with `--planner` | none |
 | `retention` | KV session retention in the router; `false` for a model whose engine runs without it (a Mamba state, or sliding-window layers outside DeepSeek-V4) | `true` |
 | `tokenizer` | the `tokenizers` file the router reads | `<model>/tokenizer.json` |
 | `engine_env` | environment variables of every engine | none |

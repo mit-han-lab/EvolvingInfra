@@ -143,6 +143,68 @@ def test_paper_configs_pin_the_token_wait_without_the_global_queue():
         assert "--prefill-wait=tokens" in args and "--global-queue=false" in args, path
 
 
+def test_dp_attention_workers_publish_kv_events_per_rank(stack, tmp_path):
+    (tmp_path / "dp.yaml").write_text("model: /m\npage_size: 256\ngpus_per_worker: 4\ndp_attention: true\n")
+    s = stack(["--config", str(tmp_path / "dp.yaml")], hosts=("a", "b"))
+    w = s.workers[0]
+    assert (w.dp, w.events_port, w.replay_port) == (4, 5557, 5561)
+    assert len(set(w.ports())) == len(w.ports()) and set(range(5557, 5565)) <= set(w.ports())
+    argv = s.engine_argv(w, {})
+    assert argv[argv.index("--dp-size") + 1] == "4" and "--enable-dp-attention" in argv
+    events = json.loads(argv[argv.index("--kv-events-config") + 1])
+    assert (events["endpoint"], events["replay_endpoint"]) == ("tcp://*:5557", "tcp://*:5561")
+    # One KV-directory instance per worker and DP rank, every one mapped to its worker.
+    instances = s.kv_instances()
+    assert len(instances) == 8 and len({i for i, *_ in instances}) == 8 and len({k for *_, k in instances}) == 8
+    assert sorted(r for _, x, r, _ in instances if x is w) == [0, 1, 2, 3]
+    # Without DP attention each worker keeps one instance, id 20001 + idx, and one replay port.
+    plain = stack(["--config", "examples/gb300/glm52.yaml"], hosts=("a", "b"))
+    assert [(i, k) for i, _, _, k in plain.kv_instances()] == [(20001, 0), (20002, 1)]
+    assert plain.workers[0].replay_port == plain.workers[0].events_port + 1
+
+
+def test_roles_give_each_starting_role_its_engine_settings(stack, tmp_path):
+    (tmp_path / "r.yaml").write_text(
+        "model: /m\ngpus_per_worker: 4\nengine_args: [--trust-remote-code, --max-running-requests=256]\n"
+        "engine_env: {A: 1, B: 1}\nroles:\n  prefill: {engine_args: [--chunked-prefill-size=131072]}\n"
+        "  decode: {engine_args: [--max-running-requests, '512'], engine_env: {B: 2}}\n")
+    s = stack(["--config", str(tmp_path / "r.yaml")], hosts=("a", "b"))
+    p, d = s.workers
+    pa, da = s.engine_argv(p, {}), s.engine_argv(d, {})
+    assert "--chunked-prefill-size=131072" in pa and "--max-running-requests=256" in pa
+    assert da[da.index("--max-running-requests") + 1] == "512" and "--max-running-requests=256" not in da
+    assert s.engine_env(p) == {"A": "1", "B": "1"} and s.engine_env(d) == {"A": "1", "B": "2"}
+    with pytest.raises(SystemExit):
+        stack(["--config", str(tmp_path / "r.yaml"), "--planner"])
+
+
+def test_a_child_config_merges_the_roles_of_its_base(tmp_path):
+    from evolving_infra.launch.__main__ import load
+    (tmp_path / "base.yaml").write_text(
+        "model: /m\nroles:\n  prefill: {engine_args: [--a=1, --b=1], engine_env: {X: 1}}\n"
+        "  decode: {engine_args: [--d=1]}\n")
+    (tmp_path / "top.yaml").write_text("base: base.yaml\nroles:\n  prefill: {engine_args: [--b=2], engine_env: {Y: 2}}\n")
+    roles = load(tmp_path / "top.yaml")["roles"]
+    assert roles["prefill"] == {"engine_args": ["--a=1", "--b=2"], "engine_env": {"X": 1, "Y": 2}}
+    assert roles["decode"] == {"engine_args": ["--d=1"]}
+
+
+def test_v41_6p6d_config_is_a_static_dp4_split(stack):
+    # Two hosts here: one prefill worker instead of six.
+    s = stack(["--config", "examples/gb300/v41-flash-6p6d-ep4.yaml", "--prefill-workers", "1"], hosts=("a", "b"))
+    assert s.cfg["dp_attention"] and not s.retention and s.cfg["page_size"] == 256
+    assert s.cfg["engine_env"]["SGLANG_V41_DECODE_TOKEN_BLACKLIST"] == 1
+    assert "--pd-late-decode=off" in s.cfg["router_args"]
+    p, d = (s.engine_argv(w, {}) for w in s.workers)
+    assert "--ep-num-redundant-experts=16" in p and "--eplb-rebalance-num-iterations=1000" in p
+    assert "--ep-num-redundant-experts=4" in d and "--eplb-rebalance-num-iterations=10000" in d
+    assert "--dp-size" in p and "--enable-dp-attention" in d
+    assert all("--enable-request-time-stats-logging" in argv and "--speculative-algorithm=DSPARK" in argv
+               for argv in (p, d))
+    with pytest.raises(SystemExit):
+        stack(["--config", "examples/gb300/v41-flash-6p6d-ep4.yaml", "--planner"])
+
+
 def test_a_config_keeps_the_router_flags_and_env_of_its_base(tmp_path):
     from evolving_infra.launch.__main__ import load
     (tmp_path / "base.yaml").write_text(

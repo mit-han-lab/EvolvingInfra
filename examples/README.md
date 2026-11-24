@@ -8,6 +8,7 @@ own settings in [`modal/stack.py`](modal/stack.py).
 |---|---|---|
 | [GB300, GLM-5.2](gb300/README.md) | [`gb300/glm52.yaml`](gb300/glm52.yaml), [`gb300/glm52-1node.yaml`](gb300/glm52-1node.yaml) | the paper's main experiment |
 | GB300, Kimi-K2.6 | [`gb300/kimi-k26.yaml`](gb300/kimi-k26.yaml) | the paper's OSWorld experiment ([`benchmarks/osworld`](../benchmarks/osworld/README.md)) |
+| GB300, DeepSeek-V4.1-Flash | [`gb300/v41-flash.yaml`](gb300/v41-flash.yaml), [`gb300/v41-flash-6p6d-ep4.yaml`](gb300/v41-flash-6p6d-ep4.yaml) | one EP4 / DP4-attention worker per node; a static 6P6D split on 12 nodes |
 | [H200, DeepSeek-V4-Flash](h200/README.md) | [`h200/dsv4-flash.yaml`](h200/dsv4-flash.yaml) | the paper's H200 setup |
 
 | Where it runs | How |

@@ -1,0 +1,56 @@
+# DeepSeek-V4.1-Flash on GB300: one worker per 4-GPU node, each GPU a DP-attention rank, experts
+# over the node's 4 GPUs (EP4, DeepGEMM Mega MoE), DSpark speculative decoding with 5 drafts, and
+# DeepSeek's EPLB values per role. A config that starts from this one sets the split and the
+# workload; `examples/gb300/v41-flash-6p6d-ep4.yaml` is the 12-node static one.
+
+model: /models/DeepSeek-V4.1-Flash
+served_model_name: deepseek-v4.1-flash
+page_size: 256                 # the engine forces 256 for DeepSeek-V4
+context_length: 1048576
+gpus_per_worker: 4
+dp_attention: true             # every GPU of a worker is one DP-attention rank (--dp-size 4)
+retention: false               # the engines refuse KV session retention under DP attention
+engine_args:
+  - --trust-remote-code
+  - --ep-size=4
+  - --moe-a2a-backend=megamoe
+  - --enable-dp-lm-head
+  - --speculative-algorithm=DSPARK
+  - --speculative-dspark-block-size=5
+  - --mem-fraction-static=0.85            # weights, MegaMoE buffers and KV; the derived default leaves no KV
+  - --chunked-prefill-size=131072         # 32,768 prefill tokens per DP rank and step
+  - --max-prefill-tokens=32768
+  - --enable-eplb
+  - --expert-balancedness-report-mode=server_log
+  - --dist-timeout=3600
+  - --watchdog-timeout=3600
+engine_env:
+  SGLANG_DSV4_KV_LAYOUT: v41_new                         # FlashMLA's per-token interleaved V4.1 caches
+  SGLANG_OPT_DSV41_MEGA_MHC_PREFILL: 1
+  SGLANG_OPT_DEEPGEMM_MEGA_GATE: 1                       # decode and verify steps only
+  SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK: 65536  # covers a 32,768-token prefill step
+  SGLANG_V41_EPLB_EARLY_FIRST_REBALANCE: 1               # first rebalance after interval // 4 passes
+# A worker keeps the settings of its starting role, so these need fixed roles (no --planner).
+# DeepSeek's EPLB values: prefill 4 redundant experts per GPU, a 100-pass window, rebalance every
+# 1,000 passes; decode 1 per GPU, 1,000 and 10,000. Batches: 64 prefill and 128 decode
+# sequences per DP rank.
+roles:
+  prefill:
+    engine_args:
+      - --max-running-requests=256
+      - --ep-num-redundant-experts=16
+      - --expert-distribution-recorder-buffer-size=100
+      - --eplb-rebalance-num-iterations=1000
+  decode:
+    engine_args:
+      - --max-running-requests=512
+      - --cuda-graph-max-bs-decode=128
+      - --ep-num-redundant-experts=4
+      - --expert-distribution-recorder-buffer-size=1000
+      - --eplb-rebalance-num-iterations=10000
+      - --chunked-prefill-size=65536      # a decode worker prefills only a failed import's fallback
+    engine_env:
+      SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK: 16384  # smaller MegaMoE buffers, more KV
+router_args:
+  - --pd-late-decode=off                   # late decode choice needs single-engine workers (no DP attention)
+  - --symmetric-pd-p-select=cache-first    # the cost function reads single-DP-rank load snapshots
