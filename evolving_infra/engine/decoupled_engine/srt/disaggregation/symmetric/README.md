@@ -14,6 +14,13 @@ than the old 30-second TTL plus cooling period. Export timeout requests
 revocation; it does not authorize page reuse. A cancelled prefill chunk also
 waits for its outstanding GPU result before returning its pages.
 
+Each export also holds one of its rank's aux slots (2 x `--max-running-requests`)
+from the P-leg's arrival until the export ends. A P-leg that finds every slot
+taken waits for one in arrival order, holding no slot and no KV, and begins its
+export when a release frees one. `/server_info` reports, under
+`symmetric_pd.export_table`, the P-legs waiting now (`aux_waiting`), the P-legs
+that have waited (`aux_waited`) and the longest wait (`aux_wait_max_s`).
+
 Reader cancellation drains queued/running chunk and aux reads before sending
 ABORT or allowing destination pages to be freed. This wait is on the failure
 path; successful reads retain the existing chunk/FINAL/DONE protocol. Pending

@@ -15,7 +15,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
+from collections import deque
+from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 import msgspec
 
@@ -749,6 +750,12 @@ class ExportTable:
         self.stats_held_timeout = 0
         self.stats_held_released = 0
         self.stats_held_max_s = 0.0
+        # P-legs that found every aux slot taken (exports waiting for their
+        # readers): (req, since) in arrival order. They hold no slot and no KV;
+        # begin_waiting begins them as releases free slots.
+        self._aux_waiting: Deque[Tuple[Req, float]] = deque()
+        self.stats_aux_waited = 0
+        self.stats_aux_wait_max_s = 0.0
         # Owners whose SWA can be missing below some token (scheduler_mixin.py):
         # req -> first token with a live SWA page; SWA pages below are
         # announced as -1. Non-uniform owners use owner_swa_valid_floor, DSv4
@@ -832,6 +839,40 @@ class ExportTable:
         )
         self.owner_plane.begin_export(mark, req.rid)
         return True
+
+    def begin_or_wait(self, req: Req) -> bool:
+        """Begin a P-leg's export (True), or keep the P-leg waiting for an aux
+        slot (False) when none is free or P-legs already wait: slots go in
+        arrival order. begin_waiting hands it back once a release frees one."""
+        if not self._aux_waiting and self.begin_export(req):
+            return True
+        self._aux_waiting.append((req, self.clock()))
+        self.stats_aux_waited += 1
+        return False
+
+    def begin_waiting(self) -> List[Req]:
+        """Begin the waiting P-legs that the free aux slots take, in arrival
+        order. Called after poll_released, at the same point of every rank's
+        pass, so the ranks' allocators stay alike."""
+        begun = []
+        while self._aux_waiting and self.begin_export(self._aux_waiting[0][0]):
+            req, since = self._aux_waiting.popleft()
+            self.stats_aux_wait_max_s = max(self.stats_aux_wait_max_s, self.clock() - since)
+            begun.append(req)
+        return begun
+
+    def abort_waiting(self, rid: str, abort_all: bool) -> List[Req]:
+        """Remove and return the waiting P-legs an abort names."""
+        gone = [r for r, _ in self._aux_waiting if abort_all or r.rid.startswith(rid)]
+        if gone:
+            ids = {id(r) for r in gone}
+            self._aux_waiting = deque(w for w in self._aux_waiting if id(w[0]) not in ids)
+        return gone
+
+    @property
+    def aux_waiting(self) -> int:
+        """P-legs waiting for an aux slot now."""
+        return len(self._aux_waiting)
 
     def publish_progress(self, req: Req, end_idx: int) -> Optional[ChunkReady]:
         """Publish the prefill chunk that just completed (pages [published_end,
