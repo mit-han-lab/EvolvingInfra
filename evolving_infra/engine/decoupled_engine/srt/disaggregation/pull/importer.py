@@ -12,9 +12,10 @@ READY. Homogeneous TP only: rank i reads rank i.
 
 Threading: the scheduler thread calls begin_import / poll / final_meta /
 failure_reason / abort_import. One daemon IO thread owns the ZMQ sockets and
-runs the protocol state machine; a small thread pool runs the blocking READs.
-``dst_pages`` is invoked on the IO thread and must be a read-only lookup of
-pages the scheduler allocated before begin_import.
+runs the protocol state machine; a small thread pool resolves destination
+pages and runs the blocking READs. ``dst_pages`` is a thread-safe, read-only
+lookup of pages the scheduler allocated before begin_import. A lookup and its
+READ share one in-flight reservation, including while cancellation drains it.
 
 Late D (disaggregation/late_d.py): the scheduler of
 reader rank 0 attaches a late inbox (``set_late_inbox``). The IO thread then
@@ -590,32 +591,37 @@ class ReaderPlane:
                 imp.last_seq = chunk.chunk_seq
             imp.max_token_end = max(imp.max_token_end, chunk.token_end)
             imp.inflight += 1
-        try:
-            # Phases of this IO thread are named io.* (phase_timers.py).
-            with phase("io.dst_pages"):
-                local_pages = imp.dst_pages(chunk)
-        except Exception as e:
-            self._fail(imp, f"dst_pages:{e}")
-            self._read_finished(imp)
-            return
         self.stats_tier_served[chunk.tier] = (
             self.stats_tier_served.get(chunk.tier, 0) + 1
         )
-        self._pool.submit(self._read_chunk, imp, chunk, local_pages, owner_reg)
+        self._pool.submit(self._read_chunk, imp, chunk, owner_reg)
 
     def _read_chunk(
         self,
         imp: _Import,
         chunk: ChunkReady,
-        local_pages: Dict[str, Sequence[int]],
         owner_reg: Registration,
     ) -> None:
-        t0 = time.time()
         with imp.lock:
             cancelled = imp.pending_terminal is not None
         if cancelled:
             self._read_finished(imp)
             return
+        try:
+            # Page translation can wait for CUDA; keep the socket thread free
+            # to receive FINAL, ABORT and controls for other imports.
+            with phase("xfer.dst_pages"):
+                local_pages = imp.dst_pages(chunk)
+        except Exception as e:
+            self._fail(imp, f"dst_pages:{e}")
+            self._read_finished(imp)
+            return
+        with imp.lock:
+            cancelled = imp.pending_terminal is not None
+        if cancelled:
+            self._read_finished(imp)
+            return
+        t0 = time.time()
         with imp.lock:
             if imp.timeline["first_read_start_at"] is None:
                 imp.timeline["first_read_start_at"] = t0

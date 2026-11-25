@@ -24,9 +24,10 @@ pass: ``launch_gap_after_idle``). Every phase that ends inside that window is
 also summed per window; a gap above ``SGLANG_SCHED_LAUNCH_GAP_LOG_MS`` (default
 30) is logged on every rank with those per-phase times ("Scheduler launch gap
 ..."), at most ``SGLANG_SCHED_LAUNCH_GAP_LOG_PER_MIN`` lines per 60 s. Phases
-of other threads (``xfer.*``: reader transfer threads, ``io.*``: reader IO
-thread) are in the same table, so a window shows the plane work that ran
-during it. Nested phases are listed separately (names with dots nest).
+of the reader transfer threads (``xfer.*``, including the destination-page
+lookup ``xfer.dst_pages``) are in the same table, so a window shows the plane
+work that ran during it. Nested phases are listed separately (names with dots
+nest).
 """
 
 from __future__ import annotations

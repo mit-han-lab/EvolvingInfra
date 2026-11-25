@@ -646,7 +646,9 @@ planner = [
 ]
 test = [
     { name = "httpx" },
+    { name = "msgspec" },
     { name = "pytest" },
+    { name = "pyzmq" },
 ]
 
 [package.metadata]
@@ -659,6 +661,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'indexer'", specifier = "<0.142" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27" },
     { name = "msgpack", marker = "extra == 'indexer'", specifier = ">=1" },
+    { name = "msgspec", marker = "extra == 'test'", specifier = ">=0.19" },
     { name = "numpy", marker = "extra == 'planner'", specifier = ">=1.26" },
     { name = "orjson", marker = "extra == 'frontend'", specifier = ">=3.10,<4" },
     { name = "pillow", marker = "extra == 'frontend'", specifier = ">=10" },
@@ -666,6 +669,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "pyzmq", marker = "extra == 'indexer'", specifier = ">=25" },
+    { name = "pyzmq", marker = "extra == 'test'", specifier = ">=25" },
     { name = "scipy", marker = "extra == 'planner'", specifier = ">=1.11" },
     { name = "uvicorn", marker = "extra == 'frontend'", specifier = ">=0.30,<1" },
 ]
